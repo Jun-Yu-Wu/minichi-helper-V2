@@ -224,6 +224,24 @@ References:
 
 ## Manual And Mobile Acceptance Checks
 
+### Role-perspective UI review
+
+- Every new or materially changed helper screen is reviewed from the helper's
+  point of view during an active mobile live-shopping trip.
+- Every new or materially changed admin screen is reviewed from the admin's
+  point of view while coordinating helpers and reviewing returned work.
+- Helper screens make the next action, current status, pending state, retry
+  option, and blocked/end/cancel reason clear without backend terminology.
+- Helper screens do not expose admin-only decisions, other helpers' private
+  data, merge controls, or final operational orders.
+- Admin screens make current trip/helper/task context, pending reviews, and
+  available admin actions scannable before the admin acts.
+- Admin screens separate live monitoring, task publishing, review decisions,
+  settlement/payment actions, and final merge actions so destructive or final
+  actions are not accidentally triggered from an ambiguous context.
+- The UI does not need to be visually refined, but it must be usable and
+  reasonable for the role's actual workflow.
+
 ### Mobile helper flow
 
 - Helper logs in on phone.

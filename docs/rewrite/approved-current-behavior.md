@@ -1,5 +1,10 @@
 # Approved Current Behavior
 
+> Superseded behavior note, 2026-06-22: for the clean helper rewrite, use
+> `minichi_helper_system/docs/rewrite/latest-helper-operation-spec.md` as the
+> authoritative product behavior source. This document remains a legacy behavior
+> baseline for comparison, regression checks, and migration context.
+
 This document records the current helper-system behavior that the Next.js rewrite must preserve. The current UI and operating logic have been manually verified by the product owner, so this is an acceptance baseline, not a redesign brief.
 
 References:
