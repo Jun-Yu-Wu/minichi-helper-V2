@@ -69,6 +69,35 @@ export async function deactivateHelperAction(formData: FormData) {
   }
 }
 
+export async function updateHelperAction(
+  _previousState: AdminActionResult,
+  formData: FormData,
+): Promise<AdminActionResult> {
+  try {
+    await requireAdmin();
+    await service.updateHelperProfile(
+      database.getDatabasePool(),
+      formText(formData, "helperId"),
+      {
+        authUserId: formText(formData, "authUserId"),
+        bankAccountName: formText(formData, "bankAccountName"),
+        bankAccountNumber: formText(formData, "bankAccountNumber"),
+        bankCode: formText(formData, "bankCode"),
+        compensationMode: formText(formData, "compensationMode") || "hourly",
+        displayName: formText(formData, "displayName"),
+        email: formText(formData, "email"),
+        helperFxRate: formText(formData, "helperFxRate"),
+        hourlyRateTwd: formText(formData, "hourlyRateTwd"),
+        region: formText(formData, "region"),
+      },
+    );
+    revalidatePath("/admin");
+    return { ok: true };
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
 export async function createTripAction(
   _previousState: AdminActionResult,
   formData: FormData,
@@ -96,6 +125,7 @@ export async function createQuoteTaskAction(
 ): Promise<AdminActionResult> {
   try {
     const admin = await requireAdmin();
+    const uploadedPhotosJson = formText(formData, "uploadedPhotosJson");
     await service.createQuoteTask(database.getDatabasePool(), {
       actorUserId: admin.user.id,
       instruction: formText(formData, "instruction"),
@@ -103,12 +133,111 @@ export async function createQuoteTaskAction(
       productName: formText(formData, "productName"),
       taskType: formText(formData, "taskType"),
       tripId: formText(formData, "tripId"),
+      uploadedPhotos: uploadedPhotosJson ? JSON.parse(uploadedPhotosJson) : [],
     });
     revalidatePath("/admin");
     return { ok: true };
   } catch (error) {
     return actionError(error);
   }
+}
+
+export async function createPurchaseTaskAction(
+  _previousState: AdminActionResult,
+  formData: FormData,
+): Promise<AdminActionResult> {
+  try {
+    const admin = await requireAdmin();
+    const referencePhotosJson = formText(formData, "referencePhotosJson");
+    await service.createPurchaseTask(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      lineCommunityName: formText(formData, "lineCommunityName"),
+      note: formText(formData, "note"),
+      originalPriceJpy: formText(formData, "originalPriceJpy"),
+      productName: formText(formData, "productName"),
+      quantity: formText(formData, "quantity"),
+      referencePhotos: referencePhotosJson ? JSON.parse(referencePhotosJson) : [],
+      requiresFaceCheck: formData.get("requiresFaceCheck") === "on",
+      salePriceTwd: formText(formData, "salePriceTwd"),
+      tripId: formText(formData, "tripId"),
+    });
+    revalidatePath("/admin");
+    return { ok: true };
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
+export async function quickPublishPurchaseTaskAction(
+  _previousState: AdminActionResult,
+  formData: FormData,
+): Promise<AdminActionResult> {
+  try {
+    const admin = await requireAdmin();
+    await service.quickPublishPurchaseTask(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      lineCommunityName: formText(formData, "lineCommunityName"),
+      note: formText(formData, "note"),
+      originalPriceJpy: formText(formData, "originalPriceJpy"),
+      productName: formText(formData, "productName"),
+      quantity: formText(formData, "quantity"),
+      quoteTaskPhotoId: formText(formData, "quoteTaskPhotoId"),
+      requiresFaceCheck: formData.get("requiresFaceCheck") === "on",
+      salePriceTwd: formText(formData, "salePriceTwd"),
+      tripId: formText(formData, "tripId"),
+    });
+    revalidatePath("/admin");
+    return { ok: true };
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
+export async function reviewFaceCheckPurchaseAction(formData: FormData) {
+  try {
+    const admin = await requireAdmin();
+    await service.reviewFaceCheckPurchaseTask(database.getDatabasePool(), {
+      action: formText(formData, "reviewAction"),
+      actorUserId: admin.user.id,
+      adminReviewNote: formText(formData, "adminReviewNote"),
+      purchaseTaskId: formText(formData, "purchaseTaskId"),
+    });
+    revalidatePath("/admin");
+  } catch (error) {
+    console.error("Face-check review action failed", error);
+  }
+}
+
+export async function reviewSettlementAction(formData: FormData) {
+  const admin = await requireAdmin();
+  await service.reviewSettlement(database.getDatabasePool(), {
+    action: formText(formData, "reviewAction"),
+    actorUserId: admin.user.id,
+    adminReviewNote: formText(formData, "adminReviewNote"),
+    jpyToTwdRate: formText(formData, "jpyToTwdRate"),
+    settlementId: formText(formData, "settlementId"),
+    transportDecision: formText(formData, "transportDecision"),
+  });
+  revalidatePath("/admin");
+}
+
+export async function recordSettlementPaymentAction(formData: FormData) {
+  const admin = await requireAdmin();
+  await service.recordSettlementPayment(database.getDatabasePool(), {
+    actorUserId: admin.user.id,
+    settlementId: formText(formData, "settlementId"),
+    transferNotification: formText(formData, "transferNotification"),
+  });
+  revalidatePath("/admin");
+}
+
+export async function reviewWarehouseProofAction(formData: FormData) {
+  const admin = await requireAdmin();
+  await service.reviewWarehouseProof(database.getDatabasePool(), {
+    actorUserId: admin.user.id,
+    settlementId: formText(formData, "settlementId"),
+  });
+  revalidatePath("/admin");
 }
 
 export async function activateTripAction(formData: FormData) {

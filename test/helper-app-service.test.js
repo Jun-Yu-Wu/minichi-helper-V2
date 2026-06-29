@@ -19,22 +19,29 @@ function tripFieldsWithDayOffset(offsetDays, timezone = "Asia/Tokyo") {
   };
 }
 
-test("groups trips by each trip timezone", () => {
+test("groups helper trips by work status and keeps recent completed trips", () => {
   const now = new Date("2026-06-22T15:30:00.000Z");
   const groups = service.groupTripsByLocalDate(
     [
-      { business_date: "2026-06-23", status: "scheduled", timezone: "Asia/Tokyo" },
-      { business_date: "2026-06-22", status: "scheduled", timezone: "Pacific/Honolulu" },
-      { business_date: "2026-06-24", status: "scheduled", timezone: "Asia/Tokyo" },
+      { business_date: "2026-06-27", status: "scheduled", timezone: "Asia/Tokyo" },
+      { business_date: "2026-06-20", status: "scheduled", timezone: "Asia/Tokyo" },
+      { business_date: "2026-06-20", status: "active", timezone: "Asia/Tokyo" },
+      { business_date: "2026-06-22", status: "departed", timezone: "Asia/Tokyo" },
       { business_date: "2026-06-23", status: "ended", timezone: "Asia/Tokyo" },
+      { business_date: "2026-06-01", ended_at: "2026-06-23T08:00:00.000Z", status: "ended", timezone: "Asia/Tokyo" },
+      { business_date: "2026-06-19", status: "ended", timezone: "Asia/Tokyo" },
+      { business_date: "2026-06-24", status: "canceled", timezone: "Asia/Tokyo" },
     ],
     now,
   );
 
-  assert.equal(groups.today.length, 2);
-  assert.equal(groups.today[0].timezone, "Asia/Tokyo");
-  assert.equal(groups.upcoming.length, 1);
-  assert.equal(groups.history.length, 1);
+  assert.equal(groups.notStarted.length, 2);
+  assert.equal(groups.inProgress.length, 2);
+  assert.equal(groups.completed.length, 2);
+  assert.equal(groups.completed.some((trip) => trip.business_date === "2026-06-01"), true);
+  assert.deepEqual(groups.today, groups.inProgress);
+  assert.deepEqual(groups.upcoming, groups.notStarted);
+  assert.deepEqual(groups.history, groups.completed);
 });
 
 test("groups pg date objects by yyyy-mm-dd in the trip timezone", () => {
@@ -50,8 +57,29 @@ test("groups pg date objects by yyyy-mm-dd in the trip timezone", () => {
     now,
   );
 
-  assert.equal(groups.today.length, 1);
+  assert.equal(groups.notStarted.length, 1);
   assert.equal(service.dateOnly(new Date("2026-06-23T00:00:00.000Z"), "Asia/Tokyo"), "2026-06-23");
+});
+
+test("lists customer nickname suggestions from the Supabase main customer master", async () => {
+  const queries = [];
+  const database = {
+    async query(sql) {
+      queries.push({ sql });
+      return {
+        rows: [
+          { line_community_name: "小明" },
+          { line_community_name: "阿美" },
+        ],
+      };
+    },
+  };
+
+  const nicknames = await service.listCustomerNicknames(database);
+
+  assert.deepEqual(nicknames, ["小明", "阿美"]);
+  assert.match(queries[0].sql, /from main\.customers/);
+  assert.match(queries[0].sql, /order by line_community_name asc/);
 });
 
 test("helper departure rejects inactive helpers before trip mutation", async () => {
@@ -282,7 +310,7 @@ test("site photo batch commit is idempotent by submission id", async () => {
   );
 });
 
-test("site photo batch commit rejects inactive trip states", async () => {
+test("site photo batch commit rejects trips before admin activation", async () => {
   const database = fakeDatabase([
     { rows: [{ id: "helper-1", is_active: true }] },
     {
@@ -313,11 +341,11 @@ test("site photo batch commit rejects inactive trip states", async () => {
         submissionId: "submission-1",
         tripId: "trip-1",
       }),
-    /active trips/,
+    /after the trip is active/,
   );
 });
 
-test("site photo batch commit rejects non-today trips even when active", async () => {
+test("site photo batch commit allows any assigned active trip regardless of date", async () => {
   const database = fakeDatabase([
     { rows: [{ id: "helper-1", is_active: true }] },
     {
@@ -327,29 +355,46 @@ test("site photo batch commit rejects non-today trips even when active", async (
           id: "trip-1",
           status: "active",
           version: 3,
-          ...tripFieldsWithDayOffset(1),
+          ...tripFieldsWithDayOffset(-5),
+        },
+      ],
+    },
+    { rows: [] },
+    { rows: [{ id: "batch-1" }] },
+    { rows: [] },
+    { rows: [] },
+    { rows: [] },
+    {
+      rows: [
+        {
+          id: "batch-1",
+          photos: [
+            {
+              client_photo_id: "photo-client-1",
+              sort_order: 0,
+              storage_key: "helper-app/trip-1/site-photos/photo-client-1.jpg",
+            },
+          ],
         },
       ],
     },
   ]);
 
-  await assert.rejects(
-    () =>
-      service.submitSitePhotoBatch(database, {
-        authUserId: "user-1",
-        photos: [
-          {
-            clientPhotoId: "photo-client-1",
-            contentType: "image/jpeg",
-            sortOrder: 0,
-            storageKey: "helper-app/trip-1/site-photos/photo-client-1.jpg",
-          },
-        ],
-        submissionId: "submission-1",
-        tripId: "trip-1",
-      }),
-    /today/,
-  );
+  const batch = await service.submitSitePhotoBatch(database, {
+    authUserId: "user-1",
+    photos: [
+      {
+        clientPhotoId: "photo-client-1",
+        contentType: "image/jpeg",
+        sortOrder: 0,
+        storageKey: "helper-app/trip-1/site-photos/photo-client-1.jpg",
+      },
+    ],
+    submissionId: "submission-1",
+    tripId: "trip-1",
+  });
+
+  assert.equal(batch.id, "batch-1");
 });
 
 test("admin save site photo updates media retention and writes audit event", async () => {
@@ -452,6 +497,71 @@ test("admin quote task creation uses selected trip photos as task evidence", asy
   assert.equal(auditQuery.params[4], "admin_quote_task_created");
 });
 
+test("admin detail task creation requires uploaded photos and stores them as task evidence", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [
+          {
+            assigned_helper_id: "helper-1",
+            id: "trip-1",
+            status: "active",
+            ...todayTripFields(),
+          },
+        ],
+      },
+      { rows: [{ id: "quote-task-detail-1", task_type: "detail" }] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [] },
+      {
+        rows: [
+          {
+            id: "quote-task-detail-1",
+            photos: [
+              {
+                id: "quote-photo-detail-1",
+                source_site_photo_id: null,
+                storage_key: "helper-app/trip-1/admin-task-photos/upload-1.jpg",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    queries,
+  );
+
+  const task = await service.createQuoteTask(database, {
+    actorUserId: "admin-user-1",
+    photoIds: [],
+    taskType: "detail",
+    tripId: "trip-1",
+    uploadedPhotos: [
+      {
+        byteSize: 1024,
+        contentType: "image/jpeg",
+        originalFilename: "detail-source.jpg",
+        sortOrder: 0,
+        storageKey: "helper-app/trip-1/admin-task-photos/upload-1.jpg",
+      },
+    ],
+  });
+
+  assert.equal(task.id, "quote-task-detail-1");
+  const mediaQuery = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.media_objects"),
+  );
+  assert.ok(mediaQuery);
+  assert.equal(mediaQuery.params[0], "helper-app/trip-1/admin-task-photos/upload-1.jpg");
+  const taskPhotoQuery = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.quote_task_photos"),
+  );
+  assert.ok(taskPhotoQuery);
+  assert.equal(taskPhotoQuery.params[3], null);
+});
+
 test("quote and detail reply validates active ownership and writes durable detail media", async () => {
   const queries = [];
   const database = fakeDatabase(
@@ -528,6 +638,439 @@ test("quote and detail reply validates active ownership and writes durable detai
   );
   assert.ok(auditQuery);
   assert.equal(auditQuery.params[4], "helper_quote_photo_replied");
+});
+
+test("admin manual purchase task creation writes an open staging workflow task", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [
+          {
+            assigned_helper_id: "helper-1",
+            id: "trip-1",
+            status: "active",
+            ...todayTripFields(),
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            id: "purchase-task-1",
+            requires_face_check: false,
+            status: "open",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      { rows: [] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [] },
+      {
+        rows: [
+          {
+            id: "purchase-task-1",
+            photos: [
+              {
+                photo_role: "manual_reference",
+                storage_key: "purchase-reference-1",
+              },
+            ],
+            requires_face_check: false,
+            status: "open",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+    ],
+    queries,
+  );
+
+  const task = await service.createPurchaseTask(database, {
+    actorUserId: "admin-user-1",
+    lineCommunityName: "客人A",
+    productName: "測試商品",
+    quantity: "2",
+    originalPriceJpy: "1200",
+    referencePhotos: [
+      {
+        byteSize: 123,
+        contentType: "image/png",
+        originalFilename: "reference.png",
+        sortOrder: 0,
+        storageKey: "purchase-reference-1",
+      },
+    ],
+    salePriceTwd: "380",
+    tripId: "trip-1",
+  });
+
+  assert.equal(task.id, "purchase-task-1");
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("insert into helper_app.purchase_tasks")),
+    true,
+  );
+  const auditQuery = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.trip_audit_events"),
+  );
+  assert.ok(auditQuery);
+  assert.equal(auditQuery.params[4], "admin_purchase_task_created");
+});
+
+test("helper completes a purchase task and creates completed-only staging preview", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      { rows: [{ id: "helper-1", is_active: true }] },
+      {
+        rows: [
+          {
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            line_community_name: "客人A",
+            product_name: "測試商品",
+            quantity: 3,
+            original_price_jpy: 1200,
+            requires_face_check: false,
+            sale_price_twd: 380,
+            status: "open",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            assigned_helper_id: "helper-1",
+            id: "trip-1",
+            status: "active",
+            version: 3,
+            ...todayTripFields(),
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            completed_quantity: 2,
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            line_community_name: "客人A",
+            product_name: "測試商品",
+            original_price_jpy: 1200,
+            sale_price_twd: 380,
+            source_quote_reply_id: null,
+            source_quote_task_id: null,
+            source_quote_task_photo_id: null,
+            status: "completed",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      { rows: [{ id: "preview-1" }] },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const task = await service.respondPurchaseTask(database, {
+    action: "complete",
+    authUserId: "user-1",
+    completedQuantity: "2",
+    idempotencyKey: "purchase-response-1",
+    purchaseTaskId: "purchase-task-1",
+    unavailableQuantity: "1",
+  });
+
+  assert.equal(task.status, "completed");
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("insert into helper_app.staging_order_previews")),
+    true,
+  );
+  const auditQuery = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.trip_audit_events"),
+  );
+  assert.ok(auditQuery);
+  assert.equal(auditQuery.params[4], "helper_purchase_completed");
+});
+
+test("admin face-check approval waits for helper final confirmation", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [
+          {
+            id: "purchase-task-1",
+            requires_face_check: true,
+            status: "review_pending",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            id: "purchase-task-1",
+            status: "approved_pending_helper_confirmation",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const task = await service.reviewFaceCheckPurchaseTask(database, {
+    action: "approve",
+    actorUserId: "admin-user-1",
+    purchaseTaskId: "purchase-task-1",
+  });
+
+  assert.equal(task.status, "approved_pending_helper_confirmation");
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("insert into helper_app.staging_order_previews")),
+    false,
+  );
+  const auditQuery = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.trip_audit_events"),
+  );
+  assert.ok(auditQuery);
+  assert.equal(auditQuery.params[4], "admin_face_check_approved");
+});
+
+test("helper cannot end a trip while a purchase task is unfinished", async () => {
+  const database = fakeDatabase([
+    {
+      rows: [
+        {
+          auth_user_id: "auth-helper-1",
+          compensation_mode: "hourly",
+          hourly_rate_twd: 200,
+          id: "helper-1",
+          is_active: true,
+        },
+      ],
+    },
+    {
+      rows: [
+        {
+          assigned_helper_id: "helper-1",
+          departed_at: "2026-06-28T01:00:00.000Z",
+          id: "trip-1",
+          status: "active",
+          version: 3,
+        },
+      ],
+    },
+    { rows: [{ count: 1 }] },
+  ]);
+
+  await assert.rejects(
+    () =>
+      service.markHelperEnded(database, {
+        authUserId: "auth-helper-1",
+        expectedVersion: 3,
+        tripId: "trip-1",
+      }),
+    (error) => error.code === "unfinished_purchase_tasks",
+  );
+});
+
+test("settlement precheck requires transport amount and route note together", async () => {
+  await assert.rejects(
+    () =>
+      service.submitSettlementPrecheck({}, {
+        authUserId: "auth-helper-1",
+        idempotencyKey: "settlement-submit-1",
+        receipt: {
+          byteSize: 10,
+          contentType: "image/jpeg",
+          originalFilename: "receipt.jpg",
+          storageKey: "receipt-key",
+        },
+        settlementId: "settlement-1",
+        transportJpy: 500,
+      }),
+    (error) => error.code === "invalid_transport_claim",
+  );
+});
+
+test("settlement precheck allows optional transport photo when amount and route note exist", async () => {
+  const queries = [];
+  const settlement = {
+    helper_id: "helper-1",
+    id: "settlement-1",
+    status: "pending_helper_precheck",
+    trip_id: "trip-1",
+  };
+  const database = fakeDatabase(
+    [
+      {
+        rows: [{
+          auth_user_id: "auth-helper-1",
+          id: "helper-1",
+          is_active: true,
+        }],
+      },
+      { rows: [settlement] },
+      { rows: [] },
+      { rows: [] },
+      {
+        rows: [{
+          ...settlement,
+          status: "pending_admin_review",
+          transport_claim_jpy: 500,
+          transport_claim_note: "Shinjuku to Ikebukuro",
+        }],
+      },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const result = await service.submitSettlementPrecheck(database, {
+    authUserId: "auth-helper-1",
+    helperNote: "",
+    idempotencyKey: "settlement-submit-1",
+    receipt: {
+      byteSize: 10,
+      contentType: "image/jpeg",
+      originalFilename: "receipt.jpg",
+      storageKey: "receipt-key",
+    },
+    settlementId: "settlement-1",
+    transportClaimNote: "Shinjuku to Ikebukuro",
+    transportJpy: 500,
+  });
+
+  assert.equal(result.status, "pending_admin_review");
+  assert.equal(
+    queries.filter((query) => String(query.sql).includes("settlement_evidence")).length,
+    1,
+  );
+  const update = queries.find((query) =>
+    String(query.sql).includes("transport_claim_note = $3"),
+  );
+  assert.equal(update.params[2], "Shinjuku to Ikebukuro");
+});
+
+test("ending an eligible trip records quote warnings and creates a staging-based settlement", async () => {
+  const queries = [];
+  const endedTrip = {
+    assigned_helper_id: "helper-1",
+    departed_at: "2026-06-28T01:00:00.000Z",
+    ended_at: "2026-06-28T03:00:00.000Z",
+    id: "trip-1",
+    status: "ended",
+    version: 4,
+  };
+  const database = fakeDatabase(
+    [
+      {
+        rows: [{
+          compensation_mode: "hourly",
+          hourly_rate_twd: 200,
+          id: "helper-1",
+          is_active: true,
+        }],
+      },
+      {
+        rows: [{
+          assigned_helper_id: "helper-1",
+          departed_at: "2026-06-28T01:00:00.000Z",
+          id: "trip-1",
+          status: "active",
+          version: 3,
+        }],
+      },
+      { rows: [{ count: 0 }] },
+      { rows: [{ count: 2 }] },
+      { rows: [endedTrip] },
+      { rows: [] },
+      { rows: [{ product_total_jpy: 12_000 }] },
+      {
+        rows: [{
+          id: "settlement-1",
+          product_total_jpy: 12_000,
+          status: "pending_helper_precheck",
+          trip_id: "trip-1",
+        }],
+      },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const result = await service.markHelperEnded(database, {
+    authUserId: "auth-helper-1",
+    expectedVersion: 3,
+    tripId: "trip-1",
+  });
+
+  assert.equal(result.trip.status, "ended");
+  assert.equal(result.settlement.id, "settlement-1");
+  const audit = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.trip_audit_events"),
+  );
+  assert.equal(JSON.parse(audit.params[6]).unfinishedQuoteSubtasks, 2);
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("from helper_app.staging_order_previews")),
+    true,
+  );
+});
+
+test("admin settlement review calculates source-derived totals and split state", async () => {
+  const queries = [];
+  const settlement = {
+    compensation_mode: "hourly",
+    helper_id: "helper-1",
+    hourly_rate_twd: 200,
+    id: "settlement-1",
+    product_total_jpy: 100_000,
+    status: "pending_admin_review",
+    transport_claim_jpy: 1_000,
+    transport_status: "pending",
+    trip_id: "trip-1",
+    work_minutes: 120,
+  };
+  const database = fakeDatabase(
+    [
+      { rows: [settlement] },
+      {
+        rows: [{
+          ...settlement,
+          approved_transport_twd: 220,
+          is_split_payment: true,
+          item_advance_twd: 22_000,
+          status: "pending_helper_confirmation",
+          total_payable_twd: 22_620,
+          work_pay_twd: 400,
+        }],
+      },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const result = await service.reviewSettlement(database, {
+    action: "approve",
+    actorUserId: "admin-1",
+    jpyToTwdRate: "0.22",
+    settlementId: "settlement-1",
+    transportDecision: "approve",
+  });
+
+  assert.equal(result.item_advance_twd, 22_000);
+  assert.equal(result.total_payable_twd, 22_620);
+  assert.equal(result.is_split_payment, true);
+  const update = queries.find((query) =>
+    String(query.sql).includes("set status = 'pending_helper_confirmation'"),
+  );
+  assert.deepEqual(update.params.slice(1, 8), [0.22, 22_000, 400, 220, 22_620, true, true]);
 });
 
 function fakeDatabase(results, queries = []) {

@@ -62,8 +62,8 @@ function buildTransition({ trip, expectedVersion, action, actorRole, reason, now
   };
 
   if (action === "helper_departed") {
-    if (trip.status !== "scheduled") {
-      throw new TripStateError("invalid_transition", "Only scheduled trips can be marked departed.");
+    if (!["draft", "scheduled"].includes(trip.status)) {
+      throw new TripStateError("invalid_transition", "Only not-started trips can be marked departed.");
     }
     next.status = "departed";
     next.departed_at = timestamp;
@@ -79,6 +79,12 @@ function buildTransition({ trip, expectedVersion, action, actorRole, reason, now
     }
     next.status = "active";
     next.admin_activated_at = timestamp;
+  } else if (action === "helper_ended") {
+    if (!["departed", "arrived", "active"].includes(trip.status)) {
+      throw new TripStateError("invalid_transition", "Only in-progress trips can be ended.");
+    }
+    next.status = "ended";
+    next.ended_at = timestamp;
   } else if (action === "admin_canceled") {
     if (trip.status === "ended" || trip.status === "canceled") {
       throw new TripStateError("invalid_transition", "Ended or canceled trips cannot be canceled again.");

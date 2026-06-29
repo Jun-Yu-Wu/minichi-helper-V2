@@ -126,6 +126,11 @@ async function cleanupFixture(supabase, fixture, storageKeys = []) {
       await client.query("delete from helper_app.trips where assigned_helper_id = any($1::uuid[])", [
         helperIds,
       ]);
+      if (storageKeys.length) {
+        await client.query("delete from helper_app.media_objects where storage_key = any($1::text[])", [
+          storageKeys,
+        ]);
+      }
       await client.query("delete from helper_app.helper_profiles where id = any($1::uuid[])", [
         helperIds,
       ]);

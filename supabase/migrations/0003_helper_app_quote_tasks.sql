@@ -3,7 +3,16 @@ alter table helper_app.media_objects
 
 alter table helper_app.media_objects
   add constraint media_objects_media_kind_check
-  check (media_kind in ('site_photo', 'quote_task_photo', 'quote_detail_reply_photo'));
+  check (media_kind in (
+    'site_photo',
+    'quote_task_photo',
+    'quote_detail_reply_photo',
+    'purchase_reference_photo',
+    'purchase_face_check_photo',
+    'settlement_receipt',
+    'transport_proof',
+    'warehouse_evidence'
+  ));
 
 create table if not exists helper_app.quote_tasks (
   id uuid primary key default gen_random_uuid(),

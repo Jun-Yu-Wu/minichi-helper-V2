@@ -13,11 +13,18 @@ async function main() {
     const expectedTables = [
       "helper_profiles",
       "media_objects",
+      "purchase_task_photos",
+      "purchase_tasks",
       "quote_photo_replies",
       "quote_task_photos",
       "quote_tasks",
+      "settlement_evidence",
+      "settlement_line_items",
+      "settlement_payments",
+      "settlements",
       "site_photo_batches",
       "site_photos",
+      "staging_order_previews",
       "trip_audit_events",
       "trips",
     ];

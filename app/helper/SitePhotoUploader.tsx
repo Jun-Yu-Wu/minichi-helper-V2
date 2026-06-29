@@ -1,6 +1,6 @@
 "use client";
 
-import { useActionState, useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ImageUp, RefreshCw, Send, X } from "lucide-react";
 
 import {
@@ -9,7 +9,7 @@ import {
 } from "../actions/helper";
 import { Button } from "../components/ui/button";
 
-type UploadStatus = "selected" | "uploading" | "uploaded" | "failed";
+type BatchStatus = "uploading" | "completed" | "failed";
 
 type SelectedPhoto = {
   byteSize: number;
@@ -20,115 +20,58 @@ type SelectedPhoto = {
   objectUrl: string;
   originalFilename: string;
   sortOrder: number;
-  status: UploadStatus;
   storageKey?: string;
 };
 
-const initialState: HelperActionResult = {};
+type LocalBatch = {
+  error?: string;
+  id: string;
+  note: string;
+  photos: SelectedPhoto[];
+  status: BatchStatus;
+  uploadedCount: number;
+};
+
+const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+const MAX_IMAGE_EDGE = 2400;
+const JPEG_QUALITY = 0.84;
 
 export function SitePhotoUploader({ tripId }: { tripId: string }) {
-  const [state, action, pending] = useActionState(
-    submitSitePhotoBatchAction,
-    initialState,
-  );
   const [note, setNote] = useState("");
   const [photos, setPhotos] = useState<SelectedPhoto[]>([]);
-  const [submissionId, setSubmissionId] = useState(() => createClientId("submission"));
+  const [batches, setBatches] = useState<LocalBatch[]>([]);
+  const photosRef = useRef<SelectedPhoto[]>([]);
+  const batchesRef = useRef<LocalBatch[]>([]);
 
   useEffect(() => {
-    if (!state.ok || state.submissionId !== submissionId) return;
-    for (const photo of photos) URL.revokeObjectURL(photo.objectUrl);
-    setPhotos([]);
-    setNote("");
-    setSubmissionId(createClientId("submission"));
-  }, [state.ok, state.submissionId]);
+    photosRef.current = photos;
+    batchesRef.current = batches;
+  }, [batches, photos]);
 
-  const uploadedPhotosJson = useMemo(
-    () =>
-      JSON.stringify(
-        photos
-          .filter((photo) => photo.status === "uploaded" && photo.storageKey)
-          .map((photo) => ({
-            byteSize: photo.byteSize,
-            clientPhotoId: photo.clientPhotoId,
-            contentType: photo.contentType,
-            originalFilename: photo.originalFilename,
-            sortOrder: photo.sortOrder,
-            storageKey: photo.storageKey,
-          })),
-      ),
-    [photos],
+  useEffect(
+    () => () => {
+      for (const photo of photosRef.current) URL.revokeObjectURL(photo.objectUrl);
+      for (const batch of batchesRef.current) {
+        for (const photo of batch.photos) URL.revokeObjectURL(photo.objectUrl);
+      }
+    },
+    [],
   );
 
-  const allUploaded = photos.length > 0 && photos.every((photo) => photo.status === "uploaded");
-  const hasUploading = photos.some((photo) => photo.status === "uploading");
-
-  function addFiles(files: FileList | null) {
+  async function addFiles(files: FileList | null) {
     if (!files) return;
+    const currentLength = photos.length;
+    const imageFiles = Array.from(files).filter(isImageFile);
+    const preparedPhotos = await Promise.all(
+      imageFiles.map((file, index) => preparePhoto(file, currentLength + index)),
+    );
     setPhotos((current) => [
       ...current,
-      ...Array.from(files)
-        .filter((file) => file.type.startsWith("image/"))
-        .map((file, index) => ({
-          byteSize: file.size,
-          clientPhotoId: createClientId("photo"),
-          contentType: file.type || "image/jpeg",
-          file,
-          objectUrl: URL.createObjectURL(file),
-          originalFilename: file.name,
-          sortOrder: current.length + index,
-          status: "selected" as const,
-        })),
+      ...preparedPhotos.map((photo, index) => ({
+        ...photo,
+        sortOrder: current.length + index,
+      })),
     ]);
-  }
-
-  async function uploadPhoto(photo: SelectedPhoto) {
-    setPhotos((current) =>
-      current.map((item) =>
-        item.clientPhotoId === photo.clientPhotoId
-          ? { ...item, error: undefined, status: "uploading" }
-          : item,
-      ),
-    );
-    try {
-      const presign = await fetch("/api/uploads/presign", {
-        body: JSON.stringify({
-          clientPhotoId: photo.clientPhotoId,
-          contentType: photo.contentType,
-          fileName: photo.originalFilename,
-          tripId,
-        }),
-        headers: { "content-type": "application/json" },
-        method: "POST",
-      });
-      const presignBody = await presign.json();
-      if (!presign.ok) throw new Error(presignBody.error || "無法建立上傳網址。");
-      const upload = await fetch(presignBody.uploadUrl, {
-        body: photo.file,
-        headers: { "content-type": photo.contentType },
-        method: "PUT",
-      });
-      if (!upload.ok) throw new Error(`R2 上傳失敗 (${upload.status})。`);
-      setPhotos((current) =>
-        current.map((item) =>
-          item.clientPhotoId === photo.clientPhotoId
-            ? { ...item, status: "uploaded", storageKey: presignBody.storageKey }
-            : item,
-        ),
-      );
-    } catch (error) {
-      setPhotos((current) =>
-        current.map((item) =>
-          item.clientPhotoId === photo.clientPhotoId
-            ? {
-                ...item,
-                error: error instanceof Error ? error.message : "上傳失敗。",
-                status: "failed",
-              }
-            : item,
-        ),
-      );
-    }
   }
 
   function removePhoto(clientPhotoId: string) {
@@ -141,19 +84,115 @@ export function SitePhotoUploader({ tripId }: { tripId: string }) {
     });
   }
 
+  async function submitBatch() {
+    if (!photos.length || photos.some((photo) => photo.error)) return;
+    const batch: LocalBatch = {
+      id: createClientId("submission"),
+      note,
+      photos,
+      status: "uploading",
+      uploadedCount: 0,
+    };
+    setBatches((current) => [batch, ...current]);
+    setPhotos([]);
+    setNote("");
+    await processBatch(batch);
+  }
+
+  async function processBatch(batch: LocalBatch) {
+    updateBatch(batch.id, { error: undefined, status: "uploading" });
+    let uploadedCount = batch.photos.filter((photo) => photo.storageKey).length;
+    updateBatch(batch.id, { uploadedCount });
+
+    try {
+      const uploadedPhotos = await Promise.all(
+        batch.photos.map(async (photo) => {
+          if (photo.storageKey) return photo;
+          const uploadedPhoto = await uploadPhoto(photo);
+          uploadedCount += 1;
+          updateBatch(batch.id, { uploadedCount });
+          return uploadedPhoto;
+        }),
+      );
+      updateBatch(batch.id, { photos: uploadedPhotos });
+
+      const formData = new FormData();
+      formData.set("tripId", tripId);
+      formData.set("submissionId", batch.id);
+      formData.set("note", batch.note);
+      formData.set(
+        "photosJson",
+        JSON.stringify(
+          uploadedPhotos.map((photo) => ({
+            byteSize: photo.byteSize,
+            clientPhotoId: photo.clientPhotoId,
+            contentType: photo.contentType,
+            originalFilename: photo.originalFilename,
+            sortOrder: photo.sortOrder,
+            storageKey: photo.storageKey,
+          })),
+        ),
+      );
+      const result: HelperActionResult = await submitSitePhotoBatchAction({}, formData);
+      if (!result.ok) throw new Error(result.error || "照片批次送出失敗。");
+      updateBatch(batch.id, {
+        error: undefined,
+        photos: uploadedPhotos,
+        status: "completed",
+        uploadedCount: uploadedPhotos.length,
+      });
+    } catch (error) {
+      updateBatch(batch.id, {
+        error: error instanceof Error ? error.message : "照片批次送出失敗。",
+        status: "failed",
+      });
+    }
+  }
+
+  async function uploadPhoto(photo: SelectedPhoto) {
+    if (photo.byteSize > MAX_UPLOAD_BYTES) {
+      throw new Error("照片超過 8MB，請先在手機裁切或降低解析度後再上傳。");
+    }
+    const presign = await fetch("/api/uploads/presign", {
+      body: JSON.stringify({
+        clientPhotoId: photo.clientPhotoId,
+        contentType: photo.contentType,
+        fileName: photo.originalFilename,
+        tripId,
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+    const presignBody = await presign.json();
+    if (!presign.ok) throw new Error(presignBody.error || "無法建立上傳網址。");
+    const upload = await fetch(presignBody.uploadUrl, {
+      body: photo.file,
+      headers: { "content-type": photo.contentType },
+      method: "PUT",
+    });
+    if (!upload.ok) throw new Error(`R2 上傳失敗 (${upload.status})。`);
+    return { ...photo, storageKey: presignBody.storageKey };
+  }
+
+  function updateBatch(batchId: string, patch: Partial<LocalBatch>) {
+    setBatches((current) =>
+      current.map((batch) => (batch.id === batchId ? { ...batch, ...patch } : batch)),
+    );
+  }
+
   return (
     <div className="grid gap-3 rounded-lg border bg-card p-4">
       <div>
         <h4 className="font-semibold">現場照片批次</h4>
         <p className="text-sm text-muted-foreground">
-          可一次選多張；單張失敗可以重試，成功後再送出批次。
+          可一次選多張；手機大圖會先縮到最長邊 {MAX_IMAGE_EDGE}px，單張需小於 8MB。
         </p>
       </div>
 
       <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-4 text-center">
         <ImageUp className="size-6" aria-hidden="true" />
         <span>選擇照片</span>
-        <span className="text-xs text-muted-foreground">支援一次多張圖片</span>
+        <span className="text-xs text-muted-foreground">支援一次多張圖片，HEIC 會盡量以原檔上傳</span>
         <input
           className="sr-only"
           type="file"
@@ -186,64 +225,77 @@ export function SitePhotoUploader({ tripId }: { tripId: string }) {
                     <X className="size-4" />
                   </button>
                 </div>
-                <p className="text-xs text-muted-foreground">狀態：{statusLabel(photo.status)}</p>
                 {photo.error ? <p className="text-xs text-destructive">{photo.error}</p> : null}
-                {photo.status !== "uploaded" ? (
-                  <Button
-                    disabled={photo.status === "uploading"}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                    onClick={() => uploadPhoto(photo)}
-                  >
-                    <RefreshCw className="mr-2 size-4" />
-                    {photo.status === "failed" ? "重試上傳" : "上傳這張"}
-                  </Button>
-                ) : null}
               </div>
             </div>
           ))}
         </div>
       ) : null}
 
-      {photos.length ? (
-        <Button
-          disabled={hasUploading || photos.every((photo) => photo.status === "uploaded")}
-          type="button"
-          variant="secondary"
-          onClick={() => photos.filter((photo) => photo.status !== "uploaded").forEach(uploadPhoto)}
-        >
-          上傳尚未完成的照片
-        </Button>
-      ) : null}
-
-      <form action={action} className="grid gap-3">
-        <input type="hidden" name="tripId" value={tripId} />
-        <input type="hidden" name="submissionId" value={submissionId} />
-        <input type="hidden" name="photosJson" value={uploadedPhotosJson} />
+      <div className="grid gap-3">
         <textarea
-          name="note"
           placeholder="批次備註，可留空"
           value={note}
           onChange={(event) => setNote(event.target.value)}
         />
-        {state.ok && state.submissionId !== submissionId ? (
-          <p className="text-sm text-primary">上一批照片已送出。</p>
-        ) : null}
-        {state.error ? <p className="text-sm text-destructive">{state.error}</p> : null}
-        <Button disabled={!allUploaded || pending} type="submit">
+        <Button
+          disabled={!photos.length || photos.some((photo) => Boolean(photo.error))}
+          type="button"
+          onClick={submitBatch}
+        >
           <Send className="mr-2 size-4" />
-          {pending ? "送出中..." : "送出照片批次"}
+          送出照片批次
         </Button>
-      </form>
+      </div>
+
+      {batches.length ? (
+        <div className="grid gap-3 border-t pt-3">
+          <h5 className="text-sm font-semibold">本次送出批次</h5>
+          {batches.map((batch) => (
+            <article className="rounded-md border bg-background p-3" key={batch.id}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-sm font-medium">{batch.photos.length} 張照片</p>
+                <span className="rounded-full border px-2.5 py-1 text-xs font-medium">
+                  {batchStatusLabel(batch)}
+                </span>
+              </div>
+              {batch.note ? <p className="mt-1 text-sm text-muted-foreground">{batch.note}</p> : null}
+              <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5">
+                {batch.photos.map((photo) => (
+                  <img
+                    alt={photo.originalFilename}
+                    className="aspect-square w-full rounded-md object-cover"
+                    key={photo.clientPhotoId}
+                    src={photo.objectUrl}
+                  />
+                ))}
+              </div>
+              {batch.error ? <p className="mt-2 text-sm text-destructive">{batch.error}</p> : null}
+              {batch.status === "failed" ? (
+                <Button
+                  className="mt-3"
+                  size="sm"
+                  type="button"
+                  variant="outline"
+                  onClick={() => processBatch(batch)}
+                >
+                  <RefreshCw className="mr-2 size-4" />
+                  重試整批
+                </Button>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function statusLabel(status: UploadStatus) {
-  if (status === "selected") return "待上傳";
-  if (status === "uploading") return "上傳中";
-  if (status === "uploaded") return "已上傳";
+function batchStatusLabel(batch: LocalBatch) {
+  if (batch.status === "uploading") {
+    return `上傳中 ${batch.uploadedCount}/${batch.photos.length}`;
+  }
+  if (batch.status === "completed") return "已完成上傳";
   return "上傳失敗";
 }
 
@@ -252,4 +304,79 @@ function createClientId(prefix: string) {
   if (randomUuid) return `${prefix}-${randomUuid}`;
   const randomPart = Math.random().toString(36).slice(2, 10);
   return `${prefix}-${Date.now().toString(36)}-${randomPart}`;
+}
+
+async function preparePhoto(file: File, sortOrder: number): Promise<SelectedPhoto> {
+  const normalized = await normalizeLargeImage(file).catch(() => file);
+  return {
+    byteSize: normalized.size,
+    clientPhotoId: createClientId("photo"),
+    contentType: inferImageContentType(normalized),
+    error:
+      normalized.size > MAX_UPLOAD_BYTES
+        ? `照片超過 8MB，請先在手機裁切或降低解析度後再上傳。`
+        : undefined,
+    file: normalized,
+    objectUrl: URL.createObjectURL(normalized),
+    originalFilename: normalized.name || file.name,
+    sortOrder,
+  };
+}
+
+async function normalizeLargeImage(file: File) {
+  if (file.size <= MAX_UPLOAD_BYTES && file.type !== "image/heic" && file.type !== "image/heif") {
+    return file;
+  }
+  const image = await loadImage(file);
+  const scale = Math.min(1, MAX_IMAGE_EDGE / Math.max(image.width, image.height));
+  const width = Math.max(1, Math.round(image.width * scale));
+  const height = Math.max(1, Math.round(image.height * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) return file;
+  context.drawImage(image, 0, 0, width, height);
+  const blob = await canvasToBlob(canvas, "image/jpeg", JPEG_QUALITY);
+  if (!blob || blob.size >= file.size) return file;
+  return new File([blob], replaceExtension(file.name || "site-photo.jpg", ".jpg"), {
+    type: "image/jpeg",
+  });
+}
+
+function loadImage(file: File): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const objectUrl = URL.createObjectURL(file);
+    const image = new Image();
+    image.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      resolve(image);
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error("Image could not be decoded."));
+    };
+    image.src = objectUrl;
+  });
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality: number) {
+  return new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, type, quality));
+}
+
+function isImageFile(file: File) {
+  return file.type.startsWith("image/") || /\.(avif|gif|heic|heif|jpe?g|png|webp)$/i.test(file.name);
+}
+
+function inferImageContentType(file: File) {
+  if (file.type.startsWith("image/")) return file.type;
+  if (/\.png$/i.test(file.name)) return "image/png";
+  if (/\.webp$/i.test(file.name)) return "image/webp";
+  if (/\.gif$/i.test(file.name)) return "image/gif";
+  if (/\.hei[cf]$/i.test(file.name)) return "image/heic";
+  return "image/jpeg";
+}
+
+function replaceExtension(fileName: string, extension: string) {
+  return fileName.replace(/\.[a-z0-9]+$/i, "") + extension;
 }

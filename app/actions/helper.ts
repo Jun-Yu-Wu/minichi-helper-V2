@@ -52,6 +52,24 @@ export async function arriveTripAction(formData: FormData) {
   revalidatePath("/helper");
 }
 
+export async function endTripAction(
+  _previousState: HelperActionResult,
+  formData: FormData,
+): Promise<HelperActionResult> {
+  try {
+    const authUserId = await requireUserId();
+    await service.markHelperEnded(database.getDatabasePool(), {
+      authUserId,
+      expectedVersion: formVersion(formData),
+      tripId: formText(formData, "tripId"),
+    });
+    revalidatePath("/helper");
+    return { ok: true };
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
 export async function submitSitePhotoBatchAction(
   _previousState: HelperActionResult,
   formData: FormData,
@@ -92,6 +110,83 @@ export async function submitQuotePhotoReplyAction(
     });
     revalidatePath("/helper");
     return { ok: true, submissionId: formText(formData, "idempotencyKey") };
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
+export async function respondPurchaseTaskAction(
+  _previousState: HelperActionResult,
+  formData: FormData,
+): Promise<HelperActionResult> {
+  try {
+    const authUserId = await requireUserId();
+    const faceCheckPhotoJson = formText(formData, "faceCheckPhotoJson");
+    await service.respondPurchaseTask(database.getDatabasePool(), {
+      action: formText(formData, "purchaseAction") || "complete",
+      authUserId,
+      completedQuantity: formText(formData, "completedQuantity"),
+      faceCheckNote: formText(formData, "faceCheckNote"),
+      faceCheckPhoto: faceCheckPhotoJson ? JSON.parse(faceCheckPhotoJson) : null,
+      helperNote: formText(formData, "helperNote"),
+      idempotencyKey: formText(formData, "idempotencyKey"),
+      purchaseTaskId: formText(formData, "purchaseTaskId"),
+      unavailableQuantity: formText(formData, "unavailableQuantity"),
+    });
+    revalidatePath("/helper");
+    return { ok: true, submissionId: formText(formData, "idempotencyKey") };
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
+export async function submitSettlementPrecheckAction(
+  _previousState: HelperActionResult,
+  formData: FormData,
+): Promise<HelperActionResult> {
+  try {
+    const authUserId = await requireUserId();
+    await service.submitSettlementPrecheck(database.getDatabasePool(), {
+      authUserId,
+      helperNote: formText(formData, "helperNote"),
+      idempotencyKey: formText(formData, "idempotencyKey"),
+      receipt: JSON.parse(formText(formData, "receiptJson") || "null"),
+      settlementId: formText(formData, "settlementId"),
+      transportClaimNote: formText(formData, "transportClaimNote"),
+      transportJpy: formText(formData, "transportJpy"),
+      transportProof: JSON.parse(formText(formData, "transportProofJson") || "null"),
+    });
+    revalidatePath("/helper");
+    return { ok: true };
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
+export async function confirmSettlementAction(formData: FormData) {
+  const authUserId = await requireUserId();
+  await service.confirmSettlement(database.getDatabasePool(), {
+    authUserId,
+    settlementId: formText(formData, "settlementId"),
+  });
+  revalidatePath("/helper");
+}
+
+export async function submitWarehouseProofAction(
+  _previousState: HelperActionResult,
+  formData: FormData,
+): Promise<HelperActionResult> {
+  try {
+    const authUserId = await requireUserId();
+    await service.submitWarehouseProof(database.getDatabasePool(), {
+      authUserId,
+      idempotencyKey: formText(formData, "idempotencyKey"),
+      note: formText(formData, "note"),
+      proof: JSON.parse(formText(formData, "proofJson") || "null"),
+      settlementId: formText(formData, "settlementId"),
+    });
+    revalidatePath("/helper");
+    return { ok: true };
   } catch (error) {
     return actionError(error);
   }

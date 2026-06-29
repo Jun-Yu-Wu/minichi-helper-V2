@@ -29,37 +29,39 @@
 
 :root {
   --radius: 0.5rem;
-  --background: oklch(0.985 0.006 100);
-  --foreground: oklch(0.21 0.018 150);
+  --background: oklch(0.985 0 0);
+  --foreground: oklch(0.18 0.005 255);
   --card: oklch(1 0 0);
-  --card-foreground: oklch(0.21 0.018 150);
+  --card-foreground: oklch(0.18 0.005 255);
   --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.21 0.018 150);
-  --primary: oklch(0.37 0.07 155);
-  --primary-foreground: oklch(0.98 0.004 100);
-  --secondary: oklch(0.94 0.018 150);
-  --secondary-foreground: oklch(0.28 0.04 155);
-  --muted: oklch(0.95 0.009 100);
-  --muted-foreground: oklch(0.5 0.02 145);
-  --accent: oklch(0.92 0.025 150);
-  --accent-foreground: oklch(0.27 0.045 155);
+  --popover-foreground: oklch(0.18 0.005 255);
+  --primary: oklch(0.23 0.035 165);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.95 0.004 255);
+  --secondary-foreground: oklch(0.24 0.006 255);
+  --muted: oklch(0.96 0.003 255);
+  --muted-foreground: oklch(0.48 0.01 255);
+  --accent: oklch(0.94 0.012 170);
+  --accent-foreground: oklch(0.22 0.025 165);
   --destructive: oklch(0.58 0.2 27);
-  --border: oklch(0.88 0.014 100);
-  --input: oklch(0.88 0.014 100);
-  --ring: oklch(0.5 0.075 155);
+  --border: oklch(0.9 0.004 255);
+  --input: oklch(0.88 0.004 255);
+  --ring: oklch(0.42 0.045 165);
   --font-sans: Inter, "Noto Sans TC", ui-sans-serif, system-ui, sans-serif;
 }
 
 @layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
   * {
     @apply border-border;
   }
 
   body {
     @apply min-h-svh bg-background font-sans text-foreground antialiased;
-    background:
-      linear-gradient(to bottom, oklch(0.98 0.012 100), transparent 22rem),
-      oklch(0.985 0.006 100);
+    background: oklch(0.985 0 0);
   }
 
   input,

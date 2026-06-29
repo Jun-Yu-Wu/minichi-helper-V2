@@ -1,12 +1,143 @@
 # Helper Rewrite Confirmation Workflow
 
-Last updated: 2026-06-26
+Last updated: 2026-06-29
 
 This document lists the product and implementation decisions that must be confirmed
 before or during the MINICHI helper rewrite. The source behavior is
 `latest-helper-operation-spec.md`.
 
 ## Confirmed Decisions
+
+### Round 22 confirmed on 2026-06-29
+
+Slice 6 scope is confirmed as private/public rebuy tasks, atomic public claim,
+helper release back to the public pool, and rebuy checkout:
+
+- Admins may create rebuy tasks manually or from `canceled`, `unavailable`, or
+  `not_found` purchase tasks.
+- Rebuy tasks created from purchase tasks preserve purchase, quote/detail,
+  customer/order, price, photo, and audit provenance. One source purchase task
+  must not have more than one active rebuy task at the same time.
+- Public rebuy tasks must be claimed before shopping. The database atomically
+  transitions `open -> claimed`; frontend duplicate-tap prevention is only a UX
+  safeguard.
+- After claim, a public task moves into the claiming helper's private work area
+  and is no longer visible to other helpers.
+- A helper who cannot buy an originally public claimed task may release it back
+  to the public pool through `claimed -> open`.
+- Release is allowed only for the current claiming helper before completion or
+  checkout. It requires a reason, client idempotency key, expected version, an
+  atomic conditional update, cleared claim fields, a refreshed
+  `public_available_at`, and an audit event in the same transaction.
+- Duplicate release with the same idempotency key returns the already accepted
+  result. A stale version, a task claimed by another helper, or a task that has
+  advanced beyond `claimed` must not be overwritten.
+- Private rebuy tasks cannot be released into the public pool by helpers.
+  Private reassignment or conversion to public remains an audited admin action.
+- Public listings expose only product name, quantity, JPY price, reference
+  photos, instructions, priority, and creation/availability time. They do not
+  expose LINE community nickname, TWD sale price, complete provenance,
+  unrestricted customer data, or other helpers' data.
+- Public listing order is explicit admin priority first, then FIFO by
+  `public_available_at`; initial publication uses creation time and a released
+  task receives a new public availability time.
+- The rebuy lifecycle is
+  `open -> claimed -> completed -> checkout_pending ->
+  settlement_in_progress -> settled`, with `canceled`, `unavailable`, and
+  `not_found` as terminal alternatives.
+- The first version does not support rebuy face-check. Report photos are
+  optional; completion without a photo requires an explicit confirmation and
+  audit event.
+- Partial rebuy completion is allowed. The remaining quantity requires a
+  reason, is not automatically republished, and may become a new
+  provenance-linked rebuy task only through an admin decision.
+- Completing a rebuy task records its result but does not yet materialize
+  staging orders. Rebuy checkout atomically creates an already-ended checkout
+  trip, completed purchase-equivalent records, staging order previews, and a
+  settlement.
+- One checkout includes all completed, not-yet-checked-out rebuy tasks owned by
+  the helper. Duplicate checkout submissions must not create duplicate trips,
+  staging previews, or settlements.
+- A rebuy checkout has zero work hours. FX-rate and item-advance calculations
+  reuse the confirmed settlement formulas; optional transport requires admin
+  approval. The system must not invent departure/work timestamps.
+- Before claim, admins may edit all task fields. After claim, a material change
+  requires audited claim revocation and republication. After completion,
+  corrections update reviewed staging data and do not rewrite the helper's
+  source response.
+- Rebuy checkout produces staging data only. Entry into `main.orders`,
+  `main.order_source_links`, and `main.order_photos` still requires Slice 7
+  admin review and an explicit merge.
+
+### Round 21 confirmed on 2026-06-28
+
+Slice 5 scope is confirmed as trip end, settlement, payment states, and
+warehouse proof:
+
+- Slice 5 includes helper trip end.
+- Quote/detail subtasks that remain unfinished at trip end produce a warning but
+  do not block ending the trip.
+- Purchase tasks that remain unfinished block trip end until they are completed,
+  canceled, marked unavailable, or marked not found.
+- Trip end writes `ended_at`, blocks further helper live-task mutation, and
+  guides the helper into settlement.
+- Settlement uses Slice 4 completed purchase tasks and staging order preview
+  data. It does not wait for `main.orders` merge and must not write final
+  operational orders.
+- Transport is optional. Helpers enter transport JPY amount and upload proof only
+  when claiming transport; transport is included in payable totals only after
+  admin approval.
+- The 20,000 TWD split-payment threshold uses item advance TWD, not total
+  payable amount.
+- Settlements with item advance TWD at or below 20,000 are paid once.
+- Settlements with item advance TWD above 20,000 are paid 50% first, then the
+  remaining 50% after warehouse proof is approved.
+- Admins cannot manually overwrite formula totals. Corrections must change
+  source data such as orders, exchange rate, transport approval, work time, or
+  review state, with audit events.
+- After payment, helpers upload one warehouse proof photo plus optional note.
+- Warehouse proof is reviewed by admin inside settlement. Large-settlement final
+  payment waits for warehouse approval.
+- Warehouse proof photos are retained long-term as `warehouse_evidence`; durable
+  media records store private R2 `storage_key` values only.
+
+### Round 20 confirmed on 2026-06-27
+
+Slice 4 scope is confirmed as purchase task creation, face-check, cancellation,
+and completed-purchase staging order preview:
+
+- Slice 4 includes admin manual purchase task publishing.
+- Slice 4 includes quick purchase publishing from a single quote/detail subtask.
+- Slice 4 includes helper non-face-check purchase completion.
+- Slice 4 includes helper cancellation, unavailable, and not-found reporting.
+- Slice 4 includes face-check upload, admin approval or retake request, and
+  helper final confirmation after admin approval.
+- Slice 4 includes completed purchase task synchronization into staging order
+  preview data.
+- Slice 4 does not include staging review editing, final trip merge review, or
+  explicit merge into `main.orders`; those remain Slice 7 behavior.
+- Quick publish must be one quote/detail subtask to one purchase task, not an
+  entire multi-photo quote/detail task to one purchase task.
+- Quick publish must carry the source quote/detail photo, helper detail reply
+  photos when present, quoted JPY price, and provenance linking the purchase task
+  to the source quote task, quote task photo, and reply.
+- Admin still confirms or fills LINE community nickname, quantity, sale TWD
+  price, and face-check requirement before publishing a purchase task.
+- Helper purchase grouping uses product name + original JPY price + face-check
+  required flag. Same-group batch actions must not cross this grouping key.
+- Partial quantity behavior is retained. Purchased quantities may complete and
+  create staging order preview data; unpurchased remaining quantities must be
+  explicitly canceled, marked unavailable/not found, or handled by a later rebuy
+  path.
+- Face-check uses
+  `open -> review_pending -> approved_pending_helper_confirmation -> completed`.
+- Admin face-check approval does not complete the task. The helper must perform
+  final confirmation before the purchase becomes completed and before staging
+  order preview data is created.
+- `canceled`, `unavailable`, and `not_found` purchase tasks do not create
+  staging orders.
+- Canceled purchase tasks do not reopen. If the item should be purchased again,
+  admin creates a new purchase task linked through provenance and audit events.
 
 ### Round 19 confirmed on 2026-06-26
 
@@ -660,8 +791,12 @@ Recommended default unless overridden:
 
 Recommended default unless overridden:
 
-- Reuse purchase task behavior, including optional face-check.
+- Reuse non-face-check purchase task behavior; rebuy does not support
+  face-check in the first version.
 - Public claim must be atomic in Supabase.
+- Allow the current helper to atomically release an originally public,
+  still-claimed task back to the public pool with a required reason,
+  idempotency, version checking, and an audit event.
 - Rebuy checkout creates an ended checkout trip and follows normal settlement.
 
 ## Testing And Acceptance Decisions

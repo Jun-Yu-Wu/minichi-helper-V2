@@ -2,6 +2,10 @@ const {
   buildTransition,
   repairTrip: buildRepairTransition,
 } = require("../domain/trip-state");
+const {
+  calculateSettlement,
+  calculateWorkMinutes,
+} = require("../domain/settlement");
 const { withTransaction } = require("./database");
 
 class HelperAppServiceError extends Error {
@@ -13,7 +17,7 @@ class HelperAppServiceError extends Error {
 }
 
 async function listAdminDashboard(database) {
-  const [helpers, trips, sitePhotoBatches, quoteTasks] = await Promise.all([
+  const [helpers, trips, sitePhotoBatches, quoteTasks, purchaseTasks, stagingOrderPreviews, settlements] = await Promise.all([
     database.query(
       `select id, auth_user_id, display_name, email, compensation_mode,
               hourly_rate_twd, helper_fx_rate, bank_account_name, bank_code,
@@ -33,8 +37,21 @@ async function listAdminDashboard(database) {
     ),
     listSitePhotoBatches(database),
     listQuoteTasks(database),
+    listPurchaseTasks(database),
+    listStagingOrderPreviews(database),
+    listSettlements(database),
   ]);
-  return { helpers: helpers.rows, quoteTasks, sitePhotoBatches, trips: trips.rows };
+  return { helpers: helpers.rows, purchaseTasks, quoteTasks, settlements, sitePhotoBatches, stagingOrderPreviews, trips: trips.rows };
+}
+
+async function listCustomerNicknames(database) {
+  const result = await database.query(
+    `select line_community_name
+     from main.customers
+     where nullif(btrim(line_community_name), '') is not null
+     order by line_community_name asc`,
+  );
+  return result.rows.map((row) => row.line_community_name);
 }
 
 async function getHelperWorkspace(database, authUserId, now = new Date()) {
@@ -48,7 +65,10 @@ async function getHelperWorkspace(database, authUserId, now = new Date()) {
   );
   const profile = profileResult.rows[0] || null;
   if (!profile || !profile.is_active) {
-    return { groups: { history: [], today: [], upcoming: [] }, profile };
+    return {
+      groups: { completed: [], history: [], inProgress: [], notStarted: [], today: [], upcoming: [] },
+      profile,
+    };
   }
 
   const tripsResult = await database.query(
@@ -70,6 +90,13 @@ async function getHelperWorkspace(database, authUserId, now = new Date()) {
         tripIds: tripsResult.rows.map((trip) => trip.id),
       }),
     ),
+    purchaseTasksByTripId: groupPurchaseTasksByTripId(
+      await listPurchaseTasks(database, {
+        helperId: profile.id,
+        tripIds: tripsResult.rows.map((trip) => trip.id),
+      }),
+    ),
+    settlements: await listSettlements(database, { helperId: profile.id }),
     sitePhotoBatchesByTripId: groupBatchesByTripId(
       await listSitePhotoBatches(database, {
         helperId: profile.id,
@@ -77,6 +104,129 @@ async function getHelperWorkspace(database, authUserId, now = new Date()) {
       }),
     ),
   };
+}
+
+async function listSettlements(database, { helperId = null } = {}) {
+  const params = [];
+  const where = helperId ? "where s.helper_id = $1" : "";
+  if (helperId) params.push(helperId);
+  const result = await database.query(
+    `select s.*, t.trip_name, t.business_date, t.timezone,
+            hp.display_name as helper_display_name,
+            coalesce((
+              select jsonb_agg(jsonb_build_object(
+                'id', sli.id,
+                'product_name', sli.product_name,
+                'quantity', sli.quantity,
+                'original_price_jpy', sli.original_price_jpy,
+                'product_total_jpy', sli.product_total_jpy
+              ) order by sli.created_at)
+              from helper_app.settlement_line_items sli
+              where sli.settlement_id = s.id
+            ), '[]'::jsonb) as line_items,
+            coalesce((
+              select jsonb_agg(jsonb_build_object(
+                'id', se.id,
+                'evidence_type', se.evidence_type,
+                'storage_key', se.storage_key,
+                'note', se.note,
+                'created_at', se.created_at
+              ) order by se.created_at)
+              from helper_app.settlement_evidence se
+              where se.settlement_id = s.id
+            ), '[]'::jsonb) as evidence,
+            coalesce((
+              select jsonb_agg(jsonb_build_object(
+                'id', sp.id,
+                'payment_type', sp.payment_type,
+                'amount_twd', sp.amount_twd,
+                'transfer_notification', sp.transfer_notification,
+                'paid_at', sp.paid_at
+              ) order by sp.paid_at)
+              from helper_app.settlement_payments sp
+              where sp.settlement_id = s.id
+            ), '[]'::jsonb) as payments
+     from helper_app.settlements s
+     join helper_app.trips t on t.id = s.trip_id
+     join helper_app.helper_profiles hp on hp.id = s.helper_id
+     ${where}
+     order by s.created_at desc`,
+    params,
+  );
+  return result.rows;
+}
+
+async function listPurchaseTasks(database, { helperId = null, tripIds = null } = {}) {
+  if (tripIds && tripIds.length === 0) return [];
+  const conditions = [];
+  const params = [];
+  if (helperId) {
+    params.push(helperId);
+    conditions.push(`pt.helper_id = $${params.length}`);
+  }
+  if (tripIds) {
+    params.push(tripIds);
+    conditions.push(`pt.trip_id = any($${params.length}::uuid[])`);
+  }
+  const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+  const result = await database.query(
+    `select pt.id, pt.trip_id, pt.helper_id, pt.source_quote_task_id,
+            pt.source_quote_task_photo_id, pt.source_quote_reply_id,
+            pt.line_community_name, pt.product_name, pt.quantity,
+            pt.original_price_jpy, pt.sale_price_twd, pt.note,
+            pt.requires_face_check, pt.status, pt.completed_quantity,
+            pt.unavailable_quantity, pt.helper_note, pt.face_check_note,
+            pt.admin_review_note, pt.created_at, pt.updated_at, pt.completed_at,
+            t.trip_name, t.business_date, t.timezone, t.status as trip_status,
+            hp.display_name as helper_display_name,
+            coalesce(
+              jsonb_agg(
+                jsonb_build_object(
+                  'id', ptp.id,
+                  'storage_key', ptp.storage_key,
+                  'photo_role', ptp.photo_role,
+                  'sort_order', ptp.sort_order,
+                  'created_at', ptp.created_at
+                )
+                order by ptp.photo_role asc, ptp.sort_order asc
+              ) filter (where ptp.id is not null),
+              '[]'::jsonb
+            ) as photos
+     from helper_app.purchase_tasks pt
+     join helper_app.trips t on t.id = pt.trip_id
+     join helper_app.helper_profiles hp on hp.id = pt.helper_id
+     left join helper_app.purchase_task_photos ptp on ptp.purchase_task_id = pt.id
+     ${where}
+     group by pt.id, t.id, hp.id
+     order by pt.created_at desc`,
+    params,
+  );
+  return result.rows;
+}
+
+async function listStagingOrderPreviews(database, { helperId = null, tripIds = null } = {}) {
+  if (tripIds && tripIds.length === 0) return [];
+  const conditions = [];
+  const params = [];
+  if (helperId) {
+    params.push(helperId);
+    conditions.push(`sop.helper_id = $${params.length}`);
+  }
+  if (tripIds) {
+    params.push(tripIds);
+    conditions.push(`sop.trip_id = any($${params.length}::uuid[])`);
+  }
+  const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+  const result = await database.query(
+    `select sop.*, t.trip_name, hp.display_name as helper_display_name
+     from helper_app.staging_order_previews sop
+     join helper_app.trips t on t.id = sop.trip_id
+     join helper_app.helper_profiles hp on hp.id = sop.helper_id
+     ${where}
+     order by sop.created_at desc`,
+    params,
+  );
+  return result.rows;
 }
 
 async function listQuoteTasks(database, { helperId = null, tripIds = null } = {}) {
@@ -207,6 +357,15 @@ function groupQuoteTasksByTripId(tasks) {
   return groups;
 }
 
+function groupPurchaseTasksByTripId(tasks) {
+  const groups = {};
+  for (const task of tasks) {
+    if (!groups[task.trip_id]) groups[task.trip_id] = [];
+    groups[task.trip_id].push(task);
+  }
+  return groups;
+}
+
 async function attachSignedPhotoUrls(batches, r2Store) {
   return Promise.all(
     batches.map(async (batch) => ({
@@ -246,20 +405,97 @@ async function attachSignedQuoteTaskUrls(tasks, r2Store) {
   );
 }
 
+async function attachSignedPurchaseTaskUrls(tasks, r2Store) {
+  return Promise.all(
+    tasks.map(async (task) => ({
+      ...task,
+      photos: await Promise.all(
+        (task.photos || []).map(async (photo) => ({
+          ...photo,
+          signed_url: await r2Store.signedGetUrl(photo.storage_key),
+        })),
+      ),
+    })),
+  );
+}
+
 function groupTripsByLocalDate(trips, now = new Date()) {
-  const groups = { history: [], today: [], upcoming: [] };
+  const groups = { completed: [], history: [], inProgress: [], notStarted: [], today: [], upcoming: [] };
+  const recentCompletedCutoff = addDays(dateInTimezone(now, "Asia/Tokyo"), -2);
   for (const trip of trips) {
-    const today = dateInTimezone(now, trip.timezone || "Asia/Tokyo");
-    const businessDate = dateOnly(trip.business_date, trip.timezone || "Asia/Tokyo");
-    if (trip.status === "ended" || businessDate < today) {
-      groups.history.push(trip);
-    } else if (businessDate === today) {
-      groups.today.push(trip);
-    } else {
-      groups.upcoming.push(trip);
+    if (trip.status === "ended") {
+      const completedDate = dateOnly(trip.ended_at || trip.business_date, trip.timezone || "Asia/Tokyo");
+      if (completedDate >= recentCompletedCutoff) groups.completed.push(trip);
+    } else if (["departed", "arrived", "active"].includes(trip.status)) {
+      groups.inProgress.push(trip);
+    } else if (trip.status !== "canceled") {
+      groups.notStarted.push(trip);
     }
   }
+  return sortTripGroups(groups);
+}
+
+function addDays(dateString, days) {
+  const date = new Date(`${dateString}T00:00:00.000Z`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return date.toISOString().slice(0, 10);
+}
+
+function tripIsInProgress(status) {
+  return ["departed", "arrived", "active"].includes(status);
+}
+
+function tripIsLiveWorkspaceOpen(status) {
+  return status === "active";
+}
+
+function assertTripCanEnd(trip) {
+  if (!tripIsInProgress(trip.status)) {
+    throw new HelperAppServiceError("trip_not_active", "Only in-progress trips can be ended.");
+  }
+}
+
+function assertTripCanUseLiveWorkspace(trip, message) {
+  if (!tripIsLiveWorkspaceOpen(trip.status)) {
+    throw new HelperAppServiceError("trip_not_active", message);
+  }
+}
+
+function assertTripCanUploadSitePhotos(trip) {
+  assertTripCanUseLiveWorkspace(trip, "Site photos can be uploaded only after the trip is active.");
+}
+
+function assertTripCanReplyQuote(trip) {
+  assertTripCanUseLiveWorkspace(trip, "Quote replies can be submitted only while the trip is active.");
+}
+
+function assertTripCanDepart(trip) {
+  if (!["draft", "scheduled"].includes(trip.status)) {
+    throw new HelperAppServiceError("trip_not_active", "Only not-started trips can be marked departed.");
+  }
+}
+
+function sortTripGroups(groups) {
+  groups.notStarted.sort(compareTripDateAsc);
+  groups.inProgress.sort(compareTripDateAsc);
+  groups.completed.sort(compareTripDateDesc);
+  groups.history = groups.completed;
+  groups.today = groups.inProgress;
+  groups.upcoming = groups.notStarted;
   return groups;
+}
+
+function compareTripDateAsc(a, b) {
+  return tripDateValue(a).localeCompare(tripDateValue(b));
+}
+
+function compareTripDateDesc(a, b) {
+  return tripDateValue(b).localeCompare(tripDateValue(a));
+}
+
+function tripDateValue(trip) {
+  const relevantDate = trip.status === "ended" ? trip.ended_at || trip.business_date : trip.business_date;
+  return `${dateOnly(relevantDate, trip.timezone || "Asia/Tokyo")} ${trip.scheduled_time || ""} ${trip.created_at || ""}`;
 }
 
 function dateInTimezone(date, timezone) {
@@ -276,15 +512,6 @@ function dateInTimezone(date, timezone) {
 function dateOnly(value, timezone = "Asia/Tokyo") {
   if (value instanceof Date) return dateInTimezone(value, timezone);
   return String(value || "").slice(0, 10);
-}
-
-function assertTripIsToday(trip, message) {
-  const timezone = trip.timezone || "Asia/Tokyo";
-  const today = dateInTimezone(new Date(), timezone);
-  const businessDate = dateOnly(trip.business_date, timezone);
-  if (businessDate !== today) {
-    throw new HelperAppServiceError("trip_not_today", message);
-  }
 }
 
 async function createHelperProfile(database, input) {
@@ -324,6 +551,41 @@ async function deactivateHelperProfile(database, helperId) {
   return result.rows[0];
 }
 
+async function updateHelperProfile(database, helperId, input) {
+  const normalized = normalizeHelperInput(input);
+  const result = await database.query(
+    `update helper_app.helper_profiles
+     set auth_user_id = $2,
+         display_name = $3,
+         email = $4,
+         compensation_mode = $5,
+         hourly_rate_twd = $6,
+         helper_fx_rate = $7,
+         bank_account_name = $8,
+         bank_code = $9,
+         bank_account_number = $10,
+         region = $11,
+         updated_at = now()
+     where id = $1 and is_active = true
+     returning *`,
+    [
+      requiredText(helperId, "helperId"),
+      normalized.authUserId,
+      normalized.displayName,
+      normalized.email,
+      normalized.compensationMode,
+      normalized.hourlyRateTwd,
+      normalized.helperFxRate,
+      normalized.bankAccountName,
+      normalized.bankCode,
+      normalized.bankAccountNumber,
+      normalized.region,
+    ],
+  );
+  if (!result.rows[0]) throw new HelperAppServiceError("not_found", "Active helper profile was not found.");
+  return result.rows[0];
+}
+
 async function createTrip(database, input) {
   const normalized = normalizeTripInput(input);
   const result = await database.query(
@@ -357,10 +619,7 @@ async function authorizeSitePhotoUpload(database, { authUserId, tripId }) {
   const row = result.rows[0];
   if (!row) throw new HelperAppServiceError("forbidden", "Trip is not assigned to this helper.");
   if (!row.is_active) throw new HelperAppServiceError("helper_inactive", "Helper profile is inactive.");
-  assertTripIsToday(row, "Site photos can be uploaded only for today's trip.");
-  if (row.status !== "active") {
-    throw new HelperAppServiceError("trip_not_active", "Site photos can be uploaded only after the trip is active.");
-  }
+  assertTripCanUploadSitePhotos(row);
   return row;
 }
 
@@ -372,10 +631,7 @@ async function submitSitePhotoBatch(database, { authUserId, note, photos, submis
     if (trip.assigned_helper_id !== helper.id) {
       throw new HelperAppServiceError("forbidden", "Trip is not assigned to this helper.");
     }
-    assertTripIsToday(trip, "Site photo batches can be submitted only for today's trip.");
-    if (trip.status !== "active") {
-      throw new HelperAppServiceError("trip_not_active", "Site photo batches can be submitted only for active trips.");
-    }
+    assertTripCanUploadSitePhotos(trip);
 
     const existing = await client.query(
       `select id
@@ -449,8 +705,18 @@ async function submitSitePhotoBatch(database, { authUserId, note, photos, submis
   });
 }
 
-async function createQuoteTask(database, { actorUserId, instruction, photoIds, productName, taskType, tripId }) {
-  const normalized = normalizeQuoteTaskInput({ instruction, photoIds, productName, taskType, tripId });
+async function createQuoteTask(
+  database,
+  { actorUserId, instruction, photoIds, productName, taskType, tripId, uploadedPhotos },
+) {
+  const normalized = normalizeQuoteTaskInput({
+    instruction,
+    photoIds,
+    productName,
+    taskType,
+    tripId,
+    uploadedPhotos,
+  });
   return withTransaction(database, async (client) => {
     const trip = await lockTrip(client, normalized.tripId);
     if (!trip.assigned_helper_id) {
@@ -460,20 +726,38 @@ async function createQuoteTask(database, { actorUserId, instruction, photoIds, p
       throw new HelperAppServiceError("trip_not_active", "Quote tasks cannot be created for ended or canceled trips.");
     }
 
-    const photosResult = await client.query(
-      `select id, trip_id, helper_id, storage_key
-       from helper_app.site_photos
-       where id = any($1::uuid[])
-       order by array_position($1::uuid[], id)`,
-      [normalized.photoIds],
-    );
-    if (photosResult.rows.length !== normalized.photoIds.length) {
-      throw new HelperAppServiceError("photo_not_found", "Selected site photos were not found.");
-    }
-    for (const photo of photosResult.rows) {
-      if (photo.trip_id !== trip.id || photo.helper_id !== trip.assigned_helper_id) {
-        throw new HelperAppServiceError("invalid_input", "Selected photos must belong to this trip.");
+    let taskPhotos;
+    if (normalized.taskType === "detail") {
+      const requiredPrefix = `helper-app/${trip.id}/admin-task-photos/`;
+      for (const photo of normalized.uploadedPhotos) {
+        if (!photo.storageKey.startsWith(requiredPrefix)) {
+          throw new HelperAppServiceError("invalid_input", "Uploaded task photo does not belong to this trip.");
+        }
       }
+      taskPhotos = normalized.uploadedPhotos.map((photo) => ({
+        ...photo,
+        sourceSitePhotoId: null,
+      }));
+    } else {
+      const photosResult = await client.query(
+        `select id, trip_id, helper_id, storage_key
+         from helper_app.site_photos
+         where id = any($1::uuid[])
+         order by array_position($1::uuid[], id)`,
+        [normalized.photoIds],
+      );
+      if (photosResult.rows.length !== normalized.photoIds.length) {
+        throw new HelperAppServiceError("photo_not_found", "Selected site photos were not found.");
+      }
+      for (const photo of photosResult.rows) {
+        if (photo.trip_id !== trip.id || photo.helper_id !== trip.assigned_helper_id) {
+          throw new HelperAppServiceError("invalid_input", "Selected photos must belong to this trip.");
+        }
+      }
+      taskPhotos = photosResult.rows.map((photo) => ({
+        sourceSitePhotoId: photo.id,
+        storageKey: photo.storage_key,
+      }));
     }
 
     const taskResult = await client.query(
@@ -492,14 +776,34 @@ async function createQuoteTask(database, { actorUserId, instruction, photoIds, p
     );
     const task = taskResult.rows[0];
 
-    for (const [index, photo] of photosResult.rows.entries()) {
-      await client.query(
-        `update helper_app.media_objects
-         set media_kind = 'quote_task_photo',
-             retention_status = 'task_evidence'
-         where storage_key = $1`,
-        [photo.storage_key],
-      );
+    for (const [index, photo] of taskPhotos.entries()) {
+      if (normalized.taskType === "detail") {
+        await client.query(
+          `insert into helper_app.media_objects
+             (storage_key, media_kind, retention_status, original_filename, content_type, byte_size)
+           values ($1, 'quote_task_photo', 'task_evidence', $2, $3, $4)
+           on conflict (storage_key) do update
+           set media_kind = 'quote_task_photo',
+               retention_status = 'task_evidence',
+               original_filename = excluded.original_filename,
+               content_type = excluded.content_type,
+               byte_size = excluded.byte_size`,
+          [
+            photo.storageKey,
+            photo.originalFilename,
+            photo.contentType,
+            photo.byteSize,
+          ],
+        );
+      } else {
+        await client.query(
+          `update helper_app.media_objects
+           set media_kind = 'quote_task_photo',
+               retention_status = 'task_evidence'
+           where storage_key = $1`,
+          [photo.storageKey],
+        );
+      }
       await client.query(
         `insert into helper_app.quote_task_photos
            (quote_task_id, trip_id, helper_id, source_site_photo_id, storage_key,
@@ -509,8 +813,8 @@ async function createQuoteTask(database, { actorUserId, instruction, photoIds, p
           task.id,
           trip.id,
           trip.assigned_helper_id,
-          photo.id,
-          photo.storage_key,
+          photo.sourceSitePhotoId,
+          photo.storageKey,
           normalized.productName,
           normalized.instruction,
           index,
@@ -523,7 +827,7 @@ async function createQuoteTask(database, { actorUserId, instruction, photoIds, p
       actor_role: "admin",
       actor_user_id: actorUserId,
       after_state: {
-        photoCount: photosResult.rows.length,
+        photoCount: taskPhotos.length,
         taskId: task.id,
         taskType: task.task_type,
       },
@@ -532,6 +836,346 @@ async function createQuoteTask(database, { actorUserId, instruction, photoIds, p
     });
     return getQuoteTaskById(client, task.id);
   });
+}
+
+async function createPurchaseTask(database, input) {
+  const normalized = normalizePurchaseTaskInput(input);
+  const referencePhotos = normalizePurchaseReferencePhotos(input.referencePhotos || input.uploadedPhotos);
+  if (!referencePhotos.length) {
+    throw new HelperAppServiceError("invalid_input", "At least one purchase reference photo is required.");
+  }
+  return withTransaction(database, async (client) => {
+    const trip = await lockTrip(client, normalized.tripId);
+    if (!trip.assigned_helper_id) {
+      throw new HelperAppServiceError("invalid_trip", "Trip must have an assigned helper.");
+    }
+    if (trip.status !== "active") {
+      throw new HelperAppServiceError("trip_not_active", "Purchase tasks can only be created for an active trip.");
+    }
+    const task = await insertPurchaseTask(client, {
+      ...normalized,
+      helperId: trip.assigned_helper_id,
+    });
+    for (const [index, photo] of referencePhotos.entries()) {
+      await client.query(
+        `insert into helper_app.media_objects
+           (storage_key, media_kind, retention_status, original_filename,
+            content_type, byte_size)
+         values ($1, 'purchase_reference_photo', 'task_evidence', $2, $3, $4)
+         on conflict (storage_key) do update
+         set media_kind = 'purchase_reference_photo',
+             retention_status = 'task_evidence',
+             original_filename = coalesce(excluded.original_filename, helper_app.media_objects.original_filename),
+             content_type = coalesce(excluded.content_type, helper_app.media_objects.content_type),
+             byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)`,
+        [photo.storageKey, photo.originalFilename, photo.contentType, photo.byteSize],
+      );
+      await insertPurchasePhoto(client, {
+        helperId: trip.assigned_helper_id,
+        photoRole: "manual_reference",
+        purchaseTaskId: task.id,
+        sortOrder: index,
+        storageKey: photo.storageKey,
+        tripId: trip.id,
+      });
+    }
+    return getPurchaseTaskById(client, task.id);
+  });
+}
+
+async function quickPublishPurchaseTask(database, input) {
+  const normalized = normalizePurchaseTaskInput(input, { allowMissingOriginalPriceJpy: true });
+  const quoteTaskPhotoId = requiredText(input.quoteTaskPhotoId, "quoteTaskPhotoId");
+  return withTransaction(database, async (client) => {
+    const quoteResult = await client.query(
+      `select qtp.id, qtp.quote_task_id, qtp.trip_id, qtp.helper_id, qtp.storage_key,
+              qtp.reply_status, qt.status as quote_task_status, reply.id as reply_id,
+              reply.price_jpy, reply.detail_photos
+       from helper_app.quote_task_photos qtp
+       join helper_app.quote_tasks qt on qt.id = qtp.quote_task_id
+       left join lateral (
+         select qpr.*
+         from helper_app.quote_photo_replies qpr
+         where qpr.quote_task_photo_id = qtp.id
+         order by qpr.updated_at desc
+         limit 1
+       ) reply on true
+       where qtp.id = $1
+       for update of qtp`,
+      [quoteTaskPhotoId],
+    );
+    const quotePhoto = quoteResult.rows[0];
+    if (!quotePhoto) throw new HelperAppServiceError("photo_not_found", "Quote task photo was not found.");
+    if (quotePhoto.reply_status === "converted_to_purchase") {
+      throw new HelperAppServiceError("already_converted", "This quote photo is already a purchase task.");
+    }
+    const trip = await lockTrip(client, quotePhoto.trip_id);
+    if (trip.status !== "active") {
+      throw new HelperAppServiceError("trip_not_active", "Purchase tasks can only be created for an active trip.");
+    }
+    if (normalized.tripId !== trip.id) {
+      throw new HelperAppServiceError("invalid_input", "Quote photo does not belong to the selected trip.");
+    }
+
+    const task = await insertPurchaseTask(client, {
+      ...normalized,
+      helperId: quotePhoto.helper_id,
+      originalPriceJpy: normalized.originalPriceJpy ?? quotePhoto.price_jpy,
+      sourceQuoteReplyId: quotePhoto.reply_id,
+      sourceQuoteTaskId: quotePhoto.quote_task_id,
+      sourceQuoteTaskPhotoId: quotePhoto.id,
+    });
+    await insertPurchasePhoto(client, {
+      helperId: quotePhoto.helper_id,
+      photoRole: "source",
+      purchaseTaskId: task.id,
+      sortOrder: 0,
+      storageKey: quotePhoto.storage_key,
+      tripId: quotePhoto.trip_id,
+    });
+    const detailPhotos = Array.isArray(quotePhoto.detail_photos) ? quotePhoto.detail_photos : [];
+    for (const [index, detailPhoto] of detailPhotos.entries()) {
+      await insertPurchasePhoto(client, {
+        helperId: quotePhoto.helper_id,
+        photoRole: "detail_reply",
+        purchaseTaskId: task.id,
+        sortOrder: index,
+        storageKey: detailPhoto.storage_key,
+        tripId: quotePhoto.trip_id,
+      });
+    }
+    await client.query(
+      `update helper_app.quote_task_photos
+       set reply_status = 'converted_to_purchase',
+           updated_at = now()
+       where id = $1`,
+      [quotePhoto.id],
+    );
+    await refreshQuoteTaskStatus(client, quotePhoto.quote_task_id);
+    await insertAuditEvent(client, {
+      action: "admin_purchase_quick_published",
+      actor_role: "admin",
+      actor_user_id: normalized.actorUserId,
+      after_state: {
+        purchaseTaskId: task.id,
+        quoteTaskId: quotePhoto.quote_task_id,
+        quoteTaskPhotoId: quotePhoto.id,
+      },
+      before_state: {},
+      trip_id: quotePhoto.trip_id,
+    });
+    return getPurchaseTaskById(client, task.id);
+  });
+}
+
+async function respondPurchaseTask(database, input) {
+  const normalized = normalizePurchaseResponseInput(input);
+  return withTransaction(database, async (client) => {
+    const helper = await findActiveHelperForUser(client, normalized.authUserId);
+    const task = await lockPurchaseTask(client, normalized.purchaseTaskId);
+    if (task.helper_id !== helper.id) {
+      throw new HelperAppServiceError("forbidden", "Purchase task is not assigned to this helper.");
+    }
+    const trip = await lockTrip(client, task.trip_id);
+    assertTripCanUseLiveWorkspace(trip, "Purchase tasks can be updated only while the trip is active.");
+    if (["completed", "canceled", "unavailable", "not_found"].includes(task.status)) {
+      if (task.idempotency_key && task.idempotency_key === normalized.idempotencyKey) {
+        return task;
+      }
+      throw new HelperAppServiceError("invalid_status", "This purchase task is already closed.");
+    }
+
+    if (normalized.action === "cancel" || normalized.action === "unavailable" || normalized.action === "not_found") {
+      if (!normalized.helperNote) {
+        throw new HelperAppServiceError("invalid_input", "A reason is required.");
+      }
+      const status = normalized.action === "cancel" ? "canceled" : normalized.action;
+      const result = await client.query(
+        `update helper_app.purchase_tasks
+         set status = $2,
+             unavailable_quantity = $3,
+             helper_note = $4,
+             idempotency_key = coalesce(idempotency_key, $5),
+             canceled_at = now(),
+             updated_at = now()
+         where id = $1
+         returning *`,
+        [
+          task.id,
+          status,
+          normalized.unavailableQuantity ?? task.quantity,
+          normalized.helperNote,
+          normalized.idempotencyKey,
+        ],
+      );
+      await insertAuditEvent(client, {
+        action: `helper_purchase_${status}`,
+        actor_helper_id: helper.id,
+        actor_role: "helper",
+        actor_user_id: normalized.authUserId,
+        after_state: { purchaseTaskId: task.id, status },
+        before_state: { status: task.status },
+        trip_id: task.trip_id,
+      });
+      return result.rows[0];
+    }
+
+    const completedQuantity = normalized.completedQuantity ?? task.quantity;
+    if (completedQuantity > task.quantity) {
+      throw new HelperAppServiceError("invalid_input", "Completed quantity cannot exceed requested quantity.");
+    }
+    if (completedQuantity < task.quantity && normalized.unavailableQuantity == null) {
+      throw new HelperAppServiceError("invalid_input", "Partial purchases must explicitly resolve the remaining quantity.");
+    }
+    if (task.requires_face_check && task.status === "open") {
+      if (!normalized.faceCheckPhoto) {
+        throw new HelperAppServiceError("invalid_input", "Face-check photo is required.");
+      }
+      await client.query(
+        `insert into helper_app.media_objects
+           (storage_key, media_kind, retention_status, original_filename,
+            content_type, byte_size, uploaded_by_helper_id)
+         values ($1, 'purchase_face_check_photo', 'task_evidence', $2, $3, $4, $5)
+         on conflict (storage_key) do update
+         set media_kind = 'purchase_face_check_photo',
+             retention_status = 'task_evidence',
+             original_filename = coalesce(excluded.original_filename, helper_app.media_objects.original_filename),
+             content_type = coalesce(excluded.content_type, helper_app.media_objects.content_type),
+             byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)`,
+        [
+          normalized.faceCheckPhoto.storageKey,
+          normalized.faceCheckPhoto.originalFilename,
+          normalized.faceCheckPhoto.contentType,
+          normalized.faceCheckPhoto.byteSize,
+          helper.id,
+        ],
+      );
+      await insertPurchasePhoto(client, {
+        helperId: helper.id,
+        photoRole: "face_check_report",
+        purchaseTaskId: task.id,
+        sortOrder: 0,
+        storageKey: normalized.faceCheckPhoto.storageKey,
+        tripId: task.trip_id,
+      });
+      const result = await client.query(
+        `update helper_app.purchase_tasks
+         set status = 'review_pending',
+             completed_quantity = $2,
+             unavailable_quantity = $3,
+             helper_note = $4,
+             face_check_note = $5,
+             idempotency_key = coalesce(idempotency_key, $6),
+             updated_at = now()
+         where id = $1
+         returning *`,
+        [
+          task.id,
+          completedQuantity,
+          task.quantity - completedQuantity,
+          normalized.helperNote,
+          normalized.faceCheckNote,
+          normalized.idempotencyKey,
+        ],
+      );
+      await insertAuditEvent(client, {
+        action: "helper_purchase_face_check_submitted",
+        actor_helper_id: helper.id,
+        actor_role: "helper",
+        actor_user_id: normalized.authUserId,
+        after_state: { completedQuantity, purchaseTaskId: task.id },
+        before_state: { status: task.status },
+        trip_id: task.trip_id,
+      });
+      return result.rows[0];
+    }
+
+    if (task.requires_face_check && task.status !== "approved_pending_helper_confirmation") {
+      throw new HelperAppServiceError("invalid_status", "Face-check task needs admin approval first.");
+    }
+
+    const result = await client.query(
+      `update helper_app.purchase_tasks
+       set status = 'completed',
+           completed_quantity = $2,
+           unavailable_quantity = $3,
+           helper_note = coalesce($4, helper_note),
+           idempotency_key = $5,
+           completed_at = now(),
+           updated_at = now()
+       where id = $1
+       returning *`,
+      [
+        task.id,
+        completedQuantity,
+        task.quantity - completedQuantity,
+        normalized.helperNote,
+        normalized.idempotencyKey,
+      ],
+    );
+    await syncStagingOrderPreview(client, result.rows[0]);
+    await insertAuditEvent(client, {
+      action: task.requires_face_check ? "helper_purchase_face_check_confirmed" : "helper_purchase_completed",
+      actor_helper_id: helper.id,
+      actor_role: "helper",
+      actor_user_id: normalized.authUserId,
+      after_state: { completedQuantity, purchaseTaskId: task.id },
+      before_state: { status: task.status },
+      trip_id: task.trip_id,
+    });
+    return result.rows[0];
+  });
+}
+
+async function reviewFaceCheckPurchaseTask(database, input) {
+  const purchaseTaskId = requiredText(input.purchaseTaskId, "purchaseTaskId");
+  const action = requiredText(input.action, "action");
+  if (!["approve", "reject"].includes(action)) {
+    throw new HelperAppServiceError("invalid_input", "Invalid face-check review action.");
+  }
+  return withTransaction(database, async (client) => {
+    const task = await lockPurchaseTask(client, purchaseTaskId);
+    if (!task.requires_face_check || task.status !== "review_pending") {
+      throw new HelperAppServiceError("invalid_status", "Only review-pending face-check tasks can be reviewed.");
+    }
+    const status = action === "approve" ? "approved_pending_helper_confirmation" : "open";
+    const result = await client.query(
+      `update helper_app.purchase_tasks
+       set status = $2,
+           admin_review_note = $3,
+           admin_reviewed_by_user_id = $4,
+           updated_at = now()
+       where id = $1
+       returning *`,
+      [task.id, status, optionalText(input.adminReviewNote), input.actorUserId || null],
+    );
+    await insertAuditEvent(client, {
+      action: action === "approve" ? "admin_face_check_approved" : "admin_face_check_rejected",
+      actor_role: "admin",
+      actor_user_id: input.actorUserId || null,
+      after_state: { purchaseTaskId: task.id, status },
+      before_state: { status: task.status },
+      trip_id: task.trip_id,
+    });
+    return result.rows[0];
+  });
+}
+
+async function authorizeAdminTaskPhotoUpload(database, { tripId }) {
+  const result = await database.query(
+    `select id, status
+     from helper_app.trips
+     where id = $1`,
+    [requiredText(tripId, "tripId")],
+  );
+  const trip = result.rows[0];
+  if (!trip) {
+    throw new HelperAppServiceError("trip_not_found", "Trip was not found.");
+  }
+  if (trip.status !== "active") {
+    throw new HelperAppServiceError("trip_not_active", "Task photos can only be uploaded for an active trip.");
+  }
+  return trip;
 }
 
 async function authorizeQuoteReplyUpload(database, { authUserId, quoteTaskPhotoId }) {
@@ -548,10 +1192,28 @@ async function authorizeQuoteReplyUpload(database, { authUserId, quoteTaskPhotoI
   const row = result.rows[0];
   if (!row) throw new HelperAppServiceError("forbidden", "Quote photo is not assigned to this helper.");
   if (!row.is_active) throw new HelperAppServiceError("helper_inactive", "Helper profile is inactive.");
-  assertTripIsToday(row, "Quote reply photos can be uploaded only for today's trip.");
-  if (row.status !== "active") {
-    throw new HelperAppServiceError("trip_not_active", "Quote reply photos can be uploaded only while the trip is active.");
+  assertTripCanReplyQuote(row);
+  return row;
+}
+
+async function authorizePurchaseFaceCheckUpload(database, { authUserId, purchaseTaskId }) {
+  const result = await database.query(
+    `select pt.id, pt.trip_id, pt.helper_id, pt.status, pt.requires_face_check,
+            t.status as trip_status, hp.is_active
+     from helper_app.purchase_tasks pt
+     join helper_app.trips t on t.id = pt.trip_id
+     join helper_app.helper_profiles hp on hp.id = pt.helper_id
+     where pt.id = $1
+       and hp.auth_user_id = $2`,
+    [purchaseTaskId, authUserId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new HelperAppServiceError("forbidden", "Purchase task is not assigned to this helper.");
+  if (!row.is_active) throw new HelperAppServiceError("helper_inactive", "Helper profile is inactive.");
+  if (!row.requires_face_check || row.status !== "open") {
+    throw new HelperAppServiceError("invalid_status", "This purchase task does not need a face-check upload.");
   }
+  assertTripCanUseLiveWorkspace({ status: row.trip_status }, "Face-check photos can be uploaded only while the trip is active.");
   return row;
 }
 
@@ -582,10 +1244,7 @@ async function submitQuotePhotoReply(
       throw new HelperAppServiceError("forbidden", "Quote task photo is not assigned to this helper.");
     }
     const trip = await lockTrip(client, taskPhoto.trip_id);
-    assertTripIsToday(trip, "Quote replies can be submitted only for today's trip.");
-    if (trip.status !== "active") {
-      throw new HelperAppServiceError("trip_not_active", "Quote replies can be submitted only while the trip is active.");
-    }
+    assertTripCanReplyQuote(trip);
     if (taskPhoto.reply_status === "converted_to_purchase") {
       throw new HelperAppServiceError("already_converted", "Converted quote photos can no longer be edited.");
     }
@@ -721,6 +1380,55 @@ async function markHelperArrived(database, { authUserId, expectedVersion, tripId
   });
 }
 
+async function markHelperEnded(database, { authUserId, expectedVersion, tripId }) {
+  return withTransaction(database, async (client) => {
+    const helper = await findActiveHelperForUser(client, authUserId);
+    const trip = await lockTrip(client, tripId);
+    if (trip.assigned_helper_id !== helper.id) {
+      throw new HelperAppServiceError("forbidden", "Trip is not assigned to this helper.");
+    }
+    assertTripCanEnd(trip);
+    const openPurchases = await client.query(
+      `select count(*)::int as count
+       from helper_app.purchase_tasks
+       where trip_id = $1
+         and status in ('open', 'review_pending', 'approved_pending_helper_confirmation')`,
+      [tripId],
+    );
+    if (Number(openPurchases.rows[0]?.count || 0) > 0) {
+      throw new HelperAppServiceError(
+        "unfinished_purchase_tasks",
+        "尚有未完成的採買任務，請先完成、取消、標記缺貨或找不到。",
+      );
+    }
+    const quoteWarnings = await client.query(
+      `select count(*)::int as count
+       from helper_app.quote_task_photos
+       where trip_id = $1 and reply_status in ('open', 'needs_review')`,
+      [tripId],
+    );
+    const transition = buildTransition({
+      action: "helper_ended",
+      actorRole: "helper",
+      expectedVersion,
+      trip,
+    });
+    const updated = await persistTripTransition(client, transition.trip);
+    transition.event.after_state.unfinishedQuoteSubtasks = Number(quoteWarnings.rows[0]?.count || 0);
+    await insertAuditEvent(client, {
+      ...transition.event,
+      actor_helper_id: helper.id,
+      actor_user_id: authUserId,
+      trip_id: tripId,
+    });
+    const settlement = await createSettlementForEndedTrip(client, {
+      helper,
+      trip: updated,
+    });
+    return { settlement, trip: updated };
+  });
+}
+
 async function activateTrip(database, { actorUserId, expectedVersion, tripId }) {
   return mutateAdminTrip(database, {
     action: "admin_activated",
@@ -766,7 +1474,12 @@ async function mutateHelperTrip(database, { action, authUserId, expectedVersion,
     if (trip.assigned_helper_id !== helper.id) {
       throw new HelperAppServiceError("forbidden", "Trip is not assigned to this helper.");
     }
-    assertTripIsToday(trip, "Helper trip actions are available only for today's trip.");
+    if (action === "helper_departed") {
+      assertTripCanDepart(trip);
+    }
+    if (action === "helper_ended") {
+      assertTripCanEnd(trip);
+    }
     const transition = buildTransition({
       action,
       actorRole: "helper",
@@ -876,6 +1589,450 @@ async function insertAuditEvent(client, event) {
   );
 }
 
+async function createSettlementForEndedTrip(client, { helper, trip }) {
+  const workMinutes = calculateWorkMinutes(trip.departed_at, trip.ended_at);
+  const totalResult = await client.query(
+    `select coalesce(sum(quantity * coalesce(original_price_jpy, 0)), 0)::int as product_total_jpy
+     from helper_app.staging_order_previews
+     where trip_id = $1 and helper_id = $2`,
+    [trip.id, helper.id],
+  );
+  const productTotalJpy = Number(totalResult.rows[0]?.product_total_jpy || 0);
+  const settlementResult = await client.query(
+    `insert into helper_app.settlements
+       (trip_id, helper_id, compensation_mode, hourly_rate_twd, helper_fx_rate,
+        product_total_jpy, work_minutes)
+     values ($1, $2, $3, $4, $5, $6, $7)
+     on conflict (trip_id) do nothing
+     returning *`,
+    [
+      trip.id,
+      helper.id,
+      helper.compensation_mode,
+      helper.hourly_rate_twd,
+      helper.helper_fx_rate,
+      productTotalJpy,
+      workMinutes,
+    ],
+  );
+  let settlement = settlementResult.rows[0];
+  if (!settlement) {
+    const existing = await client.query(
+      `select * from helper_app.settlements where trip_id = $1`,
+      [trip.id],
+    );
+    settlement = existing.rows[0];
+  }
+  await client.query(
+    `insert into helper_app.settlement_line_items
+       (settlement_id, staging_order_preview_id, purchase_task_id, product_name,
+        quantity, original_price_jpy, product_total_jpy)
+     select $1, sop.id, sop.purchase_task_id, sop.product_name, sop.quantity,
+            coalesce(sop.original_price_jpy, 0),
+            sop.quantity * coalesce(sop.original_price_jpy, 0)
+     from helper_app.staging_order_previews sop
+     where sop.trip_id = $2 and sop.helper_id = $3
+     on conflict (settlement_id, staging_order_preview_id) do nothing`,
+    [settlement.id, trip.id, helper.id],
+  );
+  return settlement;
+}
+
+async function authorizeSettlementEvidenceUpload(
+  database,
+  { authUserId, evidenceType, settlementId },
+) {
+  const allowedTypes = ["daily_receipt", "transport_proof", "warehouse_proof"];
+  if (!allowedTypes.includes(evidenceType)) {
+    throw new HelperAppServiceError("invalid_input", "Unknown settlement evidence type.");
+  }
+  const result = await database.query(
+    `select s.id, s.trip_id, s.status
+     from helper_app.settlements s
+     join helper_app.helper_profiles hp on hp.id = s.helper_id
+     where s.id = $1 and hp.auth_user_id = $2 and hp.is_active = true`,
+    [settlementId, authUserId],
+  );
+  const settlement = result.rows[0];
+  if (!settlement) throw new HelperAppServiceError("forbidden", "Settlement is not available.");
+  const precheckAllowed = ["pending_helper_precheck", "correction_required"].includes(settlement.status);
+  const warehouseAllowed = settlement.status === "warehouse_pending";
+  if (
+    (evidenceType === "warehouse_proof" && !warehouseAllowed) ||
+    (evidenceType !== "warehouse_proof" && !precheckAllowed)
+  ) {
+    throw new HelperAppServiceError("invalid_status", "Settlement evidence cannot be uploaded now.");
+  }
+  return settlement;
+}
+
+async function attachSignedSettlementUrls(settlements, r2Store) {
+  return Promise.all(
+    settlements.map(async (settlement) => ({
+      ...settlement,
+      evidence: await Promise.all(
+        (settlement.evidence || []).map(async (item) => ({
+          ...item,
+          signed_url: await r2Store.signedGetUrl(item.storage_key),
+        })),
+      ),
+    })),
+  );
+}
+
+async function submitSettlementPrecheck(database, input) {
+  const idempotencyKey = requiredText(input.idempotencyKey, "idempotencyKey");
+  const receipt = normalizeSettlementEvidence(input.receipt, "daily_receipt");
+  const transportJpy = optionalNonNegativeInteger(input.transportJpy);
+  const transportClaimNote = optionalText(input.transportClaimNote);
+  const transportProof = input.transportProof
+    ? normalizeSettlementEvidence(input.transportProof, "transport_proof")
+    : null;
+  if ((transportJpy === null) !== (transportClaimNote === null)) {
+    throw new HelperAppServiceError(
+      "invalid_transport_claim",
+      "申請交通費時，日圓金額與搭車區間文字都必須提供。",
+    );
+  }
+  return withTransaction(database, async (client) => {
+    const helper = await findActiveHelperForUser(client, input.authUserId);
+    const settlement = await lockSettlement(client, input.settlementId);
+    assertHelperOwnsSettlement(settlement, helper);
+    if (settlement.helper_submission_key === idempotencyKey) return settlement;
+    if (!["pending_helper_precheck", "correction_required"].includes(settlement.status)) {
+      throw new HelperAppServiceError("invalid_status", "This settlement cannot be submitted now.");
+    }
+    await upsertSettlementEvidence(client, {
+      evidence: receipt,
+      evidenceType: "daily_receipt",
+      helperId: helper.id,
+      settlementId: settlement.id,
+    });
+    if (transportProof) {
+      await upsertSettlementEvidence(client, {
+        evidence: transportProof,
+        evidenceType: "transport_proof",
+        helperId: helper.id,
+        settlementId: settlement.id,
+      });
+    }
+    const updated = await client.query(
+      `update helper_app.settlements
+       set status = 'pending_admin_review',
+           transport_claim_jpy = $2,
+           transport_status = case when $2::int is null then 'none' else 'pending' end,
+           transport_claim_note = $3,
+           helper_note = $4,
+           correction_note = null,
+           helper_submission_key = $5,
+           helper_submitted_at = now(),
+           updated_at = now()
+       where id = $1
+       returning *`,
+      [
+        settlement.id,
+        transportJpy,
+        transportClaimNote,
+        optionalText(input.helperNote),
+        idempotencyKey,
+      ],
+    );
+    await insertAuditEvent(client, {
+      action: "helper_settlement_precheck_submitted",
+      actor_helper_id: helper.id,
+      actor_role: "helper",
+      actor_user_id: input.authUserId,
+      after_state: { settlementId: settlement.id, status: "pending_admin_review" },
+      before_state: { status: settlement.status },
+      trip_id: settlement.trip_id,
+    });
+    return updated.rows[0];
+  });
+}
+
+async function reviewSettlement(database, input) {
+  const action = requiredText(input.action, "action");
+  if (!["approve", "reject"].includes(action)) {
+    throw new HelperAppServiceError("invalid_input", "Unknown settlement review action.");
+  }
+  return withTransaction(database, async (client) => {
+    const settlement = await lockSettlement(client, input.settlementId);
+    if (settlement.status !== "pending_admin_review") {
+      throw new HelperAppServiceError("invalid_status", "Settlement is not waiting for admin review.");
+    }
+    if (action === "reject") {
+      const note = requiredText(input.adminReviewNote, "adminReviewNote");
+      const result = await client.query(
+        `update helper_app.settlements
+         set status = 'correction_required', correction_note = $2,
+             helper_submission_key = null, admin_reviewed_at = now(), updated_at = now()
+         where id = $1 returning *`,
+        [settlement.id, note],
+      );
+      await auditSettlementState(client, settlement, result.rows[0], input.actorUserId, "admin_settlement_rejected");
+      return result.rows[0];
+    }
+    const jpyToTwdRate = positiveNumber(input.jpyToTwdRate, "jpyToTwdRate");
+    const transportApproved =
+      settlement.transport_status === "pending" && input.transportDecision === "approve";
+    const totals = calculateSettlement({
+      compensationMode: settlement.compensation_mode,
+      helperFxRate: settlement.helper_fx_rate,
+      hourlyRateTwd: settlement.hourly_rate_twd,
+      jpyToTwdRate,
+      productTotalJpy: settlement.product_total_jpy,
+      transportApproved,
+      transportJpy: settlement.transport_claim_jpy || 0,
+      workMinutes: settlement.work_minutes,
+    });
+    const result = await client.query(
+      `update helper_app.settlements
+       set status = 'pending_helper_confirmation',
+           jpy_to_twd_rate = $2,
+           item_advance_twd = $3,
+           work_pay_twd = $4,
+           approved_transport_twd = $5,
+           total_payable_twd = $6,
+           is_split_payment = $7,
+           transport_status = case
+             when transport_status = 'none' then 'none'
+             when $8::boolean then 'approved'
+             else 'rejected'
+           end,
+           admin_review_note = $9,
+           correction_note = null,
+           admin_reviewed_at = now(),
+           updated_at = now()
+       where id = $1
+       returning *`,
+      [
+        settlement.id,
+        jpyToTwdRate,
+        totals.itemAdvanceTwd,
+        totals.workPayTwd,
+        totals.approvedTransportTwd,
+        totals.totalPayableTwd,
+        totals.isSplitPayment,
+        transportApproved,
+        optionalText(input.adminReviewNote),
+      ],
+    );
+    await auditSettlementState(client, settlement, result.rows[0], input.actorUserId, "admin_settlement_approved");
+    return result.rows[0];
+  });
+}
+
+async function confirmSettlement(database, input) {
+  return withTransaction(database, async (client) => {
+    const helper = await findActiveHelperForUser(client, input.authUserId);
+    const settlement = await lockSettlement(client, input.settlementId);
+    assertHelperOwnsSettlement(settlement, helper);
+    if (settlement.status !== "pending_helper_confirmation") {
+      throw new HelperAppServiceError("invalid_status", "Settlement is not ready for final confirmation.");
+    }
+    const result = await client.query(
+      `update helper_app.settlements
+       set status = 'payment_pending', helper_confirmed_at = now(), updated_at = now()
+       where id = $1 returning *`,
+      [settlement.id],
+    );
+    await auditSettlementState(client, settlement, result.rows[0], input.authUserId, "helper_settlement_confirmed", helper.id);
+    return result.rows[0];
+  });
+}
+
+async function recordSettlementPayment(database, input) {
+  const transferNotification = requiredText(input.transferNotification, "transferNotification");
+  return withTransaction(database, async (client) => {
+    const settlement = await lockSettlement(client, input.settlementId);
+    let paymentType;
+    let amount;
+    if (settlement.status === "payment_pending") {
+      paymentType = settlement.is_split_payment ? "first" : "single";
+      amount = settlement.is_split_payment
+        ? Math.round(Number(settlement.total_payable_twd) / 2)
+        : Number(settlement.total_payable_twd);
+    } else if (settlement.status === "final_payment_pending" && settlement.is_split_payment) {
+      paymentType = "final";
+      const paid = await client.query(
+        `select coalesce(sum(amount_twd), 0)::int as paid
+         from helper_app.settlement_payments where settlement_id = $1`,
+        [settlement.id],
+      );
+      amount = Number(settlement.total_payable_twd) - Number(paid.rows[0]?.paid || 0);
+    } else {
+      throw new HelperAppServiceError("invalid_status", "Settlement is not waiting for this payment.");
+    }
+    await client.query(
+      `insert into helper_app.settlement_payments
+         (settlement_id, payment_type, amount_twd, transfer_notification, paid_by_user_id)
+       values ($1, $2, $3, $4, $5)`,
+      [settlement.id, paymentType, amount, transferNotification, input.actorUserId],
+    );
+    const nextStatus = paymentType === "final" ? "completed" : "warehouse_pending";
+    const result = await client.query(
+      `update helper_app.settlements
+       set status = $2,
+           completed_at = case when $2 = 'completed' then now() else completed_at end,
+           updated_at = now()
+       where id = $1 returning *`,
+      [settlement.id, nextStatus],
+    );
+    await auditSettlementState(client, settlement, result.rows[0], input.actorUserId, `admin_settlement_${paymentType}_paid`);
+    return result.rows[0];
+  });
+}
+
+async function submitWarehouseProof(database, input) {
+  const idempotencyKey = requiredText(input.idempotencyKey, "idempotencyKey");
+  const proof = normalizeSettlementEvidence(input.proof, "warehouse_proof");
+  return withTransaction(database, async (client) => {
+    const helper = await findActiveHelperForUser(client, input.authUserId);
+    const settlement = await lockSettlement(client, input.settlementId);
+    assertHelperOwnsSettlement(settlement, helper);
+    if (settlement.warehouse_submission_key === idempotencyKey) return settlement;
+    if (settlement.status !== "warehouse_pending") {
+      throw new HelperAppServiceError("invalid_status", "Warehouse proof cannot be submitted now.");
+    }
+    await upsertSettlementEvidence(client, {
+      evidence: proof,
+      evidenceType: "warehouse_proof",
+      helperId: helper.id,
+      note: optionalText(input.note),
+      settlementId: settlement.id,
+    });
+    const result = await client.query(
+      `update helper_app.settlements
+       set status = 'warehouse_review_pending', warehouse_submission_key = $2,
+           warehouse_submitted_at = now(), updated_at = now()
+       where id = $1 returning *`,
+      [settlement.id, idempotencyKey],
+    );
+    await auditSettlementState(client, settlement, result.rows[0], input.authUserId, "helper_warehouse_proof_submitted", helper.id);
+    return result.rows[0];
+  });
+}
+
+async function reviewWarehouseProof(database, input) {
+  return withTransaction(database, async (client) => {
+    const settlement = await lockSettlement(client, input.settlementId);
+    if (settlement.status !== "warehouse_review_pending") {
+      throw new HelperAppServiceError("invalid_status", "Warehouse proof is not waiting for review.");
+    }
+    const nextStatus = settlement.is_split_payment ? "final_payment_pending" : "completed";
+    const result = await client.query(
+      `update helper_app.settlements
+       set status = $2, warehouse_reviewed_at = now(),
+           completed_at = case when $2 = 'completed' then now() else completed_at end,
+           updated_at = now()
+       where id = $1 returning *`,
+      [settlement.id, nextStatus],
+    );
+    await auditSettlementState(client, settlement, result.rows[0], input.actorUserId, "admin_warehouse_proof_approved");
+    return result.rows[0];
+  });
+}
+
+async function lockSettlement(client, settlementId) {
+  const result = await client.query(
+    `select * from helper_app.settlements where id = $1 for update`,
+    [requiredText(settlementId, "settlementId")],
+  );
+  if (!result.rows[0]) throw new HelperAppServiceError("settlement_not_found", "Settlement was not found.");
+  return result.rows[0];
+}
+
+function assertHelperOwnsSettlement(settlement, helper) {
+  if (settlement.helper_id !== helper.id) {
+    throw new HelperAppServiceError("forbidden", "Settlement does not belong to this helper.");
+  }
+}
+
+async function upsertSettlementEvidence(
+  client,
+  { evidence, evidenceType, helperId, note = null, settlementId },
+) {
+  const mediaKind = evidenceType === "daily_receipt"
+    ? "settlement_receipt"
+    : evidenceType === "transport_proof"
+      ? "transport_proof"
+      : "warehouse_evidence";
+  const retentionStatus = evidenceType === "warehouse_proof" ? "warehouse_evidence" : "order_evidence";
+  await client.query(
+    `insert into helper_app.media_objects
+       (storage_key, media_kind, retention_status, original_filename,
+        content_type, byte_size, uploaded_by_helper_id)
+     values ($1, $2, $3, $4, $5, $6, $7)
+     on conflict (storage_key) do update
+     set media_kind = excluded.media_kind, retention_status = excluded.retention_status`,
+    [
+      evidence.storageKey,
+      mediaKind,
+      retentionStatus,
+      evidence.originalFilename,
+      evidence.contentType,
+      evidence.byteSize,
+      helperId,
+    ],
+  );
+  await client.query(
+    `insert into helper_app.settlement_evidence
+       (settlement_id, storage_key, evidence_type, note)
+     values ($1, $2, $3, $4)
+     on conflict (settlement_id, evidence_type) do update
+     set storage_key = excluded.storage_key, note = excluded.note, updated_at = now()`,
+    [settlementId, evidence.storageKey, evidenceType, note],
+  );
+}
+
+async function auditSettlementState(
+  client,
+  before,
+  after,
+  actorUserId,
+  action,
+  actorHelperId = null,
+) {
+  await insertAuditEvent(client, {
+    action,
+    actor_helper_id: actorHelperId,
+    actor_role: actorHelperId ? "helper" : "admin",
+    actor_user_id: actorUserId,
+    after_state: { settlementId: after.id, status: after.status },
+    before_state: { settlementId: before.id, status: before.status },
+    trip_id: before.trip_id,
+  });
+}
+
+function normalizeSettlementEvidence(value, fieldName) {
+  if (!value || typeof value !== "object") {
+    throw new HelperAppServiceError("invalid_input", `${fieldName} photo is required.`);
+  }
+  return {
+    byteSize: optionalNonNegativeInteger(value.byteSize),
+    contentType: optionalText(value.contentType),
+    originalFilename: optionalText(value.originalFilename),
+    storageKey: requiredText(value.storageKey, `${fieldName}.storageKey`),
+  };
+}
+
+function optionalNonNegativeInteger(value) {
+  if (value === null || value === undefined || String(value).trim() === "") return null;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0) {
+    throw new HelperAppServiceError("invalid_input", "Expected a non-negative integer.");
+  }
+  return number;
+}
+
+function positiveNumber(value, fieldName) {
+  const number = Number(value);
+  if (!Number.isFinite(number) || number <= 0) {
+    throw new HelperAppServiceError("invalid_input", `${fieldName} must be greater than zero.`);
+  }
+  return number;
+}
+
 function normalizeHelperInput(input) {
   const displayName = requiredText(input.displayName, "displayName");
   const email = requiredText(input.email, "email").toLowerCase();
@@ -968,13 +2125,51 @@ function normalizeQuoteTaskInput(input) {
     throw new HelperAppServiceError("invalid_input", "Invalid quote task type.");
   }
   const photoIds = Array.isArray(input.photoIds) ? input.photoIds.map(optionalText).filter(Boolean) : [];
-  if (photoIds.length === 0) {
-    throw new HelperAppServiceError("invalid_input", "At least one task photo is required.");
-  }
   if (new Set(photoIds).size !== photoIds.length) {
     throw new HelperAppServiceError("invalid_input", "Task photos must be unique.");
   }
-  if (photoIds.length > 40) {
+  const uploadedPhotos = Array.isArray(input.uploadedPhotos)
+    ? input.uploadedPhotos.map((photo) => {
+        const byteSize = Number(photo.byteSize);
+        if (!Number.isFinite(byteSize) || byteSize < 0) {
+          throw new HelperAppServiceError("invalid_input", "Photo byte size must be non-negative.");
+        }
+        const contentType = requiredText(photo.contentType, "contentType");
+        if (!contentType.startsWith("image/")) {
+          throw new HelperAppServiceError("invalid_input", "Task uploads must be images.");
+        }
+        const sortOrder = Number(photo.sortOrder);
+        if (!Number.isInteger(sortOrder) || sortOrder < 0) {
+          throw new HelperAppServiceError("invalid_input", "Photo sort order must be a non-negative integer.");
+        }
+        return {
+          byteSize,
+          contentType,
+          originalFilename: optionalText(photo.originalFilename),
+          sortOrder,
+          storageKey: requiredText(photo.storageKey, "storageKey"),
+        };
+      })
+    : [];
+  if (taskType === "detail" && uploadedPhotos.length === 0) {
+    throw new HelperAppServiceError("invalid_input", "At least one uploaded task photo is required.");
+  }
+  if (taskType !== "detail" && photoIds.length === 0) {
+    throw new HelperAppServiceError("invalid_input", "At least one task photo is required.");
+  }
+  if (taskType === "detail" && photoIds.length > 0) {
+    throw new HelperAppServiceError("invalid_input", "Detail tasks must use uploaded task photos.");
+  }
+  if (taskType !== "detail" && uploadedPhotos.length > 0) {
+    throw new HelperAppServiceError("invalid_input", "Only detail tasks may use uploaded task photos.");
+  }
+  if (new Set(uploadedPhotos.map((photo) => photo.storageKey)).size !== uploadedPhotos.length) {
+    throw new HelperAppServiceError("invalid_input", "Uploaded task photos must be unique.");
+  }
+  if (new Set(uploadedPhotos.map((photo) => photo.sortOrder)).size !== uploadedPhotos.length) {
+    throw new HelperAppServiceError("invalid_input", "Uploaded task photo order must be unique.");
+  }
+  if (Math.max(photoIds.length, uploadedPhotos.length) > 40) {
     throw new HelperAppServiceError("invalid_input", "A quote task can include at most 40 photos.");
   }
   return {
@@ -983,6 +2178,7 @@ function normalizeQuoteTaskInput(input) {
     productName: optionalText(input.productName),
     taskType,
     tripId: requiredText(input.tripId, "tripId"),
+    uploadedPhotos: uploadedPhotos.sort((left, right) => left.sortOrder - right.sortOrder),
   };
 }
 
@@ -1017,6 +2213,112 @@ function normalizeQuoteReplyInput(input) {
     note: optionalText(input.note),
     priceJpy,
     quoteTaskPhotoId: requiredText(input.quoteTaskPhotoId, "quoteTaskPhotoId"),
+  };
+}
+
+function normalizePurchaseTaskInput(input, { allowMissingOriginalPriceJpy = false } = {}) {
+  const quantity = Number(requiredText(input.quantity, "quantity"));
+  const salePriceTwd = Number(requiredText(input.salePriceTwd, "salePriceTwd"));
+  const originalPriceText = optionalText(input.originalPriceJpy);
+  if (originalPriceText == null && !allowMissingOriginalPriceJpy) {
+    throw new HelperAppServiceError("invalid_input", "Original JPY price is required.");
+  }
+  const originalPriceJpy = originalPriceText == null ? null : Number(originalPriceText);
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new HelperAppServiceError("invalid_input", "Quantity must be a positive integer.");
+  }
+  if (!Number.isInteger(salePriceTwd) || salePriceTwd < 0) {
+    throw new HelperAppServiceError("invalid_input", "Sale price TWD must be a non-negative integer.");
+  }
+  if (originalPriceJpy != null && (!Number.isInteger(originalPriceJpy) || originalPriceJpy < 0)) {
+    throw new HelperAppServiceError("invalid_input", "Original JPY price must be a non-negative integer.");
+  }
+  return {
+    actorUserId: input.actorUserId || null,
+    lineCommunityName: requiredText(input.lineCommunityName, "lineCommunityName"),
+    note: optionalText(input.note),
+    originalPriceJpy,
+    productName: requiredText(input.productName, "productName"),
+    quantity,
+    requiresFaceCheck: Boolean(input.requiresFaceCheck),
+    salePriceTwd,
+    sourceQuoteReplyId: input.sourceQuoteReplyId || null,
+    sourceQuoteTaskId: input.sourceQuoteTaskId || null,
+    sourceQuoteTaskPhotoId: input.sourceQuoteTaskPhotoId || null,
+    tripId: requiredText(input.tripId, "tripId"),
+  };
+}
+
+function normalizePurchaseReferencePhotos(photos) {
+  const normalized = Array.isArray(photos)
+    ? photos.map((photo, index) => {
+        const contentType = requiredText(photo.contentType || photo.content_type, "contentType");
+        if (!contentType.startsWith("image/")) {
+          throw new HelperAppServiceError("invalid_input", "Only image uploads are supported.");
+        }
+        const byteSize = photo.byteSize ?? photo.byte_size;
+        const sortOrder = Number(photo.sortOrder ?? photo.sort_order ?? index);
+        if (!Number.isInteger(sortOrder) || sortOrder < 0) {
+          throw new HelperAppServiceError("invalid_input", "Reference photo sort order must be a non-negative integer.");
+        }
+        return {
+          byteSize: byteSize == null || byteSize === "" ? null : Number(byteSize),
+          contentType,
+          originalFilename: optionalText(photo.originalFilename || photo.original_filename),
+          sortOrder,
+          storageKey: requiredText(photo.storageKey || photo.storage_key, "storageKey"),
+        };
+      })
+    : [];
+  if (new Set(normalized.map((photo) => photo.storageKey)).size !== normalized.length) {
+    throw new HelperAppServiceError("invalid_input", "Reference photos must be unique.");
+  }
+  if (new Set(normalized.map((photo) => photo.sortOrder)).size !== normalized.length) {
+    throw new HelperAppServiceError("invalid_input", "Reference photo order must be unique.");
+  }
+  return normalized.sort((left, right) => left.sortOrder - right.sortOrder);
+}
+
+function normalizePurchaseResponseInput(input) {
+  const action = requiredText(input.action || "complete", "action");
+  if (!["cancel", "complete", "not_found", "unavailable"].includes(action)) {
+    throw new HelperAppServiceError("invalid_input", "Invalid purchase response action.");
+  }
+  const completedText = optionalText(input.completedQuantity);
+  const unavailableText = optionalText(input.unavailableQuantity);
+  const completedQuantity = completedText == null ? null : Number(completedText);
+  const unavailableQuantity = unavailableText == null ? null : Number(unavailableText);
+  if (completedQuantity != null && (!Number.isInteger(completedQuantity) || completedQuantity <= 0)) {
+    throw new HelperAppServiceError("invalid_input", "Completed quantity must be a positive integer.");
+  }
+  if (unavailableQuantity != null && (!Number.isInteger(unavailableQuantity) || unavailableQuantity < 0)) {
+    throw new HelperAppServiceError("invalid_input", "Unavailable quantity must be a non-negative integer.");
+  }
+  return {
+    action,
+    authUserId: requiredText(input.authUserId, "authUserId"),
+    completedQuantity,
+    faceCheckNote: optionalText(input.faceCheckNote),
+    faceCheckPhoto: normalizeOptionalPhoto(input.faceCheckPhoto),
+    helperNote: optionalText(input.helperNote),
+    idempotencyKey: requiredText(input.idempotencyKey, "idempotencyKey"),
+    purchaseTaskId: requiredText(input.purchaseTaskId, "purchaseTaskId"),
+    unavailableQuantity,
+  };
+}
+
+function normalizeOptionalPhoto(photo) {
+  if (!photo) return null;
+  const contentType = requiredText(photo.contentType || photo.content_type, "contentType");
+  if (!contentType.startsWith("image/")) {
+    throw new HelperAppServiceError("invalid_input", "Only image uploads are supported.");
+  }
+  const byteSize = photo.byteSize ?? photo.byte_size;
+  return {
+    byteSize: byteSize == null || byteSize === "" ? null : Number(byteSize),
+    contentType,
+    originalFilename: optionalText(photo.originalFilename || photo.original_filename),
+    storageKey: requiredText(photo.storageKey || photo.storage_key, "storageKey"),
   };
 }
 
@@ -1095,6 +2397,143 @@ async function getQuoteTaskById(client, taskId) {
   return result.rows[0];
 }
 
+async function insertPurchaseTask(client, input) {
+  const result = await client.query(
+    `insert into helper_app.purchase_tasks
+       (trip_id, helper_id, source_quote_task_id, source_quote_task_photo_id,
+        source_quote_reply_id, line_community_name, product_name, quantity,
+        original_price_jpy, sale_price_twd, note, requires_face_check,
+        created_by_user_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     returning *`,
+    [
+      input.tripId,
+      input.helperId,
+      input.sourceQuoteTaskId || null,
+      input.sourceQuoteTaskPhotoId || null,
+      input.sourceQuoteReplyId || null,
+      input.lineCommunityName,
+      input.productName,
+      input.quantity,
+      input.originalPriceJpy,
+      input.salePriceTwd,
+      input.note,
+      input.requiresFaceCheck,
+      input.actorUserId,
+    ],
+  );
+  const task = result.rows[0];
+  await insertAuditEvent(client, {
+    action: "admin_purchase_task_created",
+    actor_role: "admin",
+    actor_user_id: input.actorUserId,
+    after_state: {
+      purchaseTaskId: task.id,
+      requiresFaceCheck: task.requires_face_check,
+      sourceQuoteTaskPhotoId: task.source_quote_task_photo_id,
+    },
+    before_state: {},
+    trip_id: task.trip_id,
+  });
+  return task;
+}
+
+async function insertPurchasePhoto(client, input) {
+  await client.query(
+    `insert into helper_app.purchase_task_photos
+       (purchase_task_id, trip_id, helper_id, storage_key, photo_role, sort_order)
+     values ($1, $2, $3, $4, $5, $6)
+     on conflict (purchase_task_id, photo_role, sort_order) do nothing`,
+    [
+      input.purchaseTaskId,
+      input.tripId,
+      input.helperId,
+      input.storageKey,
+      input.photoRole,
+      input.sortOrder,
+    ],
+  );
+  await client.query(
+    `update helper_app.media_objects
+     set retention_status = 'order_evidence'
+     where storage_key = $1`,
+    [input.storageKey],
+  );
+}
+
+async function getPurchaseTaskById(client, purchaseTaskId) {
+  const result = await client.query(
+    `select pt.*,
+            coalesce(
+              jsonb_agg(
+                jsonb_build_object(
+                  'id', ptp.id,
+                  'storage_key', ptp.storage_key,
+                  'photo_role', ptp.photo_role,
+                  'sort_order', ptp.sort_order
+                )
+                order by ptp.photo_role asc, ptp.sort_order asc
+              ) filter (where ptp.id is not null),
+              '[]'::jsonb
+            ) as photos
+     from helper_app.purchase_tasks pt
+     left join helper_app.purchase_task_photos ptp on ptp.purchase_task_id = pt.id
+     where pt.id = $1
+     group by pt.id`,
+    [purchaseTaskId],
+  );
+  if (!result.rows[0]) throw new HelperAppServiceError("purchase_task_not_found", "Purchase task was not found.");
+  return result.rows[0];
+}
+
+async function lockPurchaseTask(client, purchaseTaskId) {
+  const result = await client.query(
+    `select *
+     from helper_app.purchase_tasks
+     where id = $1
+     for update`,
+    [purchaseTaskId],
+  );
+  if (!result.rows[0]) throw new HelperAppServiceError("purchase_task_not_found", "Purchase task was not found.");
+  return result.rows[0];
+}
+
+async function syncStagingOrderPreview(client, task) {
+  if (task.status !== "completed" || !task.completed_quantity || task.completed_quantity <= 0) return null;
+  const result = await client.query(
+    `insert into helper_app.staging_order_previews
+       (trip_id, helper_id, purchase_task_id, line_community_name, product_name,
+        quantity, original_price_jpy, sale_price_twd, source_quote_task_id,
+        source_quote_task_photo_id, source_quote_reply_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+     on conflict (purchase_task_id) do update
+     set line_community_name = excluded.line_community_name,
+         product_name = excluded.product_name,
+         quantity = excluded.quantity,
+         original_price_jpy = excluded.original_price_jpy,
+         sale_price_twd = excluded.sale_price_twd,
+         source_quote_task_id = excluded.source_quote_task_id,
+         source_quote_task_photo_id = excluded.source_quote_task_photo_id,
+         source_quote_reply_id = excluded.source_quote_reply_id,
+         updated_at = now()
+     returning *`,
+    [
+      task.trip_id,
+      task.helper_id,
+      task.id,
+      task.line_community_name,
+      task.product_name,
+      task.completed_quantity,
+      task.original_price_jpy,
+      task.sale_price_twd,
+      task.source_quote_task_id,
+      task.source_quote_task_photo_id,
+      task.source_quote_reply_id,
+    ],
+  );
+  return result.rows[0];
+}
+
 async function refreshQuoteTaskStatus(client, quoteTaskId) {
   const result = await client.query(
     `select count(*)::int as total,
@@ -1137,27 +2576,48 @@ function isHelperAppServiceError(error) {
 module.exports = {
   HelperAppServiceError,
   activateTrip,
+  attachSignedSettlementUrls,
   attachSignedQuoteTaskUrls,
+  attachSignedPurchaseTaskUrls,
   attachSignedPhotoUrls,
+  authorizeAdminTaskPhotoUpload,
+  authorizePurchaseFaceCheckUpload,
   authorizeQuoteReplyUpload,
+  authorizeSettlementEvidenceUpload,
   authorizeSitePhotoUpload,
   cancelTrip,
   createHelperProfile,
+  createPurchaseTask,
   createQuoteTask,
   createTrip,
   dateInTimezone,
   dateOnly,
   deactivateHelperProfile,
+  updateHelperProfile,
   getHelperWorkspace,
   groupTripsByLocalDate,
   isHelperAppServiceError,
+  listPurchaseTasks,
   listQuoteTasks,
+  listSettlements,
   listSitePhotoBatches,
+  listStagingOrderPreviews,
   listAdminDashboard,
+  listCustomerNicknames,
   markSitePhotoSaved,
   markHelperArrived,
   markHelperDeparted,
+  markHelperEnded,
   repairTrip,
+  recordSettlementPayment,
+  respondPurchaseTask,
+  reviewSettlement,
+  reviewWarehouseProof,
+  reviewFaceCheckPurchaseTask,
+  quickPublishPurchaseTask,
   submitQuotePhotoReply,
+  submitSettlementPrecheck,
   submitSitePhotoBatch,
+  submitWarehouseProof,
+  confirmSettlement,
 };

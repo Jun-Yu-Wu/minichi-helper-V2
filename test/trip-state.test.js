@@ -37,6 +37,19 @@ test("helper departure moves scheduled trip to departed and increments version",
   assert.equal(result.event.after_state.status, "departed");
 });
 
+test("helper departure can start draft trips", () => {
+  const result = buildTransition({
+    action: "helper_departed",
+    actorRole: "helper",
+    expectedVersion: 1,
+    now: "2026-06-23T02:00:00.000Z",
+    trip: trip({ status: "draft" }),
+  });
+
+  assert.equal(result.trip.status, "departed");
+  assert.equal(result.event.before_state.status, "draft");
+});
+
 test("helper arrival only works after departure", () => {
   assert.throws(
     () =>
@@ -83,6 +96,33 @@ test("admin activation only works after arrival", () => {
 
   assert.equal(result.trip.status, "active");
   assert.equal(result.trip.admin_activated_at, "2026-06-23T04:00:00.000Z");
+});
+
+test("helper end moves in-progress trips to ended", () => {
+  for (const status of ["departed", "arrived", "active"]) {
+    const result = buildTransition({
+      action: "helper_ended",
+      actorRole: "helper",
+      expectedVersion: 2,
+      now: "2026-06-23T05:00:00.000Z",
+      trip: trip({ status, version: 2 }),
+    });
+
+    assert.equal(result.trip.status, "ended");
+    assert.equal(result.trip.ended_at, "2026-06-23T05:00:00.000Z");
+    assert.equal(result.event.action, "helper_ended");
+  }
+
+  assert.throws(
+    () =>
+      buildTransition({
+        action: "helper_ended",
+        actorRole: "helper",
+        expectedVersion: 1,
+        trip: trip(),
+      }),
+    /Only in-progress trips/,
+  );
 });
 
 test("stale expectedVersion is rejected", () => {
