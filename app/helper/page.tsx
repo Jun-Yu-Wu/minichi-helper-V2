@@ -13,7 +13,15 @@ import {
   Truck,
 } from "lucide-react";
 
-import { arriveTripAction, confirmSettlementAction, departTripAction } from "../actions/helper";
+import {
+  arriveTripAction,
+  checkoutRebuyTasksAction,
+  claimRebuyTaskAction,
+  confirmSettlementAction,
+  departTripAction,
+  releaseRebuyTaskAction,
+  reportRebuyTaskAction,
+} from "../actions/helper";
 import { ActionButtonForm } from "../components/ActionButtonForm";
 import { SessionBar } from "../components/SessionBar";
 import { Button } from "../components/ui/button";
@@ -29,6 +37,7 @@ import { SettlementPrecheckForm, WarehouseProofForm } from "./Settlements";
 
 type HelperSearchParams = {
   panel?: string;
+  settlementId?: string;
   tripId?: string;
   view?: string;
 };
@@ -96,6 +105,10 @@ export default async function HelperPage({
     workspace.settlements || [],
     createR2ObjectStore(),
   );
+  const signedRebuyTasks = await service.attachSignedRebuyTaskUrls(
+    workspace.rebuyTasks || [],
+    createR2ObjectStore(),
+  );
   const selectedTrip = helperAssignedTrips(workspace).find((trip: any) => trip.id === params.tripId);
   const selectedTripCanBeOpened = Boolean(
     selectedTrip && !["ended", "canceled"].includes(selectedTrip.status),
@@ -118,9 +131,9 @@ export default async function HelperPage({
         ) : view === "trips" ? (
           <HelperTripsIndex workspace={workspace} />
         ) : view === "settlement" ? (
-          <HelperSettlements settlements={signedSettlements} />
+          <HelperSettlements selectedSettlementId={params.settlementId} settlements={signedSettlements} />
         ) : view === "rebuy" ? (
-          <PlaceholderScreen eyebrow="補買" title="補買區" body="指定與公共補買任務會集中在這裡。" />
+          <HelperRebuy tasks={signedRebuyTasks} />
         ) : view === "warehouse" ? (
           <HelperWarehouse settlements={signedSettlements} />
         ) : view === "issue" ? (
@@ -140,22 +153,87 @@ export default async function HelperPage({
   );
 }
 
-function HelperSettlements({ settlements }: { settlements: any[] }) {
-  return (
-    <section className="grid gap-4">
-      <SectionHeader eyebrow="小幫手結帳" title="行程結帳" />
-      {settlements.length ? settlements.map((settlement) => (
-        <div className="grid gap-2" key={settlement.id}>
-          <SettlementPrecheckForm settlement={settlement} />
-          {settlement.status === "pending_helper_confirmation" ? (
+function HelperSettlements({
+  selectedSettlementId,
+  settlements,
+}: {
+  selectedSettlementId?: string;
+  settlements: any[];
+}) {
+  const selectedSettlement = settlements.find((settlement) => settlement.id === selectedSettlementId);
+  if (selectedSettlement) {
+    return (
+      <section className="grid gap-4">
+        <Button asChild size="sm" variant="ghost">
+          <a href="/helper?view=settlement">返回結帳</a>
+        </Button>
+        <SectionHeader eyebrow="小幫手結帳" title={selectedSettlement.trip_name} />
+        <div className="grid gap-2">
+          <SettlementPrecheckForm settlement={selectedSettlement} />
+          {selectedSettlement.status === "pending_helper_confirmation" ? (
             <form action={confirmSettlementAction}>
-              <input name="settlementId" type="hidden" value={settlement.id} />
+              <input name="settlementId" type="hidden" value={selectedSettlement.id} />
               <Button type="submit">確認結帳金額並等待付款</Button>
             </form>
           ) : null}
         </div>
-      )) : (
-        <p className="rounded-lg border bg-card p-4 text-sm text-muted-foreground">目前沒有待處理結帳。</p>
+      </section>
+    );
+  }
+  const inProgressStatuses = new Set([
+    "pending_helper_precheck",
+    "pending_admin_review",
+    "correction_required",
+    "pending_helper_confirmation",
+    "payment_pending",
+    "warehouse_pending",
+    "warehouse_review_pending",
+    "final_payment_pending",
+  ]);
+  const inProgress = settlements.filter((settlement) => inProgressStatuses.has(settlement.status));
+  const completed = settlements.filter((settlement) => settlement.status === "completed");
+  return (
+    <section className="grid gap-5">
+      <SectionHeader eyebrow="小幫手結帳" title="行程結帳" />
+      <SettlementGroup settlements={inProgress} title="進行中" />
+      <SettlementGroup settlements={completed} title="已完成" />
+    </section>
+  );
+}
+
+function SettlementGroup({ settlements, title }: { settlements: any[]; title: string }) {
+  return (
+    <section className="grid gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-lg font-semibold">{title}</h3>
+        <span className="text-sm text-muted-foreground">{settlements.length} 筆</span>
+      </div>
+      {settlements.length ? (
+        <div className="grid gap-3">
+          {settlements.map((settlement) => (
+            <a
+              className="rounded-lg border bg-card p-4 shadow-sm transition hover:border-primary/40 hover:bg-accent/35"
+              href={`/helper?view=settlement&settlementId=${encodeURIComponent(settlement.id)}`}
+              key={settlement.id}
+            >
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <h4 className="font-semibold">{settlement.trip_name}</h4>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {service.dateOnly(settlement.business_date, settlement.timezone)} · {settlementStatusLabel(settlement.status)}
+                  </p>
+                </div>
+                <span className="text-sm font-medium text-muted-foreground">
+                  {settlement.total_payable_twd !== null ? `TWD ${settlement.total_payable_twd}` : "待匯率"}
+                </span>
+              </div>
+            </a>
+          ))}
+        </div>
+      ) : (
+        <p className="rounded-lg border bg-card p-4 text-sm text-muted-foreground shadow-sm">
+          目前沒有{title}結帳。
+        </p>
       )}
     </section>
   );
@@ -170,6 +248,119 @@ function HelperWarehouse({ settlements }: { settlements: any[] }) {
         <WarehouseProofForm key={settlement.id} settlement={settlement} />
       )) : (
         <p className="rounded-lg border bg-card p-4 text-sm text-muted-foreground">目前沒有待回報的送倉證明。</p>
+      )}
+    </section>
+  );
+}
+
+function HelperRebuy({ tasks }: { tasks: any[] }) {
+  const publicOpen = tasks.filter((task) => task.visibility === "public" && task.status === "open");
+  const mine = tasks.filter((task) => !(task.visibility === "public" && task.status === "open"));
+  const readyToCheckout = mine.filter((task) => task.status === "reported").length;
+  return (
+    <section className="grid gap-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <SectionHeader eyebrow="補買" title="補買區" />
+        {readyToCheckout ? (
+          <form action={checkoutRebuyTasksAction}>
+            <input name="idempotencyKey" type="hidden" value={`rebuy-checkout-${Date.now()}`} />
+            <Button type="submit">結帳 {readyToCheckout} 筆補買</Button>
+          </form>
+        ) : null}
+      </div>
+      <RebuyTaskGroup empty="目前沒有自己的補買任務。" tasks={mine} title="我的補買" />
+      <RebuyTaskGroup empty="目前沒有公開補買。" isPublicPool tasks={publicOpen} title="公開補買池" />
+    </section>
+  );
+}
+
+function RebuyTaskGroup({
+  empty,
+  isPublicPool = false,
+  tasks,
+  title,
+}: {
+  empty: string;
+  isPublicPool?: boolean;
+  tasks: any[];
+  title: string;
+}) {
+  return (
+    <section className="grid gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-lg font-semibold">{title}</h3>
+        <span className="text-sm text-muted-foreground">{tasks.length} 筆</span>
+      </div>
+      {tasks.length ? (
+        <div className="grid gap-3">
+          {tasks.map((task) => (
+            <article className="rounded-lg border bg-card p-4 shadow-sm" key={task.id}>
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <h4 className="font-semibold">{task.product_name}</h4>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {rebuyStatusLabel(task.status)} · {task.quantity} 件 · JPY {task.original_price_jpy ?? "-"}
+                  </p>
+                  {task.instructions ? <p className="mt-2 text-sm">{task.instructions}</p> : null}
+                  {task.line_community_name ? (
+                    <p className="mt-1 text-sm text-muted-foreground">客人：{task.line_community_name}</p>
+                  ) : null}
+                </div>
+                <span className="rounded-full border bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                  v{task.version}
+                </span>
+              </div>
+              {task.photos?.length ? (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {task.photos.map((photo: any) => (
+                    <a href={photo.signed_url} key={photo.id} rel="noreferrer" target="_blank">
+                      <img alt={photo.photo_role} className="size-20 rounded-md border object-cover" src={photo.signed_url} />
+                    </a>
+                  ))}
+                </div>
+              ) : null}
+              <div className="mt-3 grid gap-3">
+                {isPublicPool ? (
+                  <ActionButtonForm
+                    action={claimRebuyTaskAction}
+                    fields={[
+                      { name: "rebuyTaskId", value: task.id },
+                      { name: "expectedVersion", value: task.version },
+                      { name: "idempotencyKey", value: `claim-${task.id}-${Date.now()}` },
+                    ]}
+                    label="認領補買"
+                  />
+                ) : task.status === "claimed" && task.visibility === "public" ? (
+                  <form action={releaseRebuyTaskAction} className="grid gap-2 rounded-md border bg-background p-3 sm:grid-cols-[1fr_auto]">
+                    <input name="rebuyTaskId" type="hidden" value={task.id} />
+                    <input name="expectedVersion" type="hidden" value={task.version} />
+                    <input name="idempotencyKey" type="hidden" value={`release-${task.id}-${Date.now()}`} />
+                    <input name="reason" placeholder="退回公開池原因" required />
+                    <Button type="submit" variant="outline">退回公開池</Button>
+                  </form>
+                ) : null}
+                {["open", "claimed"].includes(task.status) && !isPublicPool ? (
+                  <form action={reportRebuyTaskAction} className="grid gap-2 rounded-md border bg-background p-3">
+                    <input name="rebuyTaskId" type="hidden" value={task.id} />
+                    <input name="idempotencyKey" type="hidden" value={`report-${task.id}-${Date.now()}`} />
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <input defaultValue={task.quantity} inputMode="numeric" name="reportedQuantity" placeholder="買到數量" required />
+                      <input name="remainingReason" placeholder="若部分買到，填剩餘原因" />
+                    </div>
+                    <textarea name="helperNote" placeholder="補買回報備註" />
+                    <label className="flex items-center gap-2 text-sm text-muted-foreground">
+                      <input name="reportPhotosOmitted" type="checkbox" />
+                      沒有補買回報照片，確認略過
+                    </label>
+                    <Button type="submit">送出補買回報</Button>
+                  </form>
+                ) : null}
+              </div>
+            </article>
+          ))}
+        </div>
+      ) : (
+        <p className="rounded-lg border bg-card p-4 text-sm text-muted-foreground shadow-sm">{empty}</p>
       )}
     </section>
   );
@@ -748,6 +939,32 @@ function statusLabel(status: string) {
   if (status === "ended") return "已完成";
   if (status === "canceled") return "已取消";
   return status;
+}
+
+function settlementStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    completed: "已完成",
+    correction_required: "待補正",
+    final_payment_pending: "待尾款",
+    payment_pending: "待付款",
+    pending_admin_review: "管理員審核中",
+    pending_helper_confirmation: "待確認",
+    pending_helper_precheck: "待預檢",
+    warehouse_pending: "待送倉回報",
+    warehouse_review_pending: "送倉審核中",
+  };
+  return labels[status] || status;
+}
+
+function rebuyStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    canceled: "已取消",
+    checked_out: "已結帳",
+    claimed: "已認領",
+    open: "待認領/待回報",
+    reported: "已回報",
+  };
+  return labels[status] || status;
 }
 
 async function signBatchesByTripId(batchesByTripId: Record<string, any[]>) {

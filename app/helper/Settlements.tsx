@@ -107,15 +107,21 @@ export function WarehouseProofForm({ settlement }: { settlement: any }) {
   );
 }
 
-function SettlementSummary({ settlement }: { settlement: any }) {
+export function SettlementSummary({ settlement }: { settlement: any }) {
   const rate = Number(settlement.jpy_to_twd_rate || 0);
+  const hasRate = rate > 0;
   return (
     <div className="grid gap-3">
       <h3 className="font-semibold">{settlement.trip_name}</h3>
       <p className="text-sm text-muted-foreground">
         {settlement.line_items?.length || 0} 項 · 商品 JPY {settlement.product_total_jpy}
       </p>
-      {settlement.line_items?.length ? (
+      {!hasRate ? (
+        <p className="rounded-md border bg-muted/35 p-3 text-sm text-muted-foreground">
+          管理員填寫當日匯率後，這裡會顯示商品墊款、薪資與台幣結帳明細。
+        </p>
+      ) : null}
+      {hasRate && settlement.line_items?.length ? (
         <div className="rounded-md border bg-background p-3 text-sm">
           <div className="grid gap-2">
           {settlement.line_items.map((item: any) => (
@@ -127,7 +133,7 @@ function SettlementSummary({ settlement }: { settlement: any }) {
                 </p>
               </div>
               <p className="shrink-0 text-right font-medium">
-                {rate > 0 ? `TWD ${Math.round(Number(item.product_total_jpy || 0) * rate)}` : `JPY ${item.product_total_jpy}`}
+                TWD {Math.round(Number(item.product_total_jpy || 0) * rate)}
               </p>
             </div>
           ))}
@@ -137,26 +143,22 @@ function SettlementSummary({ settlement }: { settlement: any }) {
             <span>
               {settlement.item_advance_twd !== null
                 ? `TWD ${settlement.item_advance_twd}`
-                : rate > 0
-                  ? `TWD ${Math.round(Number(settlement.product_total_jpy || 0) * rate)}`
-                  : "待管理員填當日匯率"}
+                : `TWD ${Math.round(Number(settlement.product_total_jpy || 0) * rate)}`}
             </span>
           </div>
         </div>
       ) : null}
-      {settlement.total_payable_twd !== null ? (
-        <div className="grid gap-1 rounded-md bg-muted/50 p-3 text-sm">
+      {settlement.total_payable_twd !== null && hasRate ? (
+        <div className="grid gap-2 rounded-md bg-muted/50 p-3 text-sm">
           <p>商品墊款 TWD {settlement.item_advance_twd}</p>
-          <p>工時費 TWD {settlement.work_pay_twd || 0}</p>
+          <CompensationLine settlement={settlement} />
           <p>核准交通費 TWD {settlement.approved_transport_twd || 0}</p>
           <p className="font-semibold">
             應付 TWD {settlement.total_payable_twd}
             {settlement.is_split_payment ? " · 分兩次付款" : " · 一次付款"}
           </p>
         </div>
-      ) : (
-        <p className="text-sm text-muted-foreground">待管理員確認當日匯率後計算台幣金額</p>
-      )}
+      ) : null}
       {settlement.transport_claim_jpy ? (
         <div className="rounded-md border bg-background p-3 text-sm">
           <p className="font-medium">交通申請</p>
@@ -179,6 +181,29 @@ function SettlementSummary({ settlement }: { settlement: any }) {
       ) : null}
     </div>
   );
+}
+
+function CompensationLine({ settlement }: { settlement: any }) {
+  const minutes = Number(settlement.work_minutes || 0);
+  const hours = minutes / 60;
+  if (settlement.compensation_mode === "hourly") {
+    return (
+      <p>
+        薪資 TWD {settlement.work_pay_twd || 0} · {formatHours(hours)} 小時 × TWD {settlement.hourly_rate_twd || 0}
+      </p>
+    );
+  }
+  return (
+    <p>
+      薪資 TWD {Number(settlement.total_payable_twd || 0) - Number(settlement.approved_transport_twd || 0)}
+      {" "}· JPY {settlement.product_total_jpy} × 小幫手匯率 {settlement.helper_fx_rate || "-"}
+    </p>
+  );
+}
+
+function formatHours(value: number) {
+  if (!Number.isFinite(value)) return "0";
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
 function PhotoUpload({

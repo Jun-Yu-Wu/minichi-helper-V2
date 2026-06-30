@@ -7,6 +7,7 @@ import {
   createHelperAction,
   createPurchaseTaskAction,
   createQuoteTaskAction,
+  createRebuyTaskAction,
   createTripAction,
   quickPublishPurchaseTaskAction,
   repairTripAction,
@@ -187,6 +188,60 @@ export function CreateQuoteTaskForm(props: QuoteTaskFormProps) {
     return <CreateUploadedDetailTaskForm trip={props.trip} />;
   }
   return <CreateSitePhotoQuoteTaskForm {...props} />;
+}
+
+export function CreateRebuyTaskForm({
+  helpers,
+  purchaseTasks,
+}: {
+  helpers: Array<{ display_name: string; id: string; is_active: boolean }>;
+  purchaseTasks: Array<{
+    id: string;
+    line_community_name?: string | null;
+    product_name: string;
+    status: string;
+  }>;
+}) {
+  const [state, action, pending] = useActionState(createRebuyTaskAction, initialState);
+  const sourceCandidates = purchaseTasks.filter((task) => ["canceled", "unavailable", "not_found"].includes(task.status));
+  return (
+    <form action={action} className="grid gap-3 rounded-lg border bg-card p-4">
+      <h2 className="text-lg font-semibold">新增補買任務</h2>
+      <select name="visibility" defaultValue="private">
+        <option value="private">指定小幫手</option>
+        <option value="public">公共補買池</option>
+      </select>
+      <select name="assignedHelperId">
+        <option value="">公共任務或從原採買帶入</option>
+        {helpers.filter((helper) => helper.is_active).map((helper) => (
+          <option key={helper.id} value={helper.id}>{helper.display_name}</option>
+        ))}
+      </select>
+      <select name="sourcePurchaseTaskId">
+        <option value="">手動建立，不綁定原採買</option>
+        {sourceCandidates.map((task) => (
+          <option key={task.id} value={task.id}>
+            {task.product_name} · {task.line_community_name || "未填客人"} · {task.status}
+          </option>
+        ))}
+      </select>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <input name="productName" placeholder="商品名稱（手動建立必填）" />
+        <input name="lineCommunityName" placeholder="客人 LINE 名稱（public 對其他小幫手隱藏）" />
+      </div>
+      <div className="grid gap-3 sm:grid-cols-4">
+        <input name="quantity" inputMode="numeric" placeholder="數量" />
+        <input name="originalPriceJpy" inputMode="numeric" placeholder="JPY 單價" />
+        <input name="salePriceTwd" inputMode="numeric" placeholder="TWD 售價" />
+        <input name="priority" inputMode="numeric" placeholder="優先序，越小越前" />
+      </div>
+      <textarea name="instructions" placeholder="補買指示" />
+      <ActionMessage state={state} />
+      <Button disabled={pending} type="submit">
+        {pending ? "建立中..." : "建立補買任務"}
+      </Button>
+    </form>
+  );
 }
 
 export function CreatePurchaseTaskForm({

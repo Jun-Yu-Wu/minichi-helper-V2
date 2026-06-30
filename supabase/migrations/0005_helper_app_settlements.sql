@@ -38,6 +38,7 @@ create table if not exists helper_app.settlements (
   work_minutes integer not null default 0 check (work_minutes >= 0),
   work_pay_twd integer check (work_pay_twd is null or work_pay_twd >= 0),
   transport_claim_jpy integer check (transport_claim_jpy is null or transport_claim_jpy >= 0),
+  transport_claim_note text,
   transport_status text not null default 'none' check (transport_status in ('none', 'pending', 'approved', 'rejected')),
   approved_transport_twd integer check (approved_transport_twd is null or approved_transport_twd >= 0),
   total_payable_twd integer check (total_payable_twd is null or total_payable_twd >= 0),

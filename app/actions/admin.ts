@@ -168,6 +168,34 @@ export async function createPurchaseTaskAction(
   }
 }
 
+export async function createRebuyTaskAction(
+  _previousState: AdminActionResult,
+  formData: FormData,
+): Promise<AdminActionResult> {
+  try {
+    const admin = await requireAdmin();
+    const referencePhotosJson = formText(formData, "referencePhotosJson");
+    await service.createRebuyTask(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      assignedHelperId: formText(formData, "assignedHelperId"),
+      instructions: formText(formData, "instructions"),
+      lineCommunityName: formText(formData, "lineCommunityName"),
+      originalPriceJpy: formText(formData, "originalPriceJpy"),
+      priority: formText(formData, "priority"),
+      productName: formText(formData, "productName"),
+      quantity: formText(formData, "quantity"),
+      referencePhotos: referencePhotosJson ? JSON.parse(referencePhotosJson) : [],
+      salePriceTwd: formText(formData, "salePriceTwd"),
+      sourcePurchaseTaskId: formText(formData, "sourcePurchaseTaskId"),
+      visibility: formText(formData, "visibility") || "private",
+    });
+    revalidatePath("/admin");
+    return { ok: true };
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
 export async function quickPublishPurchaseTaskAction(
   _previousState: AdminActionResult,
   formData: FormData,
@@ -217,6 +245,16 @@ export async function reviewSettlementAction(formData: FormData) {
     jpyToTwdRate: formText(formData, "jpyToTwdRate"),
     settlementId: formText(formData, "settlementId"),
     transportDecision: formText(formData, "transportDecision"),
+  });
+  revalidatePath("/admin");
+}
+
+export async function setSettlementExchangeRateAction(formData: FormData) {
+  const admin = await requireAdmin();
+  await service.setSettlementExchangeRate(database.getDatabasePool(), {
+    actorUserId: admin.user.id,
+    jpyToTwdRate: formText(formData, "jpyToTwdRate"),
+    settlementId: formText(formData, "settlementId"),
   });
   revalidatePath("/admin");
 }

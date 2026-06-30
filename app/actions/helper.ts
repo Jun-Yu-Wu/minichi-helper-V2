@@ -140,6 +140,54 @@ export async function respondPurchaseTaskAction(
   }
 }
 
+export async function claimRebuyTaskAction(formData: FormData) {
+  const authUserId = await requireUserId();
+  await service.claimPublicRebuyTask(database.getDatabasePool(), {
+    authUserId,
+    expectedVersion: formText(formData, "expectedVersion"),
+    idempotencyKey: formText(formData, "idempotencyKey"),
+    rebuyTaskId: formText(formData, "rebuyTaskId"),
+  });
+  revalidatePath("/helper");
+}
+
+export async function releaseRebuyTaskAction(formData: FormData) {
+  const authUserId = await requireUserId();
+  await service.releasePublicRebuyTask(database.getDatabasePool(), {
+    authUserId,
+    expectedVersion: formText(formData, "expectedVersion"),
+    idempotencyKey: formText(formData, "idempotencyKey"),
+    reason: formText(formData, "reason"),
+    rebuyTaskId: formText(formData, "rebuyTaskId"),
+  });
+  revalidatePath("/helper");
+}
+
+export async function reportRebuyTaskAction(formData: FormData) {
+  const authUserId = await requireUserId();
+  const reportPhotosJson = formText(formData, "reportPhotosJson");
+  await service.reportRebuyTask(database.getDatabasePool(), {
+    authUserId,
+    helperNote: formText(formData, "helperNote"),
+    idempotencyKey: formText(formData, "idempotencyKey"),
+    rebuyTaskId: formText(formData, "rebuyTaskId"),
+    remainingReason: formText(formData, "remainingReason"),
+    reportPhotos: reportPhotosJson ? JSON.parse(reportPhotosJson) : [],
+    reportPhotosOmitted: formData.get("reportPhotosOmitted") === "on",
+    reportedQuantity: formText(formData, "reportedQuantity"),
+  });
+  revalidatePath("/helper");
+}
+
+export async function checkoutRebuyTasksAction(formData: FormData) {
+  const authUserId = await requireUserId();
+  await service.checkoutRebuyTasks(database.getDatabasePool(), {
+    authUserId,
+    idempotencyKey: formText(formData, "idempotencyKey"),
+  });
+  revalidatePath("/helper");
+}
+
 export async function submitSettlementPrecheckAction(
   _previousState: HelperActionResult,
   formData: FormData,

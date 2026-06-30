@@ -1073,6 +1073,119 @@ test("admin settlement review calculates source-derived totals and split state",
   assert.deepEqual(update.params.slice(1, 8), [0.22, 22_000, 400, 220, 22_620, true, true]);
 });
 
+test("admin can set settlement exchange rate before helper precheck", async () => {
+  const queries = [];
+  const settlement = {
+    id: "settlement-1",
+    item_advance_twd: null,
+    jpy_to_twd_rate: null,
+    product_total_jpy: 10_000,
+    status: "pending_helper_precheck",
+    trip_id: "trip-1",
+  };
+  const database = fakeDatabase(
+    [
+      { rows: [settlement] },
+      {
+        rows: [{
+          ...settlement,
+          item_advance_twd: 2_200,
+          jpy_to_twd_rate: 0.22,
+        }],
+      },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const result = await service.setSettlementExchangeRate(database, {
+    actorUserId: "admin-1",
+    jpyToTwdRate: "0.22",
+    settlementId: "settlement-1",
+  });
+
+  assert.equal(result.status, "pending_helper_precheck");
+  assert.equal(result.item_advance_twd, 2_200);
+  const update = queries.find((query) =>
+    String(query.sql).includes("set jpy_to_twd_rate = $2"),
+  );
+  assert.deepEqual(update.params, ["settlement-1", 0.22, 2_200]);
+});
+
+test("public rebuy claim locks version and records ownership atomically", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      { rows: [{ id: "helper-1", is_active: true }] },
+      { rows: [] },
+      {
+        rows: [{
+          id: "rebuy-1",
+          source_trip_id: "trip-1",
+          status: "open",
+          version: 4,
+          visibility: "public",
+        }],
+      },
+      {
+        rows: [{
+          claimed_helper_id: "helper-1",
+          id: "rebuy-1",
+          status: "claimed",
+          version: 5,
+        }],
+      },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const result = await service.claimPublicRebuyTask(database, {
+    authUserId: "user-1",
+    expectedVersion: "4",
+    idempotencyKey: "claim-key-1",
+    rebuyTaskId: "rebuy-1",
+  });
+
+  assert.equal(result.status, "claimed");
+  const update = queries.find((query) =>
+    String(query.sql).includes("set status = 'claimed'"),
+  );
+  assert.deepEqual(update.params, ["rebuy-1", "helper-1", "claim-key-1", 4]);
+  assert.equal(
+    queries.some((query) => query.params?.includes("helper_rebuy_claimed")),
+    true,
+  );
+});
+
+test("rebuy partial report requires a remaining-quantity reason", async () => {
+  const database = fakeDatabase([
+    { rows: [{ id: "helper-1", is_active: true }] },
+    {
+      rows: [{
+        assigned_helper_id: "helper-1",
+        claimed_helper_id: null,
+        id: "rebuy-1",
+        quantity: 3,
+        status: "open",
+        visibility: "private",
+      }],
+    },
+  ]);
+
+  await assert.rejects(
+    () =>
+      service.reportRebuyTask(database, {
+        authUserId: "user-1",
+        idempotencyKey: "report-key-1",
+        rebuyTaskId: "rebuy-1",
+        reportPhotosOmitted: true,
+        reportedQuantity: "1",
+      }),
+    /remaining-quantity reason/,
+  );
+});
+
 function fakeDatabase(results, queries = []) {
   return {
     async connect() {

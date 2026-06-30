@@ -18,6 +18,8 @@ async function main() {
       "quote_photo_replies",
       "quote_task_photos",
       "quote_tasks",
+      "rebuy_task_photos",
+      "rebuy_tasks",
       "settlement_evidence",
       "settlement_line_items",
       "settlement_payments",
@@ -45,9 +47,19 @@ async function main() {
        order by relname`,
       [expectedTables],
     );
+    const columns = await client.query(
+      `select table_name, column_name
+       from information_schema.columns
+       where table_schema = 'helper_app'
+         and table_name in ('purchase_tasks', 'settlements', 'staging_order_previews')
+         and column_name = any($1::text[])
+       order by column_name`,
+      [["source_rebuy_task_id", "transport_claim_note"]],
+    );
     console.log(
       JSON.stringify(
         {
+          columns: columns.rows,
           rls: rls.rows,
           tables: tables.rows.map((row) => row.table_name),
         },

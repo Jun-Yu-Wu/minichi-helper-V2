@@ -20,6 +20,7 @@ import {
   reviewSettlementAction,
   reviewWarehouseProofAction,
   saveSitePhotoAction,
+  setSettlementExchangeRateAction,
   reviewFaceCheckPurchaseAction,
 } from "../actions/admin";
 import { ActionButtonForm } from "../components/ActionButtonForm";
@@ -34,6 +35,7 @@ import {
   CreateHelperForm,
   CreatePurchaseTaskForm,
   CreateQuoteTaskForm,
+  CreateRebuyTaskForm,
   CreateTripForm,
   EditHelperForm,
   QuickPublishPurchaseForm,
@@ -94,6 +96,12 @@ export default async function AdminPage({
         createR2ObjectStore(),
       )
     : [];
+  const rebuyTasks = dashboard.rebuyTasks.length
+    ? await service.attachSignedRebuyTaskUrls(
+        dashboard.rebuyTasks,
+        createR2ObjectStore(),
+      )
+    : [];
   const sitePhotosByTripId = groupSitePhotosByTripId(sitePhotoBatches);
 
   return (
@@ -116,7 +124,10 @@ export default async function AdminPage({
           />
         ) : activeView === "rebuy" ? (
           <AdminSection icon={<PackageSearch className="size-5" />} title="補買">
-            <EmptyPanel title="補買工作區" body="目前沒有補買任務。" />
+            <div className="grid gap-4">
+              <CreateRebuyTaskForm helpers={dashboard.helpers} purchaseTasks={dashboard.purchaseTasks} />
+              <AdminRebuyList tasks={rebuyTasks} />
+            </div>
           </AdminSection>
         ) : activeView === "live" ? (
           <AdminLiveReturn
@@ -174,17 +185,42 @@ function AdminCheckout({ settlements }: { settlements: any[] }) {
                   <h3 className="text-lg font-semibold">{group.title}</h3>
                   <span className="text-sm text-muted-foreground">{records.length} 筆</span>
                 </div>
-                {records.length ? records.map((settlement) => (
+                {records.length ? records.map((settlement) => {
+                  const hasRate = Number(settlement.jpy_to_twd_rate || 0) > 0;
+                  return (
             <article className="grid gap-3 rounded-lg border bg-card p-4" key={settlement.id}>
               <div>
                 <h3 className="font-semibold">{settlement.trip_name} · {settlement.helper_display_name}</h3>
                 <p className="text-sm text-muted-foreground">
                   商品 JPY {settlement.product_total_jpy} · {settlementStatusLabel(settlement.status)}
                 </p>
-                {settlement.total_payable_twd !== null ? (
+                {!hasRate ? (
+                  <p className="mt-3 rounded-md border bg-muted/35 p-3 text-sm text-muted-foreground">
+                    請先填寫當日 JPY→TWD 匯率。儲存後會顯示商品墊款；小幫手送出預檢後再核准結帳。
+                  </p>
+                ) : null}
+                {settlement.status !== "completed" ? (
+                  <form action={setSettlementExchangeRateAction} className="mt-3 grid gap-2 rounded-md border bg-background p-3 sm:grid-cols-[1fr_auto]">
+                    <input name="settlementId" type="hidden" value={settlement.id} />
+                    <label className="grid gap-1 text-sm">
+                      <span className="font-medium">當日 JPY→TWD 匯率</span>
+                      <input
+                        defaultValue={settlement.jpy_to_twd_rate ?? ""}
+                        inputMode="decimal"
+                        name="jpyToTwdRate"
+                        placeholder="例如 0.22"
+                        required
+                      />
+                    </label>
+                    <Button className="self-end" type="submit" variant={hasRate ? "outline" : "default"}>
+                      {hasRate ? "更新匯率" : "儲存匯率"}
+                    </Button>
+                  </form>
+                ) : null}
+                {settlement.total_payable_twd !== null && hasRate ? (
                   <div className="mt-2 grid gap-1 rounded-md bg-muted/50 p-3 text-sm">
                     <p>商品墊款 TWD {settlement.item_advance_twd}</p>
-                    <p>工時費 TWD {settlement.work_pay_twd || 0}</p>
+                    <AdminCompensationLine settlement={settlement} />
                     <p>核准交通費 TWD {settlement.approved_transport_twd || 0}</p>
                     <p className="font-semibold">
                       應付 TWD {settlement.total_payable_twd}
@@ -192,7 +228,7 @@ function AdminCheckout({ settlements }: { settlements: any[] }) {
                     </p>
                   </div>
                 ) : null}
-                {settlement.line_items?.length ? (
+                {hasRate && settlement.line_items?.length ? (
                   <div className="mt-3 grid gap-2 rounded-md border bg-background p-3 text-sm">
                     {settlement.line_items.map((item: any) => (
                       <div className="flex items-start justify-between gap-3 border-b pb-2 last:border-b-0 last:pb-0" key={item.id}>
@@ -203,9 +239,7 @@ function AdminCheckout({ settlements }: { settlements: any[] }) {
                           </p>
                         </div>
                         <p className="shrink-0 text-right font-medium">
-                          {settlement.jpy_to_twd_rate
-                            ? `TWD ${Math.round(Number(item.product_total_jpy || 0) * Number(settlement.jpy_to_twd_rate))}`
-                            : `JPY ${item.product_total_jpy}`}
+                          TWD {Math.round(Number(item.product_total_jpy || 0) * Number(settlement.jpy_to_twd_rate))}
                         </p>
                       </div>
                     ))}
@@ -238,7 +272,11 @@ function AdminCheckout({ settlements }: { settlements: any[] }) {
                   <form action={reviewSettlementAction} className="grid gap-3 sm:grid-cols-2">
                     <input name="settlementId" type="hidden" value={settlement.id} />
                     <input name="reviewAction" type="hidden" value="approve" />
-                    <input name="jpyToTwdRate" inputMode="decimal" placeholder="當日 JPY→TWD 匯率" required />
+                    <input
+                      defaultValue={settlement.jpy_to_twd_rate ?? ""}
+                      name="jpyToTwdRate"
+                      type="hidden"
+                    />
                     <select name="transportDecision" defaultValue="reject">
                       <option value="reject">不核准交通費／無申請</option>
                       <option value="approve">核准交通費</option>
@@ -273,7 +311,8 @@ function AdminCheckout({ settlements }: { settlements: any[] }) {
                 </form>
               ) : null}
             </article>
-                )) : (
+                  );
+                }) : (
                   <p className="rounded-lg border bg-card p-4 text-sm text-muted-foreground">{group.empty}</p>
                 )}
               </section>
@@ -287,6 +326,57 @@ function AdminCheckout({ settlements }: { settlements: any[] }) {
   );
 }
 
+function AdminRebuyList({ tasks }: { tasks: any[] }) {
+  if (!tasks.length) {
+    return <EmptyPanel title="補買工作區" body="目前沒有補買任務。" />;
+  }
+  return (
+    <section className="grid gap-3">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-lg font-semibold">補買任務</h3>
+        <span className="text-sm text-muted-foreground">{tasks.length} 筆</span>
+      </div>
+      <div className="grid gap-3">
+        {tasks.map((task) => (
+          <article className="rounded-lg border bg-card p-4 shadow-sm" key={task.id}>
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+              <div>
+                <h3 className="font-semibold">{task.product_name}</h3>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  {task.visibility === "public" ? "公共" : "指定"} · {rebuyStatusLabel(task.status)} · {task.quantity} 件
+                </p>
+                <p className="mt-1 text-sm">
+                  {task.line_community_name || "未填客人"} · JPY {task.original_price_jpy ?? "-"} · TWD {task.sale_price_twd ?? "-"}
+                </p>
+                {task.instructions ? <p className="mt-2 text-sm">{task.instructions}</p> : null}
+              </div>
+              <span className="rounded-full border bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground">
+                v{task.version} · priority {task.priority}
+              </span>
+            </div>
+            <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-2">
+              <p>指定：{task.assigned_helper_display_name || "-"}</p>
+              <p>認領：{task.claimed_helper_display_name || "-"}</p>
+              {task.reported_quantity != null ? <p>回報數量：{task.reported_quantity}</p> : null}
+              {task.remaining_quantity ? <p>剩餘：{task.remaining_quantity} · {task.remaining_reason}</p> : null}
+            </div>
+            {task.photos?.length ? (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {task.photos.map((photo: any) => (
+                  <a className="grid gap-1 text-xs text-muted-foreground" href={photo.signed_url} key={photo.id} rel="noreferrer" target="_blank">
+                    <img alt={photo.photo_role} className="size-20 rounded-md border object-cover" src={photo.signed_url} />
+                    <span>{photo.photo_role === "reference" ? "參考" : "回報"}</span>
+                  </a>
+                ))}
+              </div>
+            ) : null}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function settlementNextPaymentAmount(settlement: any) {
   const total = Number(settlement.total_payable_twd || 0);
   if (settlement.status === "final_payment_pending") {
@@ -297,6 +387,29 @@ function settlementNextPaymentAmount(settlement: any) {
     return Math.max(0, total - paid);
   }
   return settlement.is_split_payment ? Math.round(total / 2) : total;
+}
+
+function AdminCompensationLine({ settlement }: { settlement: any }) {
+  const minutes = Number(settlement.work_minutes || 0);
+  const hours = minutes / 60;
+  if (settlement.compensation_mode === "hourly") {
+    return (
+      <p>
+        薪資 TWD {settlement.work_pay_twd || 0} · {formatHours(hours)} 小時 × TWD {settlement.hourly_rate_twd || 0}
+      </p>
+    );
+  }
+  return (
+    <p>
+      薪資 TWD {Number(settlement.total_payable_twd || 0) - Number(settlement.approved_transport_twd || 0)}
+      {" "}· JPY {settlement.product_total_jpy} × 小幫手匯率 {settlement.helper_fx_rate || "-"}
+    </p>
+  );
+}
+
+function formatHours(value: number) {
+  if (!Number.isFinite(value)) return "0";
+  return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
 function AdminNav({ activeView }: { activeView: string }) {
@@ -1119,6 +1232,17 @@ function purchaseStatusLabel(status: string) {
   if (status === "not_found") return "找不到";
   if (status === "canceled") return "已取消";
   return status;
+}
+
+function rebuyStatusLabel(status: string) {
+  const labels: Record<string, string> = {
+    canceled: "已取消",
+    checked_out: "已結帳",
+    claimed: "已認領",
+    open: "待認領/待回報",
+    reported: "已回報",
+  };
+  return labels[status] || status;
 }
 
 function settlementStatusLabel(status: string) {

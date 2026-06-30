@@ -17,7 +17,7 @@ class HelperAppServiceError extends Error {
 }
 
 async function listAdminDashboard(database) {
-  const [helpers, trips, sitePhotoBatches, quoteTasks, purchaseTasks, stagingOrderPreviews, settlements] = await Promise.all([
+  const [helpers, trips, sitePhotoBatches, quoteTasks, purchaseTasks, rebuyTasks, stagingOrderPreviews, settlements] = await Promise.all([
     database.query(
       `select id, auth_user_id, display_name, email, compensation_mode,
               hourly_rate_twd, helper_fx_rate, bank_account_name, bank_code,
@@ -38,10 +38,11 @@ async function listAdminDashboard(database) {
     listSitePhotoBatches(database),
     listQuoteTasks(database),
     listPurchaseTasks(database),
+    listRebuyTasks(database, { includePrivateCustomerData: true }),
     listStagingOrderPreviews(database),
     listSettlements(database),
   ]);
-  return { helpers: helpers.rows, purchaseTasks, quoteTasks, settlements, sitePhotoBatches, stagingOrderPreviews, trips: trips.rows };
+  return { helpers: helpers.rows, purchaseTasks, quoteTasks, rebuyTasks, settlements, sitePhotoBatches, stagingOrderPreviews, trips: trips.rows };
 }
 
 async function listCustomerNicknames(database) {
@@ -96,6 +97,7 @@ async function getHelperWorkspace(database, authUserId, now = new Date()) {
         tripIds: tripsResult.rows.map((trip) => trip.id),
       }),
     ),
+    rebuyTasks: await listRebuyTasks(database, { helperId: profile.id }),
     settlements: await listSettlements(database, { helperId: profile.id }),
     sitePhotoBatchesByTripId: groupBatchesByTripId(
       await listSitePhotoBatches(database, {
@@ -200,6 +202,72 @@ async function listPurchaseTasks(database, { helperId = null, tripIds = null } =
      group by pt.id, t.id, hp.id
      order by pt.created_at desc`,
     params,
+  );
+  return result.rows;
+}
+
+async function listRebuyTasks(
+  database,
+  { helperId = null, includePrivateCustomerData = false } = {},
+) {
+  const conditions = [];
+  const params = [];
+  if (helperId) {
+    params.push(helperId);
+    conditions.push(`(
+      rt.assigned_helper_id = $${params.length + 1}
+      or rt.claimed_helper_id = $${params.length + 1}
+      or (rt.visibility = 'public' and rt.status = 'open')
+    )`);
+  }
+  const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+  const result = await database.query(
+    `select rt.id, rt.visibility, rt.assigned_helper_id, rt.claimed_helper_id,
+            rt.source_purchase_task_id, rt.source_trip_id,
+            case
+              when $1::boolean or rt.visibility = 'private' or rt.status <> 'open'
+              then rt.line_community_name
+              else null
+            end as line_community_name,
+            rt.product_name, rt.quantity, rt.original_price_jpy,
+            case
+              when $1::boolean or rt.visibility = 'private' or rt.status <> 'open'
+              then rt.sale_price_twd
+              else null
+            end as sale_price_twd,
+            rt.instructions, rt.priority, rt.public_available_at, rt.status,
+            rt.version, rt.reported_quantity, rt.remaining_quantity,
+            rt.remaining_reason, rt.helper_report_note, rt.report_photos_omitted,
+            rt.checkout_trip_id, rt.checkout_purchase_task_id,
+            rt.created_at, rt.updated_at, rt.claimed_at, rt.released_at,
+            rt.reported_at, rt.checked_out_at,
+            ah.display_name as assigned_helper_display_name,
+            ch.display_name as claimed_helper_display_name,
+            coalesce(
+              jsonb_agg(
+                jsonb_build_object(
+                  'id', rtp.id,
+                  'storage_key', rtp.storage_key,
+                  'photo_role', rtp.photo_role,
+                  'sort_order', rtp.sort_order,
+                  'created_at', rtp.created_at
+                )
+                order by rtp.photo_role asc, rtp.sort_order asc
+              ) filter (where rtp.id is not null),
+              '[]'::jsonb
+            ) as photos
+     from helper_app.rebuy_tasks rt
+     left join helper_app.helper_profiles ah on ah.id = rt.assigned_helper_id
+     left join helper_app.helper_profiles ch on ch.id = rt.claimed_helper_id
+     left join helper_app.rebuy_task_photos rtp on rtp.rebuy_task_id = rt.id
+     ${where}
+     group by rt.id, ah.id, ch.id
+     order by
+       case when rt.visibility = 'public' and rt.status = 'open' then 0 else 1 end,
+       rt.priority asc,
+       rt.public_available_at asc nulls last,
+       rt.created_at desc`,
+    [includePrivateCustomerData, ...params],
   );
   return result.rows;
 }
@@ -406,6 +474,20 @@ async function attachSignedQuoteTaskUrls(tasks, r2Store) {
 }
 
 async function attachSignedPurchaseTaskUrls(tasks, r2Store) {
+  return Promise.all(
+    tasks.map(async (task) => ({
+      ...task,
+      photos: await Promise.all(
+        (task.photos || []).map(async (photo) => ({
+          ...photo,
+          signed_url: await r2Store.signedGetUrl(photo.storage_key),
+        })),
+      ),
+    })),
+  );
+}
+
+async function attachSignedRebuyTaskUrls(tasks, r2Store) {
   return Promise.all(
     tasks.map(async (task) => ({
       ...task,
@@ -968,6 +1050,364 @@ async function quickPublishPurchaseTask(database, input) {
   });
 }
 
+async function createRebuyTask(database, input) {
+  const normalized = normalizeRebuyTaskInput(input);
+  const referencePhotos = normalizeRebuyPhotos(input.referencePhotos, "reference");
+  return withTransaction(database, async (client) => {
+    let sourcePurchase = null;
+    if (normalized.sourcePurchaseTaskId) {
+      sourcePurchase = await lockPurchaseTask(client, normalized.sourcePurchaseTaskId);
+      if (!["canceled", "unavailable", "not_found"].includes(sourcePurchase.status)) {
+        throw new HelperAppServiceError("invalid_status", "Only canceled, unavailable, or not-found purchases can become rebuy tasks.");
+      }
+    }
+    const assignedHelperId = normalized.visibility === "private"
+      ? normalized.assignedHelperId || sourcePurchase?.helper_id
+      : null;
+    if (normalized.visibility === "private" && !assignedHelperId) {
+      throw new HelperAppServiceError("invalid_input", "Private rebuy tasks require an assigned helper.");
+    }
+    const result = await client.query(
+      `insert into helper_app.rebuy_tasks
+         (visibility, assigned_helper_id, source_purchase_task_id, source_trip_id,
+          line_community_name, product_name, quantity, original_price_jpy,
+          sale_price_twd, instructions, priority, public_available_at,
+          created_by_user_id)
+       values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
+               case when $1 = 'public' then now() else null end, $12)
+       returning *`,
+      [
+        normalized.visibility,
+        assignedHelperId,
+        normalized.sourcePurchaseTaskId,
+        sourcePurchase?.trip_id || null,
+        normalized.lineCommunityName || sourcePurchase?.line_community_name || null,
+        normalized.productName || sourcePurchase?.product_name,
+        normalized.quantity || sourcePurchase?.unavailable_quantity || sourcePurchase?.quantity,
+        normalized.originalPriceJpy ?? sourcePurchase?.original_price_jpy ?? null,
+        normalized.salePriceTwd ?? sourcePurchase?.sale_price_twd ?? null,
+        normalized.instructions,
+        normalized.priority,
+        normalized.actorUserId,
+      ],
+    );
+    const task = result.rows[0];
+    for (const [index, photo] of referencePhotos.entries()) {
+      await upsertRebuyPhoto(client, {
+        helperId: assignedHelperId,
+        mediaKind: "rebuy_reference_photo",
+        photoRole: "reference",
+        rebuyTaskId: task.id,
+        sortOrder: index,
+        ...photo,
+      });
+    }
+    await insertAuditEvent(client, {
+      action: "admin_rebuy_task_created",
+      actor_role: "admin",
+      actor_user_id: normalized.actorUserId,
+      after_state: {
+        rebuyTaskId: task.id,
+        sourcePurchaseTaskId: normalized.sourcePurchaseTaskId,
+        visibility: task.visibility,
+      },
+      before_state: {},
+      trip_id: sourcePurchase?.trip_id || null,
+    });
+    return getRebuyTaskById(client, task.id);
+  });
+}
+
+async function claimPublicRebuyTask(database, input) {
+  const rebuyTaskId = requiredText(input.rebuyTaskId, "rebuyTaskId");
+  const expectedVersion = Number(requiredText(input.expectedVersion, "expectedVersion"));
+  const idempotencyKey = requiredText(input.idempotencyKey, "idempotencyKey");
+  return withTransaction(database, async (client) => {
+    const helper = await findActiveHelperForUser(client, input.authUserId);
+    const existing = await client.query(
+      `select * from helper_app.rebuy_tasks
+       where id = $1
+         and claimed_helper_id = $2
+         and claim_idempotency_key = $3`,
+      [rebuyTaskId, helper.id, idempotencyKey],
+    );
+    if (existing.rows[0]) return existing.rows[0];
+    const task = await lockRebuyTask(client, rebuyTaskId);
+    if (task.visibility !== "public" || task.status !== "open") {
+      throw new HelperAppServiceError("invalid_status", "This public rebuy task is not open.");
+    }
+    if (Number(task.version) !== expectedVersion) {
+      throw new HelperAppServiceError("version_conflict", "Public rebuy task changed. Please refresh.");
+    }
+    const result = await client.query(
+      `update helper_app.rebuy_tasks
+       set status = 'claimed',
+           claimed_helper_id = $2,
+           claim_idempotency_key = $3,
+           claimed_at = now(),
+           version = version + 1,
+           updated_at = now()
+       where id = $1 and status = 'open' and version = $4
+       returning *`,
+      [task.id, helper.id, idempotencyKey, expectedVersion],
+    );
+    if (!result.rows[0]) {
+      throw new HelperAppServiceError("claim_conflict", "Another helper claimed this rebuy task first.");
+    }
+    await insertAuditEvent(client, {
+      action: "helper_rebuy_claimed",
+      actor_helper_id: helper.id,
+      actor_role: "helper",
+      actor_user_id: input.authUserId,
+      after_state: { rebuyTaskId: task.id, status: "claimed" },
+      before_state: { status: task.status },
+      trip_id: task.source_trip_id,
+    });
+    return result.rows[0];
+  });
+}
+
+async function releasePublicRebuyTask(database, input) {
+  const rebuyTaskId = requiredText(input.rebuyTaskId, "rebuyTaskId");
+  const expectedVersion = Number(requiredText(input.expectedVersion, "expectedVersion"));
+  const idempotencyKey = requiredText(input.idempotencyKey, "idempotencyKey");
+  const reason = requiredText(input.reason, "reason");
+  return withTransaction(database, async (client) => {
+    const helper = await findActiveHelperForUser(client, input.authUserId);
+    const task = await lockRebuyTask(client, rebuyTaskId);
+    if (
+      task.visibility === "public" &&
+      task.status === "open" &&
+      task.release_idempotency_key === idempotencyKey
+    ) {
+      return task;
+    }
+    if (task.visibility !== "public") {
+      throw new HelperAppServiceError("invalid_status", "Private rebuy tasks cannot be released to public.");
+    }
+    if (task.status !== "claimed" || task.claimed_helper_id !== helper.id) {
+      throw new HelperAppServiceError("forbidden", "Only the claiming helper can release this task.");
+    }
+    if (Number(task.version) !== expectedVersion) {
+      throw new HelperAppServiceError("version_conflict", "Rebuy task changed. Please refresh.");
+    }
+    const result = await client.query(
+      `update helper_app.rebuy_tasks
+       set status = 'open',
+           claimed_helper_id = null,
+           release_idempotency_key = $2,
+           public_available_at = now(),
+           released_at = now(),
+           version = version + 1,
+           updated_at = now()
+       where id = $1 and status = 'claimed' and claimed_helper_id = $3 and version = $4
+       returning *`,
+      [task.id, idempotencyKey, helper.id, expectedVersion],
+    );
+    if (!result.rows[0]) {
+      throw new HelperAppServiceError("release_conflict", "Rebuy task release conflicted. Please refresh.");
+    }
+    await insertAuditEvent(client, {
+      action: "helper_rebuy_released",
+      actor_helper_id: helper.id,
+      actor_role: "helper",
+      actor_user_id: input.authUserId,
+      after_state: { rebuyTaskId: task.id, status: "open" },
+      before_state: { status: task.status },
+      reason,
+      trip_id: task.source_trip_id,
+    });
+    return result.rows[0];
+  });
+}
+
+async function reportRebuyTask(database, input) {
+  const normalized = normalizeRebuyReportInput(input);
+  return withTransaction(database, async (client) => {
+    const helper = await findActiveHelperForUser(client, normalized.authUserId);
+    const task = await lockRebuyTask(client, normalized.rebuyTaskId);
+    if (task.report_idempotency_key === normalized.idempotencyKey) return task;
+    assertHelperOwnsRebuyTask(task, helper);
+    if (!["open", "claimed"].includes(task.status)) {
+      throw new HelperAppServiceError("invalid_status", "This rebuy task cannot be reported now.");
+    }
+    if (normalized.reportedQuantity > task.quantity) {
+      throw new HelperAppServiceError("invalid_input", "Reported quantity cannot exceed requested quantity.");
+    }
+    const remainingQuantity = task.quantity - normalized.reportedQuantity;
+    if (remainingQuantity > 0 && !normalized.remainingReason) {
+      throw new HelperAppServiceError("invalid_input", "Partial rebuy requires a remaining-quantity reason.");
+    }
+    if (!normalized.reportPhotos.length && !normalized.reportPhotosOmitted) {
+      throw new HelperAppServiceError("invalid_input", "Confirm when report photos are omitted.");
+    }
+    for (const [index, photo] of normalized.reportPhotos.entries()) {
+      await upsertRebuyPhoto(client, {
+        helperId: helper.id,
+        mediaKind: "rebuy_report_photo",
+        photoRole: "report",
+        rebuyTaskId: task.id,
+        sortOrder: index,
+        ...photo,
+      });
+    }
+    const result = await client.query(
+      `update helper_app.rebuy_tasks
+       set status = 'reported',
+           claimed_helper_id = coalesce(claimed_helper_id, $2),
+           report_idempotency_key = $3,
+           reported_quantity = $4,
+           remaining_quantity = $5,
+           remaining_reason = $6,
+           helper_report_note = $7,
+           report_photos_omitted = $8,
+           reported_at = now(),
+           version = version + 1,
+           updated_at = now()
+       where id = $1
+       returning *`,
+      [
+        task.id,
+        helper.id,
+        normalized.idempotencyKey,
+        normalized.reportedQuantity,
+        remainingQuantity,
+        normalized.remainingReason,
+        normalized.helperNote,
+        normalized.reportPhotosOmitted,
+      ],
+    );
+    await insertAuditEvent(client, {
+      action: normalized.reportPhotos.length ? "helper_rebuy_reported" : "helper_rebuy_reported_without_photos",
+      actor_helper_id: helper.id,
+      actor_role: "helper",
+      actor_user_id: normalized.authUserId,
+      after_state: {
+        rebuyTaskId: task.id,
+        reportPhotoCount: normalized.reportPhotos.length,
+        reportedQuantity: normalized.reportedQuantity,
+      },
+      before_state: { status: task.status },
+      trip_id: task.source_trip_id,
+    });
+    return result.rows[0];
+  });
+}
+
+async function checkoutRebuyTasks(database, input) {
+  const idempotencyKey = requiredText(input.idempotencyKey, "idempotencyKey");
+  return withTransaction(database, async (client) => {
+    const helper = await findActiveHelperForUser(client, input.authUserId);
+    const existing = await client.query(
+      `select distinct checkout_trip_id
+       from helper_app.rebuy_tasks
+       where coalesce(claimed_helper_id, assigned_helper_id) = $1
+         and checkout_idempotency_key = $2
+         and checkout_trip_id is not null`,
+      [helper.id, idempotencyKey],
+    );
+    if (existing.rows[0]?.checkout_trip_id) {
+      const settlement = await client.query(
+        `select * from helper_app.settlements where trip_id = $1`,
+        [existing.rows[0].checkout_trip_id],
+      );
+      return { settlement: settlement.rows[0] || null, tripId: existing.rows[0].checkout_trip_id };
+    }
+    const tasksResult = await client.query(
+      `select *
+       from helper_app.rebuy_tasks
+       where status = 'reported'
+         and checked_out_at is null
+         and coalesce(claimed_helper_id, assigned_helper_id) = $1
+       order by reported_at asc, created_at asc
+       for update`,
+      [helper.id],
+    );
+    const tasks = tasksResult.rows.filter((task) => Number(task.reported_quantity || 0) > 0);
+    if (!tasks.length) {
+      throw new HelperAppServiceError("nothing_to_checkout", "No completed rebuy tasks are ready for checkout.");
+    }
+    const tripResult = await client.query(
+      `insert into helper_app.trips
+         (trip_name, business_date, location, timezone, assigned_helper_id,
+          status, departed_at, arrived_at, admin_activated_at, ended_at)
+       values ($1, $2, 'rebuy checkout', 'Asia/Tokyo', $3, 'ended',
+               now(), now(), now(), now())
+       returning *`,
+      [
+        `補買結帳 ${dateInTimezone(new Date(), "Asia/Tokyo")}`,
+        dateInTimezone(new Date(), "Asia/Tokyo"),
+        helper.id,
+      ],
+    );
+    const checkoutTrip = tripResult.rows[0];
+    let lastPurchaseTask = null;
+    for (const task of tasks) {
+      const purchaseTask = await insertPurchaseTask(client, {
+        actorUserId: input.authUserId,
+        helperId: helper.id,
+        lineCommunityName: task.line_community_name || "補買待確認",
+        note: task.helper_report_note,
+        originalPriceJpy: task.original_price_jpy,
+        productName: task.product_name,
+        quantity: task.reported_quantity,
+        requiresFaceCheck: false,
+        salePriceTwd: task.sale_price_twd || 0,
+        sourceRebuyTaskId: task.id,
+        tripId: checkoutTrip.id,
+      });
+      const completed = await client.query(
+        `update helper_app.purchase_tasks
+         set status = 'completed',
+             completed_quantity = quantity,
+             completed_at = now(),
+             updated_at = now()
+         where id = $1
+         returning *`,
+        [purchaseTask.id],
+      );
+      await copyRebuyPhotosToPurchase(client, {
+        helperId: helper.id,
+        purchaseTaskId: purchaseTask.id,
+        rebuyTaskId: task.id,
+        tripId: checkoutTrip.id,
+      });
+      await syncStagingOrderPreview(client, completed.rows[0]);
+      await client.query(
+        `update helper_app.rebuy_tasks
+         set status = 'checked_out',
+             checkout_idempotency_key = $2,
+             checkout_trip_id = $3,
+             checkout_purchase_task_id = $4,
+             checked_out_at = now(),
+             version = version + 1,
+             updated_at = now()
+         where id = $1`,
+        [task.id, idempotencyKey, checkoutTrip.id, purchaseTask.id],
+      );
+      lastPurchaseTask = purchaseTask;
+    }
+    const settlement = await createSettlementForEndedTrip(client, {
+      helper,
+      trip: { ...checkoutTrip, departed_at: checkoutTrip.ended_at, ended_at: checkoutTrip.ended_at },
+    });
+    await insertAuditEvent(client, {
+      action: "helper_rebuy_checkout_completed",
+      actor_helper_id: helper.id,
+      actor_role: "helper",
+      actor_user_id: input.authUserId,
+      after_state: {
+        purchaseTaskId: lastPurchaseTask?.id || null,
+        rebuyTaskCount: tasks.length,
+        settlementId: settlement.id,
+      },
+      before_state: {},
+      trip_id: checkoutTrip.id,
+    });
+    return { settlement, tripId: checkoutTrip.id };
+  });
+}
+
 async function respondPurchaseTask(database, input) {
   const normalized = normalizePurchaseResponseInput(input);
   return withTransaction(database, async (client) => {
@@ -1214,6 +1654,28 @@ async function authorizePurchaseFaceCheckUpload(database, { authUserId, purchase
     throw new HelperAppServiceError("invalid_status", "This purchase task does not need a face-check upload.");
   }
   assertTripCanUseLiveWorkspace({ status: row.trip_status }, "Face-check photos can be uploaded only while the trip is active.");
+  return row;
+}
+
+async function authorizeRebuyReportUpload(database, { authUserId, rebuyTaskId }) {
+  const result = await database.query(
+    `select rt.id, rt.status, rt.assigned_helper_id, rt.claimed_helper_id,
+            hp.id as helper_id, hp.is_active
+     from helper_app.rebuy_tasks rt
+     join helper_app.helper_profiles hp on hp.auth_user_id = $2
+     where rt.id = $1`,
+    [requiredText(rebuyTaskId, "rebuyTaskId"), authUserId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new HelperAppServiceError("rebuy_task_not_found", "Rebuy task was not found.");
+  if (!row.is_active) throw new HelperAppServiceError("helper_inactive", "Helper profile is inactive.");
+  const ownerId = row.claimed_helper_id || row.assigned_helper_id;
+  if (ownerId !== row.helper_id) {
+    throw new HelperAppServiceError("forbidden", "Rebuy task is not assigned to this helper.");
+  }
+  if (!["open", "claimed"].includes(row.status)) {
+    throw new HelperAppServiceError("invalid_status", "Rebuy report photos cannot be uploaded now.");
+  }
   return row;
 }
 
@@ -1772,7 +2234,10 @@ async function reviewSettlement(database, input) {
       await auditSettlementState(client, settlement, result.rows[0], input.actorUserId, "admin_settlement_rejected");
       return result.rows[0];
     }
-    const jpyToTwdRate = positiveNumber(input.jpyToTwdRate, "jpyToTwdRate");
+    const jpyToTwdRate = positiveNumber(
+      optionalText(input.jpyToTwdRate) || settlement.jpy_to_twd_rate,
+      "jpyToTwdRate",
+    );
     const transportApproved =
       settlement.transport_status === "pending" && input.transportDecision === "approve";
     const totals = calculateSettlement({
@@ -1818,6 +2283,43 @@ async function reviewSettlement(database, input) {
       ],
     );
     await auditSettlementState(client, settlement, result.rows[0], input.actorUserId, "admin_settlement_approved");
+    return result.rows[0];
+  });
+}
+
+async function setSettlementExchangeRate(database, input) {
+  const jpyToTwdRate = positiveNumber(input.jpyToTwdRate, "jpyToTwdRate");
+  return withTransaction(database, async (client) => {
+    const settlement = await lockSettlement(client, input.settlementId);
+    if (settlement.status === "completed") {
+      throw new HelperAppServiceError("invalid_status", "Completed settlement rate cannot be changed.");
+    }
+    const itemAdvanceTwd = Math.round(Number(settlement.product_total_jpy || 0) * jpyToTwdRate);
+    const result = await client.query(
+      `update helper_app.settlements
+       set jpy_to_twd_rate = $2,
+           item_advance_twd = $3,
+           updated_at = now()
+       where id = $1
+       returning *`,
+      [settlement.id, jpyToTwdRate, itemAdvanceTwd],
+    );
+    await insertAuditEvent(client, {
+      action: "admin_settlement_exchange_rate_set",
+      actor_role: "admin",
+      actor_user_id: input.actorUserId,
+      after_state: {
+        itemAdvanceTwd,
+        jpyToTwdRate,
+        settlementId: settlement.id,
+      },
+      before_state: {
+        itemAdvanceTwd: settlement.item_advance_twd,
+        jpyToTwdRate: settlement.jpy_to_twd_rate,
+        settlementId: settlement.id,
+      },
+      trip_id: settlement.trip_id,
+    });
     return result.rows[0];
   });
 }
@@ -2307,6 +2809,96 @@ function normalizePurchaseResponseInput(input) {
   };
 }
 
+function normalizeRebuyTaskInput(input) {
+  const visibility = requiredText(input.visibility || "private", "visibility");
+  if (!["private", "public"].includes(visibility)) {
+    throw new HelperAppServiceError("invalid_input", "Invalid rebuy visibility.");
+  }
+  const quantityText = optionalText(input.quantity);
+  const quantity = quantityText == null ? null : Number(quantityText);
+  if (quantity != null && (!Number.isInteger(quantity) || quantity <= 0)) {
+    throw new HelperAppServiceError("invalid_input", "Quantity must be a positive integer.");
+  }
+  const originalPriceText = optionalText(input.originalPriceJpy);
+  const originalPriceJpy = originalPriceText == null ? null : Number(originalPriceText);
+  if (originalPriceJpy != null && (!Number.isInteger(originalPriceJpy) || originalPriceJpy < 0)) {
+    throw new HelperAppServiceError("invalid_input", "Original JPY price must be a non-negative integer.");
+  }
+  const salePriceText = optionalText(input.salePriceTwd);
+  const salePriceTwd = salePriceText == null ? null : Number(salePriceText);
+  if (salePriceTwd != null && (!Number.isInteger(salePriceTwd) || salePriceTwd < 0)) {
+    throw new HelperAppServiceError("invalid_input", "Sale price TWD must be a non-negative integer.");
+  }
+  const priority = Number(optionalText(input.priority) || 100);
+  if (!Number.isInteger(priority) || priority < 0) {
+    throw new HelperAppServiceError("invalid_input", "Priority must be a non-negative integer.");
+  }
+  const sourcePurchaseTaskId = optionalText(input.sourcePurchaseTaskId);
+  if (!sourcePurchaseTaskId && (!quantity || !optionalText(input.productName))) {
+    throw new HelperAppServiceError("invalid_input", "Manual rebuy tasks require product name and quantity.");
+  }
+  return {
+    actorUserId: input.actorUserId || null,
+    assignedHelperId: optionalText(input.assignedHelperId),
+    instructions: optionalText(input.instructions),
+    lineCommunityName: optionalText(input.lineCommunityName),
+    originalPriceJpy,
+    priority,
+    productName: optionalText(input.productName),
+    quantity,
+    salePriceTwd,
+    sourcePurchaseTaskId,
+    visibility,
+  };
+}
+
+function normalizeRebuyReportInput(input) {
+  const reportedQuantity = Number(requiredText(input.reportedQuantity, "reportedQuantity"));
+  if (!Number.isInteger(reportedQuantity) || reportedQuantity <= 0) {
+    throw new HelperAppServiceError("invalid_input", "Reported quantity must be a positive integer.");
+  }
+  return {
+    authUserId: requiredText(input.authUserId, "authUserId"),
+    helperNote: optionalText(input.helperNote),
+    idempotencyKey: requiredText(input.idempotencyKey, "idempotencyKey"),
+    rebuyTaskId: requiredText(input.rebuyTaskId, "rebuyTaskId"),
+    remainingReason: optionalText(input.remainingReason),
+    reportPhotos: normalizeRebuyPhotos(input.reportPhotos, "report"),
+    reportPhotosOmitted: Boolean(input.reportPhotosOmitted),
+    reportedQuantity,
+  };
+}
+
+function normalizeRebuyPhotos(photos, role) {
+  const normalized = Array.isArray(photos)
+    ? photos.map((photo, index) => {
+        const contentType = requiredText(photo.contentType || photo.content_type, "contentType");
+        if (!contentType.startsWith("image/")) {
+          throw new HelperAppServiceError("invalid_input", "Only image uploads are supported.");
+        }
+        const byteSize = photo.byteSize ?? photo.byte_size;
+        const sortOrder = Number(photo.sortOrder ?? photo.sort_order ?? index);
+        if (!Number.isInteger(sortOrder) || sortOrder < 0) {
+          throw new HelperAppServiceError("invalid_input", "Photo sort order must be a non-negative integer.");
+        }
+        return {
+          byteSize: byteSize == null || byteSize === "" ? null : Number(byteSize),
+          contentType,
+          originalFilename: optionalText(photo.originalFilename || photo.original_filename),
+          sortOrder,
+          storageKey: requiredText(photo.storageKey || photo.storage_key, "storageKey"),
+        };
+      })
+    : [];
+  if (new Set(normalized.map((photo) => photo.storageKey)).size !== normalized.length) {
+    throw new HelperAppServiceError("invalid_input", `${role} photos must be unique.`);
+  }
+  if (new Set(normalized.map((photo) => photo.sortOrder)).size !== normalized.length) {
+    throw new HelperAppServiceError("invalid_input", `${role} photo order must be unique.`);
+  }
+  return normalized.sort((left, right) => left.sortOrder - right.sortOrder);
+}
+
 function normalizeOptionalPhoto(photo) {
   if (!photo) return null;
   const contentType = requiredText(photo.contentType || photo.content_type, "contentType");
@@ -2403,8 +2995,8 @@ async function insertPurchaseTask(client, input) {
        (trip_id, helper_id, source_quote_task_id, source_quote_task_photo_id,
         source_quote_reply_id, line_community_name, product_name, quantity,
         original_price_jpy, sale_price_twd, note, requires_face_check,
-        created_by_user_id)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        created_by_user_id, source_rebuy_task_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
      returning *`,
     [
       input.tripId,
@@ -2420,6 +3012,7 @@ async function insertPurchaseTask(client, input) {
       input.note,
       input.requiresFaceCheck,
       input.actorUserId,
+      input.sourceRebuyTaskId || null,
     ],
   );
   const task = result.rows[0];
@@ -2430,6 +3023,7 @@ async function insertPurchaseTask(client, input) {
     after_state: {
       purchaseTaskId: task.id,
       requiresFaceCheck: task.requires_face_check,
+      sourceRebuyTaskId: task.source_rebuy_task_id,
       sourceQuoteTaskPhotoId: task.source_quote_task_photo_id,
     },
     before_state: {},
@@ -2504,8 +3098,8 @@ async function syncStagingOrderPreview(client, task) {
     `insert into helper_app.staging_order_previews
        (trip_id, helper_id, purchase_task_id, line_community_name, product_name,
         quantity, original_price_jpy, sale_price_twd, source_quote_task_id,
-        source_quote_task_photo_id, source_quote_reply_id)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        source_quote_task_photo_id, source_quote_reply_id, source_rebuy_task_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
      on conflict (purchase_task_id) do update
      set line_community_name = excluded.line_community_name,
          product_name = excluded.product_name,
@@ -2515,6 +3109,7 @@ async function syncStagingOrderPreview(client, task) {
          source_quote_task_id = excluded.source_quote_task_id,
          source_quote_task_photo_id = excluded.source_quote_task_photo_id,
          source_quote_reply_id = excluded.source_quote_reply_id,
+         source_rebuy_task_id = excluded.source_rebuy_task_id,
          updated_at = now()
      returning *`,
     [
@@ -2529,9 +3124,102 @@ async function syncStagingOrderPreview(client, task) {
       task.source_quote_task_id,
       task.source_quote_task_photo_id,
       task.source_quote_reply_id,
+      task.source_rebuy_task_id,
     ],
   );
   return result.rows[0];
+}
+
+async function lockRebuyTask(client, rebuyTaskId) {
+  const result = await client.query(
+    `select * from helper_app.rebuy_tasks where id = $1 for update`,
+    [rebuyTaskId],
+  );
+  if (!result.rows[0]) throw new HelperAppServiceError("rebuy_task_not_found", "Rebuy task was not found.");
+  return result.rows[0];
+}
+
+async function getRebuyTaskById(client, rebuyTaskId) {
+  const result = await client.query(
+    `select rt.*,
+            coalesce(
+              jsonb_agg(
+                jsonb_build_object(
+                  'id', rtp.id,
+                  'storage_key', rtp.storage_key,
+                  'photo_role', rtp.photo_role,
+                  'sort_order', rtp.sort_order
+                )
+                order by rtp.photo_role asc, rtp.sort_order asc
+              ) filter (where rtp.id is not null),
+              '[]'::jsonb
+            ) as photos
+     from helper_app.rebuy_tasks rt
+     left join helper_app.rebuy_task_photos rtp on rtp.rebuy_task_id = rt.id
+     where rt.id = $1
+     group by rt.id`,
+    [rebuyTaskId],
+  );
+  if (!result.rows[0]) throw new HelperAppServiceError("rebuy_task_not_found", "Rebuy task was not found.");
+  return result.rows[0];
+}
+
+function assertHelperOwnsRebuyTask(task, helper) {
+  const ownerId = task.claimed_helper_id || task.assigned_helper_id;
+  if (ownerId !== helper.id) {
+    throw new HelperAppServiceError("forbidden", "Rebuy task is not assigned to this helper.");
+  }
+}
+
+async function upsertRebuyPhoto(client, input) {
+  await client.query(
+    `insert into helper_app.media_objects
+       (storage_key, media_kind, retention_status, original_filename,
+        content_type, byte_size, uploaded_by_helper_id)
+     values ($1, $2, 'order_evidence', $3, $4, $5, $6)
+     on conflict (storage_key) do update
+     set media_kind = excluded.media_kind,
+         retention_status = 'order_evidence',
+         original_filename = coalesce(excluded.original_filename, helper_app.media_objects.original_filename),
+         content_type = coalesce(excluded.content_type, helper_app.media_objects.content_type),
+         byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)`,
+    [
+      input.storageKey,
+      input.mediaKind,
+      input.originalFilename,
+      input.contentType,
+      input.byteSize,
+      input.helperId || null,
+    ],
+  );
+  await client.query(
+    `insert into helper_app.rebuy_task_photos
+       (rebuy_task_id, storage_key, photo_role, sort_order)
+     values ($1, $2, $3, $4)
+     on conflict (rebuy_task_id, photo_role, sort_order) do update
+     set storage_key = excluded.storage_key`,
+    [input.rebuyTaskId, input.storageKey, input.photoRole, input.sortOrder],
+  );
+}
+
+async function copyRebuyPhotosToPurchase(client, input) {
+  const photos = await client.query(
+    `select storage_key, photo_role, sort_order
+     from helper_app.rebuy_task_photos
+     where rebuy_task_id = $1
+     order by photo_role asc, sort_order asc`,
+    [input.rebuyTaskId],
+  );
+  for (const photo of photos.rows) {
+    await insertPurchasePhoto(client, {
+      helperId: input.helperId,
+      photoRole: photo.photo_role === "reference" ? "manual_reference" : "detail_reply",
+      purchaseTaskId: input.purchaseTaskId,
+      sortOrder: photo.sort_order,
+      storageKey: photo.storage_key,
+      tripId: input.tripId,
+    });
+  }
 }
 
 async function refreshQuoteTaskStatus(client, quoteTaskId) {
@@ -2580,15 +3268,20 @@ module.exports = {
   attachSignedQuoteTaskUrls,
   attachSignedPurchaseTaskUrls,
   attachSignedPhotoUrls,
+  attachSignedRebuyTaskUrls,
   authorizeAdminTaskPhotoUpload,
   authorizePurchaseFaceCheckUpload,
   authorizeQuoteReplyUpload,
+  authorizeRebuyReportUpload,
   authorizeSettlementEvidenceUpload,
   authorizeSitePhotoUpload,
   cancelTrip,
+  checkoutRebuyTasks,
+  claimPublicRebuyTask,
   createHelperProfile,
   createPurchaseTask,
   createQuoteTask,
+  createRebuyTask,
   createTrip,
   dateInTimezone,
   dateOnly,
@@ -2599,6 +3292,7 @@ module.exports = {
   isHelperAppServiceError,
   listPurchaseTasks,
   listQuoteTasks,
+  listRebuyTasks,
   listSettlements,
   listSitePhotoBatches,
   listStagingOrderPreviews,
@@ -2612,9 +3306,12 @@ module.exports = {
   recordSettlementPayment,
   respondPurchaseTask,
   reviewSettlement,
+  setSettlementExchangeRate,
   reviewWarehouseProof,
   reviewFaceCheckPurchaseTask,
   quickPublishPurchaseTask,
+  releasePublicRebuyTask,
+  reportRebuyTask,
   submitQuotePhotoReply,
   submitSettlementPrecheck,
   submitSitePhotoBatch,

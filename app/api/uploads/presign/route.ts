@@ -17,6 +17,7 @@ export async function POST(request: Request) {
     const body = await request.json();
     const tripId = String(body.tripId || "").trim();
     const purchaseTaskId = String(body.purchaseTaskId || "").trim();
+    const rebuyTaskId = String(body.rebuyTaskId || "").trim();
     const settlementId = String(body.settlementId || "").trim();
     const evidenceType = String(body.evidenceType || "").trim();
     const quoteTaskPhotoId = String(body.quoteTaskPhotoId || "").trim();
@@ -71,6 +72,15 @@ export async function POST(request: Request) {
         },
       );
       storageKeyTripId = authorization.trip_id;
+    } else if (uploadPurpose === "rebuy_report") {
+      if (!rebuyTaskId) {
+        return NextResponse.json({ error: "缺少補買任務資訊。" }, { status: 400 });
+      }
+      await service.authorizeRebuyReportUpload(database.getDatabasePool(), {
+        authUserId: data.user.id,
+        rebuyTaskId,
+      });
+      storageKeyTripId = "rebuy";
     } else {
       if (!tripId) {
         return NextResponse.json({ error: "缺少行程資訊。" }, { status: 400 });
@@ -114,6 +124,13 @@ export async function POST(request: Request) {
                 settlementId,
                 tripId: storageKeyTripId,
               })
+            : uploadPurpose === "rebuy_report"
+              ? buildRebuyReportPhotoKey({
+                  clientPhotoId,
+                  contentType,
+                  fileName,
+                  rebuyTaskId,
+                })
         : r2Store.buildSitePhotoKey({
             contentType,
             fileName,
@@ -135,6 +152,27 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
+}
+
+function buildRebuyReportPhotoKey({
+  clientPhotoId,
+  contentType,
+  fileName,
+  rebuyTaskId,
+}: {
+  clientPhotoId: string;
+  contentType: string;
+  fileName: string;
+  rebuyTaskId: string;
+}) {
+  const extension = extensionFromFile(fileName) || extensionFromContentType(contentType);
+  return [
+    "helper-app",
+    "rebuy",
+    rebuyTaskId,
+    "reports",
+    `${clientPhotoId}${extension}`,
+  ].join("/");
 }
 
 function buildSettlementEvidenceKey({
