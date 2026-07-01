@@ -68,7 +68,7 @@ export default async function AdminPage({
 
   const [dashboard, customerNicknames] = await Promise.all([
     service.listAdminDashboard(database.getDatabasePool()),
-    ["live", "tasks"].includes(activeView)
+    ["live", "tasks", "rebuy"].includes(activeView)
       ? service.listCustomerNicknames(database.getDatabasePool())
       : Promise.resolve([]),
   ]);
@@ -125,7 +125,11 @@ export default async function AdminPage({
         ) : activeView === "rebuy" ? (
           <AdminSection icon={<PackageSearch className="size-5" />} title="補買">
             <div className="grid gap-4">
-              <CreateRebuyTaskForm helpers={dashboard.helpers} purchaseTasks={dashboard.purchaseTasks} />
+              <CreateRebuyTaskForm
+                customerNicknames={customerNicknames}
+                helpers={dashboard.helpers}
+                purchaseTasks={dashboard.purchaseTasks}
+              />
               <AdminRebuyList tasks={rebuyTasks} />
             </div>
           </AdminSection>
@@ -350,14 +354,13 @@ function AdminRebuyList({ tasks }: { tasks: any[] }) {
                 </p>
                 {task.instructions ? <p className="mt-2 text-sm">{task.instructions}</p> : null}
               </div>
-              <span className="rounded-full border bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground">
-                v{task.version} · priority {task.priority}
-              </span>
             </div>
             <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-2">
+              <p className="rounded-md bg-muted/60 px-3 py-2 font-medium text-foreground">
+                小幫手補買到：{task.reported_quantity != null ? `${task.reported_quantity} / ${task.quantity} 件` : `尚未回報 / ${task.quantity} 件`}
+              </p>
               <p>指定：{task.assigned_helper_display_name || "-"}</p>
               <p>認領：{task.claimed_helper_display_name || "-"}</p>
-              {task.reported_quantity != null ? <p>回報數量：{task.reported_quantity}</p> : null}
               {task.remaining_quantity ? <p>剩餘：{task.remaining_quantity} · {task.remaining_reason}</p> : null}
             </div>
             {task.photos?.length ? (

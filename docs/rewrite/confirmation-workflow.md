@@ -1,12 +1,59 @@
 # Helper Rewrite Confirmation Workflow
 
-Last updated: 2026-06-29
+Last updated: 2026-07-01
 
 This document lists the product and implementation decisions that must be confirmed
 before or during the MINICHI helper rewrite. The source behavior is
 `latest-helper-operation-spec.md`.
 
 ## Confirmed Decisions
+
+### Round 23 confirmed on 2026-07-01
+
+Slice 7 scope is confirmed as admin staging review and explicit merge from
+reviewed helper staging data into the main operational order database:
+
+- Only `ended` trips can be merged. Active trips may still expose staging
+  preview/review work, but final merge waits until the trip is ended.
+- Merge does not wait for settlement, payment, or warehouse approval.
+- The first-version merge unit is one merge job per trip.
+- Individual staging orders are soft-excluded from the merge with a required
+  reason. The staging review UI must not hard-delete orders.
+- Reviewed staging data is separate from helper source data. Admin corrections
+  update reviewed staging records and audit rows; they do not rewrite helper
+  purchase, quote/detail, face-check, or rebuy source responses.
+- Admin-editable reviewed staging fields are customer nickname, product name,
+  quantity, original JPY price, sale TWD price, notes, include/exclude state,
+  exclude reason, and selected final order photos.
+- If a customer nickname does not match `main.customers`, the UI warns the
+  admin. The admin may explicitly confirm the unknown name and merge, but the
+  merge flow does not automatically create a `main.customers` record.
+- After admin approval, the reviewed snapshot is frozen. Any later edit revokes
+  approval and requires review/approval again.
+- Merge actions require expected-version checking, client idempotency keys, and
+  retryable `failed` state handling. Duplicate retries must not create duplicate
+  `main.orders`, source links, photo rows, or R2 copies.
+- Main database writes are all-or-nothing inside the database transaction.
+  Because R2 copies cannot be part of the same database transaction, final photo
+  copy keys are deterministic and R2 copy steps must be idempotent/resumable.
+- Merge writes only the admin-selected final order photos. Eligible selected
+  photos can include purchase source/reference, quote/detail, helper purchase
+  report, final approved face-check, and rebuy reference/report photos. Site
+  photos, rejected/retaken face-check photos, settlement receipts, transport
+  proof, and warehouse proof are not final order photos unless a later explicit
+  product decision changes that boundary.
+- Successful merge writes `main.orders`, `main.order_source_links`, and
+  `main.order_photos`.
+- After merge, the helper system shows the merged result as read-only. Any
+  operational order edit belongs in the administrator order system.
+- Staging workflow data remains available for a 7-day recovery window after
+  merge, then may be archived or cleaned while preserving minimal audit records.
+- The helper system does not provide a reverse-delete or rollback action that
+  deletes merged `main.orders`.
+- Review-only/internal admin fields must not become helper-visible. If existing
+  staging preview rows are helper-readable, Slice 7 should store approval,
+  exclusion, internal notes, selected final photos, and merge status in separate
+  admin-only review tables or split RLS policies.
 
 ### Round 22 confirmed on 2026-06-29
 
@@ -35,12 +82,13 @@ helper release back to the public pool, and rebuy checkout:
 - Private rebuy tasks cannot be released into the public pool by helpers.
   Private reassignment or conversion to public remains an audited admin action.
 - Public listings expose only product name, quantity, JPY price, reference
-  photos, instructions, priority, and creation/availability time. They do not
+  photos, instructions, and creation/availability time. They do not
   expose LINE community nickname, TWD sale price, complete provenance,
   unrestricted customer data, or other helpers' data.
-- Public listing order is explicit admin priority first, then FIFO by
-  `public_available_at`; initial publication uses creation time and a released
-  task receives a new public availability time.
+- Public listing order is newest publication first by `public_available_at`;
+  initial publication uses creation time and a released task receives a new
+  public availability time, so it returns to the front of the public list.
+- Admins do not set a separate rebuy priority.
 - The rebuy lifecycle is
   `open -> claimed -> completed -> checkout_pending ->
   settlement_in_progress -> settled`, with `canceled`, `unavailable`, and
@@ -515,25 +563,40 @@ Staging, merge, and main-order boundaries:
 
 - Helper-generated orders remain staging data until admin order review and an
   explicit merge.
-- Normal live-trip order merge can happen after admin order review is complete.
-  Settlement, payment, and warehouse completion are not required for the normal
-  live-trip order merge.
-- The first-version merge unit is a trip-level merge job.
-- Admins may exclude or delete individual staging orders before approving a
-  trip merge job.
+- Only ended trips can be merged. Normal live-trip order merge can happen after
+  admin order review is complete; settlement, payment, and warehouse completion
+  are not required for the normal live-trip order merge.
+- The first-version merge unit is one trip-level merge job per trip.
+- Admins may soft-exclude individual staging orders before approving a trip
+  merge job. Exclusion requires a reason; the staging review UI must not
+  hard-delete orders.
+- Reviewed staging data stays separate from helper source task/reply data.
 - Staging review uses the same reviewed staging editable fields as live return
   feed: customer nickname, product name, quantity, original JPY price, sale TWD
-  price, notes, and order photos or selected retained photos.
+  price, notes, include/exclude state, exclude reason, and selected final order
+  photos.
+- Unknown customer nicknames warn the admin. Admins may explicitly confirm the
+  unknown name and merge, but the merge flow does not automatically create
+  `main.customers` records.
+- Admin approval freezes the reviewed snapshot. Any later edit revokes approval
+  and requires review/approval again.
 - Staging review edits must not silently overwrite helper source task or reply
   data.
+- Merge uses expected-version checks, client idempotency keys, and retryable
+  failed-state recovery.
+- Main database writes are all-or-nothing. R2 final-photo copies use
+  deterministic keys and idempotent retry because object storage cannot share
+  the database transaction.
 - Merge writes helper-generated operational data into `main.orders`,
   `main.order_source_links`, and `main.order_photos`.
+- Merge writes only admin-selected final order photos.
 - Helper provenance is canonical in `main.order_source_links`, not required
   fields on `main.orders`.
 - Rebuy checkout orders follow the same
   `staging -> admin review -> explicit merge` rule.
 - Post-merge edits belong in the administrator order system, not the helper
-  workflow.
+  workflow. The helper system shows merged data as read-only and does not offer
+  reverse deletion of merged main orders.
 - After successful merge, staging workflow data keeps a 7-day recovery window,
   then can be archived or cleaned while preserving minimal merge audit records.
 - Live return feed and staging review cannot directly create final
@@ -568,8 +631,8 @@ Rebuy behavior:
 - Completed rebuy orders create staging data and may be merged before rebuy
   settlement/payment is complete, but only after admin review and an explicit
   merge action.
-- Public rebuy ordering is admin priority first, then FIFO for tasks without an
-  explicit priority.
+- Public rebuy ordering is newest publication first. Admins do not set a
+  separate rebuy priority.
 - Admins may reassign private rebuy tasks only before completion, checkout, or
   merge-related review state; reassignment must write audit events.
 - Public rebuy claim must be atomic at the database layer. Frontend duplicate-tap

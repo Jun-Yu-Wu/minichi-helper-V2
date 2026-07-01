@@ -82,6 +82,21 @@ test("lists customer nickname suggestions from the Supabase main customer master
   assert.match(queries[0].sql, /order by line_community_name asc/);
 });
 
+test("lists rebuy tasks by newest publication time without admin priority ordering", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return { rows: [] };
+    },
+  };
+
+  await service.listRebuyTasks(database);
+
+  assert.match(queries[0].sql, /coalesce\(rt\.public_available_at, rt\.created_at\) desc/);
+  assert.doesNotMatch(queries[0].sql, /rt\.priority asc/);
+});
+
 test("helper departure rejects inactive helpers before trip mutation", async () => {
   const calls = [];
   const database = {
@@ -1183,6 +1198,55 @@ test("rebuy partial report requires a remaining-quantity reason", async () => {
         reportedQuantity: "1",
       }),
     /remaining-quantity reason/,
+  );
+});
+
+test("private rebuy report keeps claimed ownership empty", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      { rows: [{ id: "helper-1", is_active: true }] },
+      {
+        rows: [{
+          assigned_helper_id: "helper-1",
+          claimed_helper_id: null,
+          id: "rebuy-1",
+          quantity: 3,
+          source_trip_id: null,
+          status: "open",
+          visibility: "private",
+        }],
+      },
+      {
+        rows: [{
+          assigned_helper_id: "helper-1",
+          claimed_helper_id: null,
+          id: "rebuy-1",
+          report_photos_omitted: true,
+          status: "reported",
+        }],
+      },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const result = await service.reportRebuyTask(database, {
+    authUserId: "user-1",
+    idempotencyKey: "report-key-1",
+    rebuyTaskId: "rebuy-1",
+    reportPhotosOmitted: true,
+    reportedQuantity: "3",
+  });
+
+  assert.equal(result.status, "reported");
+  const update = queries.find((query) =>
+    String(query.sql).includes("set status = 'reported'"),
+  );
+  assert.match(String(update.sql), /when visibility = 'public'/);
+  assert.deepEqual(
+    update.params.slice(0, 5),
+    ["rebuy-1", "helper-1", "report-key-1", 3, 0],
   );
 });
 

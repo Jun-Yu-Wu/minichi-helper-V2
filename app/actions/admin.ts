@@ -181,7 +181,6 @@ export async function createRebuyTaskAction(
       instructions: formText(formData, "instructions"),
       lineCommunityName: formText(formData, "lineCommunityName"),
       originalPriceJpy: formText(formData, "originalPriceJpy"),
-      priority: formText(formData, "priority"),
       productName: formText(formData, "productName"),
       quantity: formText(formData, "quantity"),
       referencePhotos: referencePhotosJson ? JSON.parse(referencePhotosJson) : [],

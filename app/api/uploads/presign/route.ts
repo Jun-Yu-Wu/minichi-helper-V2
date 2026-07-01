@@ -72,6 +72,9 @@ export async function POST(request: Request) {
         },
       );
       storageKeyTripId = authorization.trip_id;
+    } else if (uploadPurpose === "admin_rebuy_reference") {
+      await adminAuthorization.authorizeAdminByAllowlist(authClient);
+      storageKeyTripId = "rebuy";
     } else if (uploadPurpose === "rebuy_report") {
       if (!rebuyTaskId) {
         return NextResponse.json({ error: "缺少補買任務資訊。" }, { status: 400 });
@@ -124,6 +127,12 @@ export async function POST(request: Request) {
                 settlementId,
                 tripId: storageKeyTripId,
               })
+            : uploadPurpose === "admin_rebuy_reference"
+              ? buildAdminRebuyReferencePhotoKey({
+                  clientPhotoId,
+                  contentType,
+                  fileName,
+                })
             : uploadPurpose === "rebuy_report"
               ? buildRebuyReportPhotoKey({
                   clientPhotoId,
@@ -152,6 +161,24 @@ export async function POST(request: Request) {
       { status: 400 },
     );
   }
+}
+
+function buildAdminRebuyReferencePhotoKey({
+  clientPhotoId,
+  contentType,
+  fileName,
+}: {
+  clientPhotoId: string;
+  contentType: string;
+  fileName: string;
+}) {
+  const extension = extensionFromFile(fileName) || extensionFromContentType(contentType);
+  return [
+    "helper-app",
+    "rebuy",
+    "admin-reference",
+    `${clientPhotoId}${extension}`,
+  ].join("/");
 }
 
 function buildRebuyReportPhotoKey({

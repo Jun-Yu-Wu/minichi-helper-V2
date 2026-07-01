@@ -191,9 +191,11 @@ export function CreateQuoteTaskForm(props: QuoteTaskFormProps) {
 }
 
 export function CreateRebuyTaskForm({
+  customerNicknames,
   helpers,
   purchaseTasks,
 }: {
+  customerNicknames: string[];
   helpers: Array<{ display_name: string; id: string; is_active: boolean }>;
   purchaseTasks: Array<{
     id: string;
@@ -202,22 +204,128 @@ export function CreateRebuyTaskForm({
     status: string;
   }>;
 }) {
-  const [state, action, pending] = useActionState(createRebuyTaskAction, initialState);
+  const [photos, setPhotos] = useState<AdminTaskUploadPhoto[]>([]);
+  const photosRef = useRef<AdminTaskUploadPhoto[]>([]);
+  const [state, setState] = useState<AdminActionResult>({});
+  const [pending, setPending] = useState(false);
   const sourceCandidates = purchaseTasks.filter((task) => ["canceled", "unavailable", "not_found"].includes(task.status));
+
+  useEffect(() => {
+    photosRef.current = photos;
+  }, [photos]);
+
+  useEffect(
+    () => () => {
+      for (const photo of photosRef.current) URL.revokeObjectURL(photo.objectUrl);
+    },
+    [],
+  );
+
+  function addFiles(files: FileList | null) {
+    if (!files) return;
+    const selected = Array.from(files)
+      .filter((file) => file.type.startsWith("image/"))
+      .map((file) => ({
+        byteSize: file.size,
+        clientPhotoId: createClientId("rebuy-reference"),
+        contentType: file.type || "image/jpeg",
+        error:
+          file.size > MAX_ADMIN_TASK_PHOTO_BYTES
+            ? "照片超過 8MB，請縮小後再上傳。"
+            : undefined,
+        file,
+        objectUrl: URL.createObjectURL(file),
+        originalFilename: file.name || "rebuy-reference.jpg",
+        sortOrder: 0,
+        status: file.size > MAX_ADMIN_TASK_PHOTO_BYTES ? "failed" as const : "selected" as const,
+      }));
+    setPhotos((current) => [
+      ...current,
+      ...selected.map((photo, index) => ({ ...photo, sortOrder: current.length + index })),
+    ]);
+  }
+
+  function removePhoto(clientPhotoId: string) {
+    setPhotos((current) => {
+      const removed = current.find((photo) => photo.clientPhotoId === clientPhotoId);
+      if (removed) URL.revokeObjectURL(removed.objectUrl);
+      return current
+        .filter((photo) => photo.clientPhotoId !== clientPhotoId)
+        .map((photo, index) => ({ ...photo, sortOrder: index }));
+    });
+  }
+
+  function updatePhoto(clientPhotoId: string, patch: Partial<AdminTaskUploadPhoto>) {
+    setPhotos((current) =>
+      current.map((photo) =>
+        photo.clientPhotoId === clientPhotoId ? { ...photo, ...patch } : photo,
+      ),
+    );
+  }
+
+  async function submitRebuyTask(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    setPending(true);
+    setState({});
+    try {
+      const uploadedPhotos = await Promise.all(
+        photos.map(async (photo) => {
+          if (photo.storageKey) return photo;
+          updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" });
+          try {
+            const uploaded = await uploadAdminRebuyReferencePhoto(photo);
+            updatePhoto(photo.clientPhotoId, uploaded);
+            return { ...photo, ...uploaded };
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "照片上傳失敗。";
+            updatePhoto(photo.clientPhotoId, { error: message, status: "failed" });
+            throw error;
+          }
+        }),
+      );
+      setPhotos(uploadedPhotos);
+      formData.set(
+        "referencePhotosJson",
+        JSON.stringify(
+          uploadedPhotos.map((photo) => ({
+            byteSize: photo.byteSize,
+            contentType: photo.contentType,
+            originalFilename: photo.originalFilename,
+            sortOrder: photo.sortOrder,
+            storageKey: photo.storageKey,
+          })),
+        ),
+      );
+      const result = await createRebuyTaskAction({}, formData);
+      setState(result);
+      if (result.ok) {
+        for (const photo of uploadedPhotos) URL.revokeObjectURL(photo.objectUrl);
+        setPhotos([]);
+        form.reset();
+      }
+    } catch (error) {
+      setState({ error: error instanceof Error ? error.message : "照片上傳失敗。" });
+    } finally {
+      setPending(false);
+    }
+  }
+
   return (
-    <form action={action} className="grid gap-3 rounded-lg border bg-card p-4">
+    <form className="grid gap-3 rounded-lg border bg-card p-4" onSubmit={submitRebuyTask}>
       <h2 className="text-lg font-semibold">新增補買任務</h2>
-      <select name="visibility" defaultValue="private">
+      <select name="visibility" defaultValue="private" disabled={pending}>
         <option value="private">指定小幫手</option>
         <option value="public">公共補買池</option>
       </select>
-      <select name="assignedHelperId">
+      <select name="assignedHelperId" disabled={pending}>
         <option value="">公共任務或從原採買帶入</option>
         {helpers.filter((helper) => helper.is_active).map((helper) => (
           <option key={helper.id} value={helper.id}>{helper.display_name}</option>
         ))}
       </select>
-      <select name="sourcePurchaseTaskId">
+      <select name="sourcePurchaseTaskId" disabled={pending}>
         <option value="">手動建立，不綁定原採買</option>
         {sourceCandidates.map((task) => (
           <option key={task.id} value={task.id}>
@@ -226,18 +334,70 @@ export function CreateRebuyTaskForm({
         ))}
       </select>
       <div className="grid gap-3 sm:grid-cols-2">
-        <input name="productName" placeholder="商品名稱（手動建立必填）" />
-        <input name="lineCommunityName" placeholder="客人 LINE 名稱（public 對其他小幫手隱藏）" />
+        <input name="productName" placeholder="商品名稱（手動建立必填）" disabled={pending} />
+        <CustomerNicknameInput
+          customerNicknames={customerNicknames}
+          disabled={pending}
+          placeholder="客人 LINE 名稱（從客戶主檔建議）"
+          required={false}
+        />
       </div>
-      <div className="grid gap-3 sm:grid-cols-4">
-        <input name="quantity" inputMode="numeric" placeholder="數量" />
-        <input name="originalPriceJpy" inputMode="numeric" placeholder="JPY 單價" />
-        <input name="salePriceTwd" inputMode="numeric" placeholder="TWD 售價" />
-        <input name="priority" inputMode="numeric" placeholder="優先序，越小越前" />
+      <div className="grid gap-3 sm:grid-cols-3">
+        <input name="quantity" inputMode="numeric" placeholder="數量" disabled={pending} />
+        <input name="originalPriceJpy" inputMode="numeric" placeholder="JPY 單價" disabled={pending} />
+        <input name="salePriceTwd" inputMode="numeric" placeholder="TWD 售價" disabled={pending} />
       </div>
-      <textarea name="instructions" placeholder="補買指示" />
+      <textarea name="instructions" placeholder="補買指示" disabled={pending} />
+      <div className="grid gap-2">
+        <p className="text-sm font-medium">補買參考照（選填）</p>
+        <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-3 text-center">
+          <ImageUp className="size-5" aria-hidden="true" />
+          <span className="text-sm">選擇商品照片或補買參考截圖</span>
+          <input
+            accept="image/*"
+            className="sr-only"
+            disabled={pending}
+            multiple
+            type="file"
+            onChange={(event) => {
+              addFiles(event.currentTarget.files);
+              event.currentTarget.value = "";
+            }}
+          />
+        </label>
+        {photos.length ? (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {photos.map((photo) => (
+              <div className="rounded-md border bg-background p-2" key={photo.clientPhotoId}>
+                <img
+                  alt={photo.originalFilename}
+                  className="aspect-square w-full rounded-md object-cover"
+                  src={photo.objectUrl}
+                />
+                <div className="mt-2 flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <p className="truncate text-sm font-medium">{photo.originalFilename}</p>
+                    <p className="text-xs text-muted-foreground">{adminUploadStatusLabel(photo.status)}</p>
+                  </div>
+                  {!pending ? (
+                    <button
+                      aria-label="移除照片"
+                      className="rounded-md p-1 text-muted-foreground hover:bg-muted"
+                      type="button"
+                      onClick={() => removePhoto(photo.clientPhotoId)}
+                    >
+                      <X className="size-4" />
+                    </button>
+                  ) : null}
+                </div>
+                {photo.error ? <p className="mt-1 text-xs text-destructive">{photo.error}</p> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
       <ActionMessage state={state} />
-      <Button disabled={pending} type="submit">
+      <Button disabled={pending || photos.some((photo) => Boolean(photo.error))} type="submit">
         {pending ? "建立中..." : "建立補買任務"}
       </Button>
     </form>
@@ -490,9 +650,13 @@ export function QuickPublishPurchaseForm({
 function CustomerNicknameInput({
   customerNicknames,
   disabled,
+  placeholder = "LINE 社群暱稱",
+  required = true,
 }: {
   customerNicknames: string[];
   disabled: boolean;
+  placeholder?: string;
+  required?: boolean;
 }) {
   const [focused, setFocused] = useState(false);
   const [value, setValue] = useState("");
@@ -514,8 +678,8 @@ function CustomerNicknameInput({
         className="w-full"
         disabled={disabled}
         name="lineCommunityName"
-        placeholder="LINE 社群暱稱"
-        required
+        placeholder={placeholder}
+        required={required}
         role="combobox"
         value={value}
         onBlur={() => setFocused(false)}
@@ -803,6 +967,28 @@ async function uploadAdminTaskPhoto(photo: AdminTaskUploadPhoto, tripId: string)
       fileName: photo.originalFilename,
       tripId,
       uploadPurpose: "admin_quote_task_photo",
+    }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  });
+  const presignBody = await presign.json();
+  if (!presign.ok) throw new Error(presignBody.error || "無法建立上傳網址。");
+  const upload = await fetch(presignBody.uploadUrl, {
+    body: photo.file,
+    headers: { "content-type": photo.contentType },
+    method: "PUT",
+  });
+  if (!upload.ok) throw new Error(`R2 上傳失敗 (${upload.status})。`);
+  return { error: undefined, status: "uploaded" as const, storageKey: presignBody.storageKey };
+}
+
+async function uploadAdminRebuyReferencePhoto(photo: AdminTaskUploadPhoto) {
+  const presign = await fetch("/api/uploads/presign", {
+    body: JSON.stringify({
+      clientPhotoId: photo.clientPhotoId,
+      contentType: photo.contentType,
+      fileName: photo.originalFilename,
+      uploadPurpose: "admin_rebuy_reference",
     }),
     headers: { "content-type": "application/json" },
     method: "POST",

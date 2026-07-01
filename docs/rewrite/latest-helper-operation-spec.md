@@ -1,6 +1,6 @@
 # Latest Helper Operation Spec
 
-Last updated: 2026-06-29
+Last updated: 2026-07-01
 
 This document is the authoritative product behavior source for the MINICHI helper
 rewrite. It supersedes older helper-operation descriptions when behavior differs.
@@ -675,12 +675,23 @@ Admin merge writes reviewed helper-generated orders into:
 - `main.order_source_links`.
 - `main.order_photos`.
 
-Normal live-trip order merge can happen after admin order review is complete.
+Only ended trips can be merged. Active trips may expose staging previews and
+admin review work, but final merge waits until the trip is ended. Normal
+live-trip order merge can happen after admin order review is complete.
 Settlement, payment, and warehouse completion are not required for the normal
 live-trip order merge.
 
-The first-version merge unit is a trip-level merge job. Admins may exclude or
-delete individual staging orders before approving a trip merge job.
+The first-version merge unit is one trip-level merge job per trip. Admins may
+soft-exclude individual staging orders before approving a trip merge job.
+Exclusion requires a reason; the staging review UI must not hard-delete orders.
+
+Reviewed staging data is separate from helper source data. Admin corrections
+update reviewed staging records and audit rows; they do not rewrite helper
+purchase, quote/detail, face-check, or rebuy source responses. Review-only or
+internal admin fields must not become helper-visible. If staging preview rows
+are helper-readable, approval, exclusion, internal notes, selected final photos,
+and merge status should live in separate admin-only review tables or behind
+split RLS policies.
 
 Staging review uses the same reviewed staging editable fields as live return
 feed:
@@ -691,17 +702,43 @@ feed:
 - Original JPY price.
 - Sale TWD price.
 - Notes.
-- Order photos or selected retained photos.
+- Include/exclude state.
+- Exclude reason.
+- Selected final order photos.
+
+If a customer nickname does not match `main.customers`, the UI warns the admin.
+The admin may explicitly confirm the unknown name and merge, but the merge flow
+does not automatically create a `main.customers` record.
 
 Staging review edits must not silently overwrite helper source task or reply
 data. Helper provenance is canonical in `main.order_source_links`, not required
 fields on `main.orders`.
 
+After admin approval, the reviewed snapshot is frozen. Any later edit revokes
+approval and requires review/approval again.
+
+Merge actions require expected-version checking, client idempotency keys, and
+retryable failed-state handling. Duplicate retries must not create duplicate
+`main.orders`, source links, photo rows, or R2 copies.
+
+Main database writes are all-or-nothing inside the database transaction. Because
+R2 copies cannot be part of the same database transaction, final photo copy keys
+are deterministic and R2 copy steps must be idempotent/resumable.
+
+Merge writes only admin-selected final order photos. Eligible selected photos
+can include purchase source/reference, quote/detail, helper purchase report,
+final approved face-check, and rebuy reference/report photos. Site photos,
+rejected/retaken face-check photos, settlement receipts, transport proof, and
+warehouse proof are not final order photos unless a later explicit product
+decision changes that boundary.
+
 Rebuy checkout orders follow the same
 `staging -> admin review -> explicit merge` rule.
 
 Post-merge edits belong in the administrator order system, not the helper
-workflow. Live return feed and staging review cannot directly create final
+workflow. After merge, the helper system shows the merged result as read-only
+and does not provide a reverse-delete or rollback action that deletes merged
+`main.orders`. Live return feed and staging review cannot directly create final
 `main.orders` without an explicit merge action.
 
 After successful merge, staging workflow data keeps a 7-day recovery window,
@@ -864,15 +901,15 @@ Public rebuy visibility:
 - Original JPY price.
 - Reference photos.
 - Shopping instructions.
-- Admin priority.
 - Creation and public availability time.
 
 The public list must not expose LINE community nickname, TWD sale price,
 complete purchase or quote provenance, unrestricted customer data, or other
-helpers' data. It sorts by explicit admin priority first, then FIFO by
-`public_available_at`. Initial publication sets `public_available_at` to the
-creation time. Returning a task to the public pool sets a new
-`public_available_at`, so the released task rejoins FIFO at the time of release.
+helpers' data. It sorts by `public_available_at` descending, so the newest
+publication appears first. Initial publication sets `public_available_at` to
+the creation time. Returning a task to the public pool sets a new
+`public_available_at`, so the released task returns to the front of the list.
+Admins do not set a separate rebuy priority.
 
 Public claim and release:
 

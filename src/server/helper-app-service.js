@@ -263,9 +263,7 @@ async function listRebuyTasks(
      ${where}
      group by rt.id, ah.id, ch.id
      order by
-       case when rt.visibility = 'public' and rt.status = 'open' then 0 else 1 end,
-       rt.priority asc,
-       rt.public_available_at asc nulls last,
+       coalesce(rt.public_available_at, rt.created_at) desc,
        rt.created_at desc`,
     [includePrivateCustomerData, ...params],
   );
@@ -1254,7 +1252,10 @@ async function reportRebuyTask(database, input) {
     const result = await client.query(
       `update helper_app.rebuy_tasks
        set status = 'reported',
-           claimed_helper_id = coalesce(claimed_helper_id, $2),
+           claimed_helper_id = case
+             when visibility = 'public' then coalesce(claimed_helper_id, $2)
+             else claimed_helper_id
+           end,
            report_idempotency_key = $3,
            reported_quantity = $4,
            remaining_quantity = $5,
@@ -2829,10 +2830,6 @@ function normalizeRebuyTaskInput(input) {
   if (salePriceTwd != null && (!Number.isInteger(salePriceTwd) || salePriceTwd < 0)) {
     throw new HelperAppServiceError("invalid_input", "Sale price TWD must be a non-negative integer.");
   }
-  const priority = Number(optionalText(input.priority) || 100);
-  if (!Number.isInteger(priority) || priority < 0) {
-    throw new HelperAppServiceError("invalid_input", "Priority must be a non-negative integer.");
-  }
   const sourcePurchaseTaskId = optionalText(input.sourcePurchaseTaskId);
   if (!sourcePurchaseTaskId && (!quantity || !optionalText(input.productName))) {
     throw new HelperAppServiceError("invalid_input", "Manual rebuy tasks require product name and quantity.");
@@ -2843,7 +2840,7 @@ function normalizeRebuyTaskInput(input) {
     instructions: optionalText(input.instructions),
     lineCommunityName: optionalText(input.lineCommunityName),
     originalPriceJpy,
-    priority,
+    priority: 100,
     productName: optionalText(input.productName),
     quantity,
     salePriceTwd,
