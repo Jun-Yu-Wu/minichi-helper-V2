@@ -7,6 +7,7 @@ import {
   submitQuotePhotoReplyAction,
   type HelperActionResult,
 } from "../actions/helper";
+import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
 import { Button } from "../components/ui/button";
 
 type UploadStatus = "selected" | "uploading" | "uploaded" | "failed";
@@ -28,23 +29,21 @@ const initialState: HelperActionResult = {};
 
 export function QuoteTaskReplies({ tasks }: { tasks: any[] }) {
   if (!tasks.length) {
-    return (
-      <p className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-        目前沒有詢價或細節任務。
-      </p>
-    );
+    return <EmptyState title="目前沒有詢價或細節任務" body="管理員發布任務後，會依照片逐張顯示需要回覆的內容。" />;
   }
   return (
     <div className="grid gap-3">
-      <h4 className="font-semibold">詢價 / 細節任務</h4>
       {tasks.map((task) => (
-        <section key={task.id} className="grid gap-3 rounded-lg border bg-card p-4">
+        <Surface key={task.id} className="grid gap-3">
           <div>
-            <h5 className="font-semibold">
-              {task.product_name || "未命名任務"} · {taskTypeLabel(task.task_type)}
-            </h5>
-            <p className="text-sm text-muted-foreground">
-              {completedCount(task.photos)} / {task.photos.length} 已回覆 · {task.status}
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusBadge tone={task.status === "completed" ? "green" : "blue"}>
+                {taskTypeLabel(task.task_type)}
+              </StatusBadge>
+              <h5 className="font-semibold">{task.product_name || "未命名任務"}</h5>
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {completedCount(task.photos)} / {task.photos.length} 張已回覆
             </p>
             {task.instruction ? <p className="mt-1 text-sm">{task.instruction}</p> : null}
           </div>
@@ -53,7 +52,7 @@ export function QuoteTaskReplies({ tasks }: { tasks: any[] }) {
               <QuotePhotoReplyForm key={photo.id} photo={photo} taskType={task.task_type} />
             ))}
           </div>
-        </section>
+        </Surface>
       ))}
     </div>
   );
@@ -182,8 +181,8 @@ function QuotePhotoReplyForm({ photo, taskType }: { photo: any; taskType: string
   }
 
   return (
-    <div className="grid gap-3 rounded-md border bg-background p-3">
-      <div className="grid gap-3 sm:grid-cols-[128px_1fr]">
+    <div className="grid gap-3 rounded-lg border bg-background p-3 sm:p-4">
+      <div className="grid gap-3 sm:grid-cols-[132px_1fr]">
         <a href={photo.signed_url} target="_blank" rel="noreferrer">
           <img
             alt={photo.product_name || "quote task photo"}
@@ -192,9 +191,18 @@ function QuotePhotoReplyForm({ photo, taskType }: { photo: any; taskType: string
           />
         </a>
         <div className="grid gap-2">
-          <p className="text-sm font-medium">
-            #{photo.sort_order + 1} · {replyStatusLabel(photo.reply_status)}
-            {photo.needs_review ? " · 需確認" : ""}
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge tone={replyStatusTone(photo.reply_status)}>
+              #{photo.sort_order + 1} {replyStatusLabel(photo.reply_status)}
+            </StatusBadge>
+            {photo.needs_review ? <StatusBadge tone="amber">需確認</StatusBadge> : null}
+          </div>
+          <p className="text-sm text-muted-foreground">
+            {requiresPrice && requiresDetail
+              ? "請回覆 JPY 報價並上傳細節照。"
+              : requiresPrice
+                ? "請回覆 JPY 報價。"
+                : "請上傳商品細節照。"}
           </p>
           {photo.latest_reply ? (
             <div className="rounded-md bg-muted/40 p-2 text-sm">
@@ -206,18 +214,21 @@ function QuotePhotoReplyForm({ photo, taskType }: { photo: any; taskType: string
       </div>
 
       {requiresPrice ? (
-        <input
-          inputMode="numeric"
-          name="priceJpy"
-          placeholder="JPY 報價"
-          value={priceJpy}
-          onChange={(event) => setPriceJpy(event.target.value)}
-        />
+        <label className="grid gap-1">
+          <span className="text-sm font-medium">JPY 報價</span>
+          <input
+            inputMode="numeric"
+            name="priceJpy"
+            placeholder="例如 4980"
+            value={priceJpy}
+            onChange={(event) => setPriceJpy(event.target.value)}
+          />
+        </label>
       ) : null}
 
       {requiresDetail ? (
         <div className="grid gap-2">
-          <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-3 text-center">
+          <label className="flex min-h-24 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed bg-muted/40 p-3 text-center">
             <Camera className="size-5" aria-hidden="true" />
             <span className="text-sm">選擇細節照</span>
             <input
@@ -231,7 +242,7 @@ function QuotePhotoReplyForm({ photo, taskType }: { photo: any; taskType: string
           {detailPhotos.length ? (
             <div className="grid gap-2 sm:grid-cols-2">
               {detailPhotos.map((detailPhoto) => (
-                <div key={detailPhoto.clientPhotoId} className="rounded-md border p-2">
+                <div key={detailPhoto.clientPhotoId} className="rounded-md border bg-background p-2">
                   <img
                     alt={detailPhoto.originalFilename}
                     className="aspect-square w-full rounded-md object-cover"
@@ -283,7 +294,7 @@ function QuotePhotoReplyForm({ photo, taskType }: { photo: any; taskType: string
         </div>
       ) : null}
 
-      <form action={action} className="grid gap-2">
+      <form action={action} className="grid gap-3 border-t pt-3">
         <input name="quoteTaskPhotoId" type="hidden" value={photo.id} />
         <input name="idempotencyKey" type="hidden" value={idempotencyKey} />
         <input name="detailPhotosJson" type="hidden" value={detailPhotosJson} />
@@ -298,7 +309,7 @@ function QuotePhotoReplyForm({ photo, taskType }: { photo: any; taskType: string
           <p className="text-sm text-primary">上一筆回覆已送出。</p>
         ) : null}
         {state.error ? <p className="text-sm text-destructive">{state.error}</p> : null}
-        <Button disabled={!canSubmit} size="sm" type="submit">
+        <Button disabled={!canSubmit} type="submit">
           <Send className="mr-2 size-4" />
           {pending ? "送出中..." : photo.reply_status === "replied" ? "更新這張回覆" : "送出這張回覆"}
         </Button>
@@ -322,6 +333,13 @@ function replyStatusLabel(status: string) {
   if (status === "needs_review") return "需確認";
   if (status === "converted_to_purchase") return "已轉購買";
   return "待回覆";
+}
+
+function replyStatusTone(status: string): "amber" | "blue" | "green" | "neutral" | "red" {
+  if (status === "replied" || status === "converted_to_purchase") return "green";
+  if (status === "needs_review") return "amber";
+  if (status === "open") return "blue";
+  return "neutral";
 }
 
 function statusLabel(status: UploadStatus) {

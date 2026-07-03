@@ -22,11 +22,21 @@ export function LoginForm() {
   return (
     <form action={formAction} className="grid gap-4">
       <div className="grid gap-2">
-        <label htmlFor="email">Email</label>
-        <input id="email" name="email" type="email" autoComplete="email" required />
+        <label htmlFor="email">電子郵件</label>
+        <input
+          autoCapitalize="none"
+          autoComplete="email"
+          id="email"
+          inputMode="email"
+          name="email"
+          placeholder="name@example.com"
+          spellCheck={false}
+          type="email"
+          required
+        />
       </div>
       <div className="grid gap-2">
-        <label htmlFor="password">Password</label>
+        <label htmlFor="password">密碼</label>
         <input
           id="password"
           name="password"
@@ -36,14 +46,23 @@ export function LoginForm() {
         />
       </div>
       {state.error ? (
-        <p className="rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          className="rounded-md border border-destructive/25 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          id="login-error"
+          role="alert"
+        >
           {state.error === "invalid_credentials"
             ? "帳號或密碼不正確。"
             : "登入服務暫時無法使用，請稍後再試。"}
         </p>
       ) : null}
-      <Button disabled={pending} type="submit">
-        {pending ? "登入中..." : "登入"}
+      <Button
+        aria-describedby={state.error ? "login-error" : undefined}
+        disabled={pending}
+        size="lg"
+        type="submit"
+      >
+        {pending ? "正在登入…" : "登入工作台"}
       </Button>
     </form>
   );

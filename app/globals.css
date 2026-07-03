@@ -29,24 +29,24 @@
 
 :root {
   --radius: 0.5rem;
-  --background: oklch(0.985 0 0);
+  --background: oklch(0.982 0.002 255);
   --foreground: oklch(0.18 0.005 255);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.18 0.005 255);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.18 0.005 255);
-  --primary: oklch(0.23 0.035 165);
+  --primary: oklch(0.22 0.018 255);
   --primary-foreground: oklch(0.99 0 0);
-  --secondary: oklch(0.95 0.004 255);
+  --secondary: oklch(0.955 0.004 255);
   --secondary-foreground: oklch(0.24 0.006 255);
   --muted: oklch(0.96 0.003 255);
   --muted-foreground: oklch(0.48 0.01 255);
-  --accent: oklch(0.94 0.012 170);
-  --accent-foreground: oklch(0.22 0.025 165);
+  --accent: oklch(0.95 0.006 210);
+  --accent-foreground: oklch(0.2 0.012 255);
   --destructive: oklch(0.58 0.2 27);
   --border: oklch(0.9 0.004 255);
   --input: oklch(0.88 0.004 255);
-  --ring: oklch(0.42 0.045 165);
+  --ring: oklch(0.42 0.025 255);
   --font-sans: Inter, "Noto Sans TC", ui-sans-serif, system-ui, sans-serif;
 }
 
@@ -61,13 +61,19 @@
 
   body {
     @apply min-h-svh bg-background font-sans text-foreground antialiased;
-    background: oklch(0.985 0 0);
+    background:
+      linear-gradient(180deg, oklch(0.995 0 0) 0%, oklch(0.982 0.002 255) 340px),
+      oklch(0.982 0.002 255);
   }
 
   input,
   select,
   textarea {
-    @apply rounded-md border border-input bg-background px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring;
+    @apply min-h-10 rounded-md border border-input bg-background px-3 py-2 text-sm outline-none transition focus-visible:ring-2 focus-visible:ring-ring;
+  }
+
+  textarea {
+    @apply min-h-20;
   }
 
   label {

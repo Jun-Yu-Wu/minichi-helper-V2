@@ -7,6 +7,7 @@ import {
   respondPurchaseTaskAction,
   type HelperActionResult,
 } from "../actions/helper";
+import { EmptyState, InsightBanner, StatusBadge, Surface } from "../components/OperationsUi";
 import { Button } from "../components/ui/button";
 
 type FaceCheckPhoto = {
@@ -25,29 +26,28 @@ const initialState: HelperActionResult = {};
 
 export function PurchaseTasks({ tasks }: { tasks: any[] }) {
   if (!tasks.length) {
-    return (
-      <p className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-        目前沒有採買任務。
-      </p>
-    );
+    return <EmptyState title="目前沒有採買任務" body="管理員發布採買後，會依商品與挑臉需求分組顯示在這裡。" />;
   }
   const grouped = groupPurchaseTasks(tasks);
   return (
     <div className="grid gap-3">
       {grouped.map((group) => (
-        <section className="grid gap-3 rounded-lg border bg-card p-4" key={group.key}>
+        <Surface className="grid gap-3" key={group.key}>
           <div>
-            <h4 className="font-semibold">{group.title}</h4>
-            <p className="text-sm text-muted-foreground">
-              {group.tasks.length} 筆 · {group.requiresFaceCheck ? "挑臉採買" : "一般採買"}
-            </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <StatusBadge tone={group.requiresFaceCheck ? "amber" : "neutral"}>
+                {group.requiresFaceCheck ? "挑臉採買" : "一般採買"}
+              </StatusBadge>
+              <h4 className="font-semibold">{group.title}</h4>
+            </div>
+            <p className="mt-1 text-sm text-muted-foreground">{group.tasks.length} 筆同類任務</p>
           </div>
           <div className="grid gap-3">
             {group.tasks.map((task) => (
               <PurchaseTaskForm key={task.id} task={task} />
             ))}
           </div>
-        </section>
+        </Surface>
       ))}
     </div>
   );
@@ -139,27 +139,38 @@ function PurchaseTaskForm({ task }: { task: any }) {
     setFaceCheckPhoto(null);
   }
 
+  const statusTone = purchaseStatusTone(task.status);
   return (
-    <div className="grid gap-3 rounded-md border bg-background p-3">
-      <div className="grid gap-2 sm:grid-cols-[1fr_auto]">
+    <div className="grid gap-4 rounded-lg border bg-background p-3 sm:p-4">
+      <div className="grid gap-3 lg:grid-cols-[1fr_auto]">
         <div>
-          <h5 className="font-semibold">{task.product_name}</h5>
-          <p className="text-sm text-muted-foreground">
-            {task.line_community_name} · {task.quantity} 件 · {purchaseStatusLabel(task.status)}
-            {task.requires_face_check ? " · 挑臉" : ""}
-          </p>
-          <p className="mt-1 text-sm">
-            JPY {task.original_price_jpy ?? "-"} · TWD {task.sale_price_twd}
-          </p>
-          {task.note ? <p className="mt-1 text-sm text-muted-foreground">{task.note}</p> : null}
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge tone={statusTone}>{purchaseStatusLabel(task.status)}</StatusBadge>
+            {task.requires_face_check ? <StatusBadge tone="amber">需挑臉</StatusBadge> : null}
+          </div>
+          <h5 className="mt-2 text-lg font-semibold tracking-tight">{task.product_name}</h5>
+          <dl className="mt-2 grid gap-2 text-sm sm:grid-cols-2">
+            <Meta label="客人" value={task.line_community_name || "未填"} />
+            <Meta label="數量" value={`${task.quantity} 件`} />
+            <Meta label="原價" value={`JPY ${task.original_price_jpy ?? "-"}`} />
+            <Meta label="售價" value={`TWD ${task.sale_price_twd}`} />
+          </dl>
+          {task.note ? (
+            <InsightBanner body={task.note} title="管理員備註" tone="neutral" />
+          ) : null}
         </div>
         {task.photos?.length ? (
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-3 gap-2 lg:w-56">
             {task.photos.slice(0, 2).map((photo: any) => (
               <a href={photo.signed_url} key={photo.id} target="_blank" rel="noreferrer">
-                <img alt={photo.photo_role} className="size-20 rounded-md object-cover" src={photo.signed_url} />
+                <img alt={photo.photo_role} className="aspect-square w-full rounded-md border object-cover" src={photo.signed_url} />
               </a>
             ))}
+            {task.photos.length > 2 ? (
+              <span className="flex aspect-square items-center justify-center rounded-md border bg-muted text-sm font-semibold text-muted-foreground">
+                +{task.photos.length - 2}
+              </span>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -175,9 +186,11 @@ function PurchaseTaskForm({ task }: { task: any }) {
                 <option value="cancel">取消</option>
               </select>
             ) : (
-              <p className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-                管理員已通過挑臉審核，請確認完成採買。
-              </p>
+              <InsightBanner
+                body="確認後才會建立 completed 採買結果與 staging preview。"
+                title="管理員已通過挑臉審核"
+                tone="green"
+              />
             )}
             {purchaseAction === "complete" || needsFinalConfirmation ? (
               <input
@@ -192,8 +205,9 @@ function PurchaseTaskForm({ task }: { task: any }) {
           </div>
 
           {needsFaceCheckUpload ? (
-            <div className="grid gap-2">
-              <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-3 text-center">
+          <div className="grid gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
+            <p className="text-sm font-semibold text-amber-950">挑臉任務：先上傳確認照，等待管理員審核後再完成採買。</p>
+            <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-3 text-center">
                 <Camera className="size-5" aria-hidden="true" />
                 <span className="text-sm">選擇挑臉確認照</span>
                 <input
@@ -204,7 +218,7 @@ function PurchaseTaskForm({ task }: { task: any }) {
                 />
               </label>
               {faceCheckPhoto ? (
-                <div className="rounded-md border p-2">
+                <div className="rounded-md border bg-background p-2">
                   <img alt={faceCheckPhoto.originalFilename} className="aspect-square w-full max-w-48 rounded-md object-cover" src={faceCheckPhoto.objectUrl} />
                   <div className="mt-2 flex flex-wrap gap-2">
                     <Button disabled={faceCheckPhoto.status === "uploading" || faceCheckPhoto.status === "uploaded"} size="sm" type="button" variant="outline" onClick={uploadFaceCheckPhoto}>
@@ -222,7 +236,7 @@ function PurchaseTaskForm({ task }: { task: any }) {
             </div>
           ) : null}
 
-          <form action={action} className="grid gap-2">
+          <form action={action} className="grid gap-3 border-t pt-3">
             <input name="purchaseTaskId" type="hidden" value={task.id} />
             <input name="purchaseAction" type="hidden" value={needsFinalConfirmation ? "complete" : purchaseAction} />
             <input name="completedQuantity" type="hidden" value={completedQuantity} />
@@ -234,13 +248,22 @@ function PurchaseTaskForm({ task }: { task: any }) {
             {state.ok && state.submissionId === idempotencyKey ? (
               <p className="text-sm text-primary">已送出。</p>
             ) : null}
-            <Button disabled={!canSubmit} size="sm" type="submit">
+            <Button disabled={!canSubmit} type="submit">
               {needsFinalConfirmation ? <Check className="mr-2 size-4" /> : <Send className="mr-2 size-4" />}
               {pending ? "送出中..." : needsFinalConfirmation ? "確認完成" : "送出採買回報"}
             </Button>
           </form>
         </>
       ) : null}
+    </div>
+  );
+}
+
+function Meta({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md bg-muted/45 px-3 py-2">
+      <dt className="text-xs font-medium text-muted-foreground">{label}</dt>
+      <dd className="mt-0.5 font-semibold text-foreground">{value}</dd>
     </div>
   );
 }
@@ -271,6 +294,14 @@ function purchaseStatusLabel(status: string) {
   if (status === "not_found") return "找不到";
   if (status === "canceled") return "已取消";
   return status;
+}
+
+function purchaseStatusTone(status: string): "amber" | "blue" | "green" | "neutral" | "red" {
+  if (status === "completed") return "green";
+  if (status === "review_pending" || status === "approved_pending_helper_confirmation") return "amber";
+  if (status === "unavailable" || status === "not_found" || status === "canceled") return "red";
+  if (status === "open") return "blue";
+  return "neutral";
 }
 
 function createClientId(prefix: string) {

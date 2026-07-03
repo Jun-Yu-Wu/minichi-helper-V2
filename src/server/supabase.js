@@ -28,11 +28,25 @@ export async function createServerSupabaseClient() {
       async getUser() {
         const accessToken = cookieStore.get(ACCESS_COOKIE)?.value;
         if (!accessToken) return { data: { user: null }, error: null };
-        const current = await client.auth.getUser(accessToken);
-        if (!current.error && current.data.user) return current;
+        const current = await client.auth.getClaims(accessToken);
+        if (!current.error && current.data?.claims?.sub) {
+          return {
+            data: {
+              user: {
+                id: String(current.data.claims.sub),
+                email: current.data.claims.email
+                  ? String(current.data.claims.email)
+                  : undefined,
+              },
+            },
+            error: null,
+          };
+        }
 
         const refreshToken = cookieStore.get(REFRESH_COOKIE)?.value;
-        if (!refreshToken) return current;
+        if (!refreshToken) {
+          return { data: { user: null }, error: current.error };
+        }
         const refreshed = await client.auth.refreshSession({
           refresh_token: refreshToken,
         });

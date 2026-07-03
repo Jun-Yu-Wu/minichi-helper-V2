@@ -7,6 +7,7 @@ import {
   submitSitePhotoBatchAction,
   type HelperActionResult,
 } from "../actions/helper";
+import { InsightBanner, StatusBadge } from "../components/OperationsUi";
 import { Button } from "../components/ui/button";
 
 type BatchStatus = "uploading" | "completed" | "failed";
@@ -181,17 +182,17 @@ export function SitePhotoUploader({ tripId }: { tripId: string }) {
   }
 
   return (
-    <div className="grid gap-3 rounded-lg border bg-card p-4">
+    <div className="grid gap-4">
       <div>
         <h4 className="font-semibold">現場照片批次</h4>
-        <p className="text-sm text-muted-foreground">
+        <p className="mt-1 text-sm leading-6 text-muted-foreground">
           可一次選多張；手機大圖會先縮到最長邊 {MAX_IMAGE_EDGE}px，單張需小於 8MB。
         </p>
       </div>
 
-      <label className="flex min-h-28 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-4 text-center">
+      <label className="flex min-h-32 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-muted/40 p-4 text-center transition hover:bg-accent/50">
         <ImageUp className="size-6" aria-hidden="true" />
-        <span>選擇照片</span>
+        <span className="font-semibold">選擇現場照片</span>
         <span className="text-xs text-muted-foreground">支援一次多張圖片，HEIC 會盡量以原檔上傳</span>
         <input
           className="sr-only"
@@ -203,32 +204,39 @@ export function SitePhotoUploader({ tripId }: { tripId: string }) {
       </label>
 
       {photos.length ? (
-        <div className="grid gap-3 sm:grid-cols-2">
-          {photos.map((photo) => (
-            <div key={photo.clientPhotoId} className="rounded-md border bg-background p-2">
-              <img
-                src={photo.objectUrl}
-                alt={photo.originalFilename}
-                className="aspect-square w-full rounded-md object-cover"
-              />
-              <div className="mt-2 grid gap-2">
-                <div className="flex items-start justify-between gap-2">
-                  <p className="min-w-0 truncate text-sm font-medium">
-                    {photo.sortOrder + 1}. {photo.originalFilename}
-                  </p>
-                  <button
-                    aria-label="移除照片"
-                    className="rounded-md p-1 text-muted-foreground hover:bg-muted"
-                    type="button"
-                    onClick={() => removePhoto(photo.clientPhotoId)}
-                  >
-                    <X className="size-4" />
-                  </button>
+        <div className="grid gap-3">
+          <InsightBanner
+            body="送出後會先上傳到 private R2，再建立資料庫批次；失敗時可整批重試。"
+            title={`${photos.length} 張照片已在本機預覽`}
+            tone="blue"
+          />
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+            {photos.map((photo) => (
+              <div key={photo.clientPhotoId} className="rounded-lg border bg-background p-2">
+                <img
+                  src={photo.objectUrl}
+                  alt={photo.originalFilename}
+                  className="aspect-square w-full rounded-md object-cover"
+                />
+                <div className="mt-2 grid gap-2">
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="min-w-0 truncate text-sm font-medium">
+                      {photo.sortOrder + 1}. {photo.originalFilename}
+                    </p>
+                    <button
+                      aria-label="移除照片"
+                      className="rounded-md p-1 text-muted-foreground hover:bg-muted"
+                      type="button"
+                      onClick={() => removePhoto(photo.clientPhotoId)}
+                    >
+                      <X className="size-4" />
+                    </button>
+                  </div>
+                  {photo.error ? <p className="text-xs text-destructive">{photo.error}</p> : null}
                 </div>
-                {photo.error ? <p className="text-xs text-destructive">{photo.error}</p> : null}
               </div>
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       ) : null}
 
@@ -252,12 +260,12 @@ export function SitePhotoUploader({ tripId }: { tripId: string }) {
         <div className="grid gap-3 border-t pt-3">
           <h5 className="text-sm font-semibold">本次送出批次</h5>
           {batches.map((batch) => (
-            <article className="rounded-md border bg-background p-3" key={batch.id}>
+            <article className="rounded-lg border bg-background p-3" key={batch.id}>
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="text-sm font-medium">{batch.photos.length} 張照片</p>
-                <span className="rounded-full border px-2.5 py-1 text-xs font-medium">
+                <StatusBadge tone={batch.status === "completed" ? "green" : batch.status === "failed" ? "red" : "blue"}>
                   {batchStatusLabel(batch)}
-                </span>
+                </StatusBadge>
               </div>
               {batch.note ? <p className="mt-1 text-sm text-muted-foreground">{batch.note}</p> : null}
               <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5">

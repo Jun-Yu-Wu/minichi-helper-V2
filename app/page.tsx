@@ -9,7 +9,7 @@ export default function HomePage() {
         <p className="text-sm font-medium text-muted-foreground">MINICHI</p>
         <h1 className="text-3xl font-semibold tracking-tight">新小幫手系統</h1>
         <p className="max-w-xl text-muted-foreground">
-          第一個 slice：小幫手帳號、行程指派，以及 scheduled 到 active 的狀態流。
+          小幫手現場工作、任務回覆與結帳，以及管理員的行程協調、審核與合併工作台。
         </p>
       </div>
       <div className="flex flex-wrap gap-3">

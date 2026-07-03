@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 
 import database from "../../src/server/database";
 import service from "../../src/server/helper-app-service";
@@ -34,22 +35,26 @@ function actionError(error: unknown): HelperActionResult {
 
 export async function departTripAction(formData: FormData) {
   const authUserId = await requireUserId();
+  const tripId = formText(formData, "tripId");
   await service.markHelperDeparted(database.getDatabasePool(), {
     authUserId,
     expectedVersion: formVersion(formData),
-    tripId: formText(formData, "tripId"),
+    tripId,
   });
   revalidatePath("/helper");
+  redirect(`/helper?tripId=${encodeURIComponent(tripId)}`);
 }
 
 export async function arriveTripAction(formData: FormData) {
   const authUserId = await requireUserId();
+  const tripId = formText(formData, "tripId");
   await service.markHelperArrived(database.getDatabasePool(), {
     authUserId,
     expectedVersion: formVersion(formData),
-    tripId: formText(formData, "tripId"),
+    tripId,
   });
   revalidatePath("/helper");
+  redirect(`/helper?tripId=${encodeURIComponent(tripId)}`);
 }
 
 export async function endTripAction(

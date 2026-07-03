@@ -71,6 +71,18 @@ function createR2ObjectStore(config = r2Config()) {
       );
     },
 
+    async copyObject(sourceKey, destinationKey) {
+      const { CopyObjectCommand } = await loadSdk();
+      const s3 = await client();
+      await s3.send(
+        new CopyObjectCommand({
+          Bucket: config.bucket,
+          CopySource: `${config.bucket}/${sourceKey.split("/").map(encodeURIComponent).join("/")}`,
+          Key: destinationKey,
+        }),
+      );
+    },
+
     async deleteObject(storageKey) {
       const { DeleteObjectCommand } = await loadSdk();
       const s3 = await client();

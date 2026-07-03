@@ -1,6 +1,6 @@
 # Latest Helper Operation Spec
 
-Last updated: 2026-07-01
+Last updated: 2026-07-02
 
 This document is the authoritative product behavior source for the MINICHI helper
 rewrite. It supersedes older helper-operation descriptions when behavior differs.
@@ -341,6 +341,153 @@ review the screen as an admin coordinating live helper work:
 Each slice's verification should include a short role-perspective pass for every
 new or materially changed helper/admin screen. If the UI is technically wired
 but unreasonable for the role's real workflow, the slice is not complete.
+
+## Slice 8 UI/UX Redesign Pass
+
+Slice 8 is a dedicated UI/UX and front-end loading strategy pass before
+production hardening. The previous production hardening and full dress rehearsal
+work moves to Slice 9.
+
+Slice 8 does not introduce new business workflow scope. It refines how the
+confirmed Slice 1-7 workflows are presented, progressively disclosed, and
+operated across mobile helper and desktop admin contexts.
+
+Design direction:
+
+- Clean, quiet, operational UI with Airbnb/Uber-style clarity.
+- Clear visual hierarchy, restrained borders, moderate spacing, and minimal
+  decorative styling.
+- Cards are used for actual task records, forms, and repeated items rather than
+  whole-page decoration.
+- Primary actions should be obvious, especially on mobile.
+- Secondary, risky, or low-frequency actions should be visually subordinate or
+  placed behind a clear section/step.
+
+Progressive disclosure:
+
+- Overview screens show what the user needs to decide next, not every detail.
+- Detail screens expose source photos, notes, quantities, prices, and audit
+  context only when they are needed for that action.
+- High-risk actions such as payment, face-check approval, staging approval, and
+  merge must show enough context for a confident decision.
+
+Front-end loading strategy:
+
+- App shell, navigation, local drafts, local image previews, upload queues, and
+  pending submission cards may render without waiting for a database read.
+- Formal workflow completion states must wait for server confirmation.
+- Helper dashboard and admin overview reads should be scoped summaries rather
+  than broad all-data payloads when possible.
+- Signed URLs should be generated only for media that is visible or about to be
+  used. They may be cached briefly in memory, but signed URLs must not become
+  durable data.
+- When the current implementation still eagerly reads broad dashboard data or
+  signs many URLs, Slice 8 should either improve it directly where small or
+  record it as a backend/read-model follow-up.
+
+Slice 8 must preserve all staging/main and media boundaries:
+
+- Helpers must not see admin-only review fields, merge controls, final
+  operational order data, or unrestricted customer records.
+- Helper-generated orders remain staging data until admin review and explicit
+  merge.
+- Durable media references remain private R2 `storage_key` values. Signed URLs
+  are temporary display/download/share values only.
+
+Slice 8 completion requires automated tests/build plus a role-based manual
+walkthrough checklist. Production hardening, full dress rehearsal, launch
+rollback, and final device/preview acceptance belong to Slice 9.
+
+### Slice 8 Follow-up Delivery Batches
+
+Detailed UI/UX review and acceptance proceeds through twelve batches:
+
+1. Login, session bar, global navigation, and shared status presentation.
+2. Admin trip/helper management plus helper home, trip lists, departure,
+   arrival, and waiting-for-activation states.
+3. Helper active-trip workspace shell, overview, status, task entry points, and
+   trip-end blocking.
+4. Helper site-photo upload plus the admin live site-photo return workflow.
+5. Admin quote/detail publishing, helper replies, and admin return review.
+6. Admin standard purchase/quick publish plus helper purchase completion,
+   partial purchase, cancellation, unavailable, and not-found handling.
+7. Face-check purchase, admin review, helper final confirmation, staging
+   preview, and related trip-end gates.
+8. Trip end, helper settlement precheck, admin settlement/payment review, and
+   warehouse proof.
+9. Private/public rebuy, claim/release, reporting, and rebuy checkout.
+10. Admin operations overview and multi-trip live coordination.
+11. Admin staging review and explicit merge.
+12. Cross-system loading, empty, error, retry, responsive, accessibility, and
+    front-end read/media-loading follow-up.
+
+For every batch, first reconstruct what the helper or admin is trying to decide
+in the real workflow. Review information architecture, next actions, blocking,
+return, retry, pending, and confirmation behavior before visual styling. Make
+only justified UX/UI changes, verify the affected role paths, then present
+questions and recommendations for user testing. Continue iterating on the same
+batch until the user accepts it before advancing.
+
+Every follow-up batch must also include a backend and performance reasonableness
+review for the exact screens and interactions being changed. This is not
+deferred wholesale to Batch 12. After the UX change is described, trace the
+current App Router, auth, read-model, database, mutation/revalidation, signed
+media, and loading path that serves the experience.
+
+The review must check:
+
+- persistent App Shell and client navigation versus full document reload;
+- repeated auth/session/profile/permission work;
+- query count, query sequencing, database scoping, pagination, aggregate
+  summaries, and application- or SQL-level N+1 patterns;
+- broad workflow hydration or full photo rows used only for counts/status;
+- dynamic rendering, cache policy, `revalidatePath`, and duplicate refresh;
+- signed URL count, R2 client/SDK work, eager image loading, and whether media
+  not yet visible is loaded;
+- route and component Suspense/loading boundaries;
+- cold/warm and development/production differences.
+
+For each batch, document which findings are confirmed and which still require
+timing logs. Rank the slow points, recommend the smallest safe fix, and state
+whether each fix is included in the current batch or explicitly deferred to a
+named later batch. UI acceptance alone is insufficient when the affected path
+still has an obviously unreasonable backend/read/media shape.
+
+The known baseline after Slice 8 navigation performance P0 is:
+
+- Internal navigation now uses Next.js client transitions and persistent
+  Helper/Admin role layouts.
+- Session verification prefers verified JWT claims with refresh recovery.
+- Selected Helper workflow reads are trip-scoped and concurrent, with summary
+  reads replacing full task/photo hydration where only counts are needed.
+- Admin Home uses an aggregate summary; Admin Live and task publishing defer
+  workflow/media reads until a selected active trip is known.
+- Remaining cross-batch performance inventory includes customer nickname-list
+  hydration, broad/unpaginated settlement/rebuy/merge reads, correlated query
+  cost, signed URL caching and R2 client reuse, eager image loading,
+  path-wide/duplicate refresh, finer Suspense boundaries, timing
+  instrumentation, and authenticated production p50/p95 measurement.
+
+Backend changes made during this review must preserve authorization,
+idempotency, optimistic version checks, private R2 `storage_key` durability, and
+the `staging -> admin review -> explicit merge` boundary.
+
+The helper issue-report entry is currently a placeholder. It is an existing
+scope gap requiring a separate decision and must not be silently expanded into
+a new Slice 8 business workflow.
+
+Before the twelve follow-up batches begin:
+
+- Helper home must classify only an `active` trip as connected.
+- Admin dashboard and helper workspace reads must be scoped to the current
+  view/panel, while retaining service defaults needed by acceptance tooling.
+- Signed URLs must be generated only for media shown by the current workflow.
+- Route-level loading and retryable error states must be available.
+- User-facing staging and merge terms must use clear operational Traditional
+  Chinese.
+- Until an issue-report workflow is explicitly approved and implemented, the
+  helper home may show a non-interactive unavailable card but must not link to a
+  misleading placeholder submission page.
 
 ## Navigation
 

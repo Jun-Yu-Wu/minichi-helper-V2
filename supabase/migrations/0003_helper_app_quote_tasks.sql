@@ -11,7 +11,9 @@ alter table helper_app.media_objects
     'purchase_face_check_photo',
     'settlement_receipt',
     'transport_proof',
-    'warehouse_evidence'
+    'warehouse_evidence',
+    'rebuy_reference_photo',
+    'rebuy_report_photo'
   ));
 
 create table if not exists helper_app.quote_tasks (

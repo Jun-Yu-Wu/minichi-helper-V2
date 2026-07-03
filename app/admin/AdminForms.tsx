@@ -21,11 +21,25 @@ const initialState: AdminActionResult = {};
 export function CreateHelperForm() {
   const [state, action, pending] = useActionState(createHelperAction, initialState);
   return (
-    <form action={action} className="grid gap-3 rounded-lg border bg-card p-4">
-      <h2 className="text-lg font-semibold">新增小幫手</h2>
-      <input name="displayName" placeholder="顯示名稱" required />
-      <input name="email" type="email" placeholder="登入 Email" required />
-      <input name="authUserId" placeholder="Supabase Auth user id，可稍後補" />
+    <form action={action} className="grid gap-3 rounded-xl border bg-card p-4 shadow-sm">
+      <div>
+        <h2 className="text-lg font-semibold">新增小幫手</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          先建立營運資料；Auth user id 可等帳號建立後再補上。
+        </p>
+      </div>
+      <label className="grid gap-1">
+        <span>顯示名稱</span>
+        <input name="displayName" placeholder="例如：東京小幫手 A" required />
+      </label>
+      <label className="grid gap-1">
+        <span>登入 Email</span>
+        <input name="email" type="email" placeholder="helper@example.com" required />
+      </label>
+      <label className="grid gap-1">
+        <span>Supabase Auth user id</span>
+        <input name="authUserId" placeholder="可稍後補" />
+      </label>
       <select name="compensationMode" defaultValue="hourly">
         <option value="hourly">時薪</option>
         <option value="fx_rate">匯率差</option>
@@ -51,14 +65,14 @@ export function CreateHelperForm() {
 export function EditHelperForm({ helper }: { helper: any }) {
   const [state, action, pending] = useActionState(updateHelperAction, initialState);
   return (
-    <form action={action} className="grid gap-3 rounded-lg border bg-card p-4">
+    <form action={action} className="grid gap-3 rounded-xl border bg-card p-4 shadow-sm">
       <input name="helperId" type="hidden" value={helper.id} />
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="font-semibold">{helper.display_name}</h3>
           <p className="text-sm text-muted-foreground">{helper.email}</p>
         </div>
-        <span className="rounded-full border bg-background px-2.5 py-1 text-xs font-medium text-muted-foreground">
+        <span className="rounded-full border bg-secondary px-2.5 py-1 text-xs font-semibold text-secondary-foreground">
           {helper.region || "未填地區"}
         </span>
       </div>
@@ -96,28 +110,51 @@ export function CreateTripForm({
 }) {
   const [state, action, pending] = useActionState(createTripAction, initialState);
   return (
-    <form action={action} className="grid gap-3 rounded-lg border bg-card p-4">
-      <h2 className="text-lg font-semibold">新增行程</h2>
-      <input name="tripName" placeholder="行程名稱" required />
-      <div className="grid gap-3 sm:grid-cols-2">
-        <input name="businessDate" type="date" required />
-        <input name="scheduledTime" type="time" />
+    <form action={action} className="grid gap-3 rounded-xl border bg-card p-4 shadow-sm">
+      <div>
+        <h2 className="text-lg font-semibold">新增行程</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          建立後會先停在排定狀態；小幫手出發、抵達後再由管理員開通連線。
+        </p>
       </div>
-      <input name="location" placeholder="地點" />
-      <input name="timezone" defaultValue="Asia/Tokyo" placeholder="時區" required />
-      <select name="assignedHelperId" required>
-        <option value="">指派小幫手</option>
-        {helpers
-          .filter((helper) => helper.is_active)
-          .map((helper) => (
-            <option key={helper.id} value={helper.id}>
-              {helper.display_name}
-            </option>
-          ))}
-      </select>
+      <label className="grid gap-1">
+        <span>行程名稱</span>
+        <input name="tripName" placeholder="例如：東京 7/3 下午場" required />
+      </label>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="grid gap-1">
+          <span>營業日期</span>
+          <input name="businessDate" type="date" required />
+        </label>
+        <label className="grid gap-1">
+          <span>預計時間</span>
+          <input name="scheduledTime" type="time" />
+        </label>
+      </div>
+      <label className="grid gap-1">
+        <span>地點</span>
+        <input name="location" placeholder="例如：新宿 / 代官山" />
+      </label>
+      <label className="grid gap-1">
+        <span>行程時區</span>
+        <input name="timezone" defaultValue="Asia/Tokyo" placeholder="Asia/Tokyo" required />
+      </label>
+      <label className="grid gap-1">
+        <span>指派小幫手</span>
+        <select name="assignedHelperId" required>
+          <option value="">選擇啟用中的小幫手</option>
+          {helpers
+            .filter((helper) => helper.is_active)
+            .map((helper) => (
+              <option key={helper.id} value={helper.id}>
+                {helper.display_name}
+              </option>
+            ))}
+        </select>
+      </label>
       <ActionMessage state={state} />
       <Button disabled={pending} type="submit">
-        {pending ? "建立中..." : "建立 scheduled 行程"}
+        {pending ? "建立中..." : "建立排定行程"}
       </Button>
     </form>
   );
@@ -313,7 +350,7 @@ export function CreateRebuyTaskForm({
   }
 
   return (
-    <form className="grid gap-3 rounded-lg border bg-card p-4" onSubmit={submitRebuyTask}>
+    <form className="grid gap-3 rounded-xl border bg-card p-4 shadow-sm" onSubmit={submitRebuyTask}>
       <h2 className="text-lg font-semibold">新增補買任務</h2>
       <select name="visibility" defaultValue="private" disabled={pending}>
         <option value="private">指定小幫手</option>

@@ -10,6 +10,7 @@ import {
   reportRebuyTaskAction,
 } from "../actions/helper";
 import { ActionButtonForm } from "../components/ActionButtonForm";
+import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
 import { Button } from "../components/ui/button";
 
 type RebuyUploadPhoto = {
@@ -33,7 +34,7 @@ export function RebuyTasks({ tasks }: { tasks: any[] }) {
   const readyToCheckout = mine.filter((task) => task.status === "reported").length;
   return (
     <section className="grid gap-5">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+      <Surface className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <SectionHeader eyebrow="補買" title="補買區" />
         {readyToCheckout ? (
           <form action={checkoutRebuyTasksAction}>
@@ -41,7 +42,7 @@ export function RebuyTasks({ tasks }: { tasks: any[] }) {
             <Button type="submit">結帳 {readyToCheckout} 筆補買</Button>
           </form>
         ) : null}
-      </div>
+      </Surface>
       <RebuyTaskGroup empty="目前沒有自己的補買任務。" tasks={mine} title="我的補買" />
       <RebuyTaskGroup empty="目前沒有公開補買。" isPublicPool tasks={publicOpen} title="公開補買池" />
     </section>
@@ -68,12 +69,18 @@ function RebuyTaskGroup({
       {tasks.length ? (
         <div className="grid gap-3">
           {tasks.map((task) => (
-            <article className="rounded-lg border bg-card p-4 shadow-sm" key={task.id}>
+            <article className="rounded-xl border bg-card p-4 shadow-sm" key={task.id}>
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                 <div>
-                  <h4 className="font-semibold">{task.product_name}</h4>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <StatusBadge tone={rebuyStatusTone(task.status)}>
+                      {rebuyStatusLabel(task.status)}
+                    </StatusBadge>
+                    {isPublicPool ? <StatusBadge tone="blue">公開可接</StatusBadge> : null}
+                  </div>
+                  <h4 className="mt-2 font-semibold">{task.product_name}</h4>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    {rebuyStatusLabel(task.status)} · JPY {task.original_price_jpy ?? "-"}
+                    JPY {task.original_price_jpy ?? "-"}
                   </p>
                   <p className="mt-2 inline-flex rounded-md bg-muted/70 px-3 py-1.5 text-sm font-medium text-foreground">
                     需要補買：{task.quantity} 件
@@ -126,7 +133,7 @@ function RebuyTaskGroup({
           ))}
         </div>
       ) : (
-        <p className="rounded-lg border bg-card p-4 text-sm text-muted-foreground shadow-sm">{empty}</p>
+        <EmptyState title={empty} body="有新的補買或公開任務後會出現在這裡。" />
       )}
     </section>
   );
@@ -359,6 +366,14 @@ function rebuyStatusLabel(status: string) {
     reported: "已回報",
   };
   return labels[status] || status;
+}
+
+function rebuyStatusTone(status: string): "amber" | "blue" | "green" | "neutral" | "red" {
+  if (status === "reported" || status === "checked_out") return "green";
+  if (status === "claimed") return "amber";
+  if (status === "open") return "blue";
+  if (status === "canceled") return "red";
+  return "neutral";
 }
 
 function SectionHeader({ eyebrow, title }: { eyebrow: string; title: string }) {

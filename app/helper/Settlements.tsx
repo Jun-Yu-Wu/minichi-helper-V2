@@ -8,6 +8,7 @@ import {
   submitWarehouseProofAction,
   type HelperActionResult,
 } from "../actions/helper";
+import { InsightBanner, StatusBadge, Surface } from "../components/OperationsUi";
 import { Button } from "../components/ui/button";
 
 type UploadPhoto = {
@@ -32,12 +33,10 @@ export function SettlementPrecheckForm({ settlement }: { settlement: any }) {
   const transportProofJson = useMemo(() => photoJson(transportProof), [transportProof]);
 
   return (
-    <article className="grid gap-4 rounded-lg border bg-card p-4 shadow-sm">
+    <Surface className="grid gap-4">
       <SettlementSummary settlement={settlement} />
       {settlement.correction_note ? (
-        <p className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-sm text-destructive">
-          需補正：{settlement.correction_note}
-        </p>
+        <InsightBanner body={settlement.correction_note} title="管理員要求補正" tone="red" />
       ) : null}
       {canEdit ? (
         <form action={action} className="grid gap-3">
@@ -72,9 +71,13 @@ export function SettlementPrecheckForm({ settlement }: { settlement: any }) {
           <ActionMessage state={state} />
         </form>
       ) : (
-        <p className="text-sm text-muted-foreground">目前狀態：{settlementStatusLabel(settlement.status)}</p>
+        <InsightBanner
+          body="你送出的資料已鎖定；下一步會由管理員審核、付款或審核送倉證明。"
+          title={`目前狀態：${settlementStatusLabel(settlement.status)}`}
+          tone="neutral"
+        />
       )}
-    </article>
+    </Surface>
   );
 }
 
@@ -84,7 +87,7 @@ export function WarehouseProofForm({ settlement }: { settlement: any }) {
   const [idempotencyKey] = useState(() => clientId("warehouse"));
   const proofJson = useMemo(() => photoJson(proof), [proof]);
   return (
-    <article className="grid gap-3 rounded-lg border bg-card p-4 shadow-sm">
+    <Surface className="grid gap-3">
       <SettlementSummary settlement={settlement} />
       <form action={action} className="grid gap-3">
         <input name="settlementId" type="hidden" value={settlement.id} />
@@ -103,7 +106,7 @@ export function WarehouseProofForm({ settlement }: { settlement: any }) {
         </Button>
         <ActionMessage state={state} />
       </form>
-    </article>
+    </Surface>
   );
 }
 
@@ -112,14 +115,21 @@ export function SettlementSummary({ settlement }: { settlement: any }) {
   const hasRate = rate > 0;
   return (
     <div className="grid gap-3">
-      <h3 className="font-semibold">{settlement.trip_name}</h3>
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusBadge tone={settlement.status === "completed" ? "green" : "blue"}>
+          {settlementStatusLabel(settlement.status)}
+        </StatusBadge>
+        <h3 className="font-semibold">{settlement.trip_name}</h3>
+      </div>
       <p className="text-sm text-muted-foreground">
         {settlement.line_items?.length || 0} 項 · 商品 JPY {settlement.product_total_jpy}
       </p>
       {!hasRate ? (
-        <p className="rounded-md border bg-muted/35 p-3 text-sm text-muted-foreground">
-          管理員填寫當日匯率後，這裡會顯示商品墊款、薪資與台幣結帳明細。
-        </p>
+        <InsightBanner
+          body="管理員填寫後，這裡會顯示商品墊款、薪資與台幣結帳明細。"
+          title="等待當日 JPY→TWD 匯率"
+          tone="amber"
+        />
       ) : null}
       {hasRate && settlement.line_items?.length ? (
         <div className="rounded-md border bg-background p-3 text-sm">

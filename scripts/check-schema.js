@@ -20,6 +20,8 @@ async function main() {
       "quote_tasks",
       "rebuy_task_photos",
       "rebuy_tasks",
+      "reviewed_staging_order_photos",
+      "reviewed_staging_orders",
       "settlement_evidence",
       "settlement_line_items",
       "settlement_payments",
@@ -27,6 +29,7 @@ async function main() {
       "site_photo_batches",
       "site_photos",
       "staging_order_previews",
+      "staging_merge_jobs",
       "trip_audit_events",
       "trips",
     ];

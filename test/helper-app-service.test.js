@@ -82,6 +82,189 @@ test("lists customer nickname suggestions from the Supabase main customer master
   assert.match(queries[0].sql, /order by line_community_name asc/);
 });
 
+test("admin dashboard reads only the sections requested by the current view", async () => {
+  const queries = [];
+  const database = {
+    async query(sql) {
+      queries.push(sql);
+      return { rows: [] };
+    },
+  };
+
+  const dashboard = await service.listAdminDashboard(database, {
+    sections: ["trips"],
+  });
+
+  assert.equal(queries.length, 1);
+  assert.match(queries[0], /from helper_app\.trips/);
+  assert.deepEqual(dashboard.trips, []);
+  assert.deepEqual(dashboard.helpers, []);
+  assert.deepEqual(dashboard.settlements, []);
+});
+
+test("admin home summary uses one aggregate query instead of loading dashboard records", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return {
+        rows: [{
+          active_helpers: 3,
+          active_trips: 1,
+          arrived_trips: 2,
+          face_check_pending: 4,
+          merge_pending: 5,
+          open_quote_tasks: 6,
+          settlement_pending: 7,
+        }],
+      };
+    },
+  };
+
+  const dashboard = await service.listAdminDashboard(database, {
+    sections: ["summary"],
+  });
+
+  assert.equal(queries.length, 1);
+  assert.match(queries[0].sql, /count\(\*\)::int/);
+  assert.equal(dashboard.summary.active_trips, 1);
+  assert.deepEqual(dashboard.trips, []);
+  assert.deepEqual(dashboard.purchaseTasks, []);
+});
+
+test("admin live dashboard scopes active trips and workflow reads to the selected trip", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return { rows: [] };
+    },
+  };
+
+  await service.listAdminDashboard(database, {
+    sections: [
+      "trips",
+      "sitePhotoBatches",
+      "quoteTasks",
+      "purchaseTasks",
+      "stagingOrderPreviews",
+    ],
+    tripStatuses: ["active"],
+    workflowTripIds: ["00000000-0000-0000-0000-000000000001"],
+  });
+
+  const tripsQuery = queries.find(({ sql }) => sql.includes("select t.id, t.trip_name"));
+  assert.deepEqual(tripsQuery.params, [["active"]]);
+  assert.match(tripsQuery.sql, /t\.status = any\(\$1::text\[\]\)/);
+  const workflowQueries = queries.filter(({ sql }) =>
+    /site_photo_batches|quote_tasks qt|purchase_tasks pt|staging_order_previews/.test(sql),
+  );
+  assert.equal(workflowQueries.length, 4);
+  assert.equal(
+    workflowQueries.every(({ params }) =>
+      params.some((value) =>
+        Array.isArray(value) &&
+        value.includes("00000000-0000-0000-0000-000000000001"),
+      ),
+    ),
+    true,
+  );
+});
+
+test("helper workspace skips workflow reads that are not needed by the current view", async () => {
+  const queries = [];
+  const database = {
+    async query(sql) {
+      queries.push(sql);
+      if (sql.includes("from helper_app.helper_profiles")) {
+        return { rows: [{ id: "helper-1", is_active: true }] };
+      }
+      if (sql.includes("from helper_app.trips")) {
+        return {
+          rows: [
+            {
+              business_date: "2026-07-02",
+              id: "trip-1",
+              status: "scheduled",
+              timezone: "Asia/Tokyo",
+            },
+          ],
+        };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+
+  const workspace = await service.getHelperWorkspace(
+    database,
+    "user-1",
+    new Date("2026-07-02T00:00:00.000Z"),
+    { sections: [] },
+  );
+
+  assert.equal(queries.length, 2);
+  assert.deepEqual(workspace.quoteTasksByTripId, {});
+  assert.deepEqual(workspace.purchaseTasksByTripId, {});
+  assert.deepEqual(workspace.rebuyTasks, []);
+  assert.deepEqual(workspace.settlements, []);
+  assert.deepEqual(workspace.sitePhotoBatchesByTripId, {});
+});
+
+test("helper workspace scopes the trip read and runs selected workflow reads concurrently", async () => {
+  const queries = [];
+  let activeWorkflowQueries = 0;
+  let maxActiveWorkflowQueries = 0;
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      if (sql.includes("from helper_app.helper_profiles")) {
+        return { rows: [{ id: "helper-1", is_active: true }] };
+      }
+      if (sql.includes("select id, trip_name")) {
+        return {
+          rows: [{
+            business_date: "2026-07-02",
+            id: "00000000-0000-0000-0000-000000000001",
+            status: "active",
+            timezone: "Asia/Tokyo",
+          }],
+        };
+      }
+      activeWorkflowQueries += 1;
+      maxActiveWorkflowQueries = Math.max(
+        maxActiveWorkflowQueries,
+        activeWorkflowQueries,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeWorkflowQueries -= 1;
+      return { rows: [] };
+    },
+  };
+
+  await service.getHelperWorkspace(
+    database,
+    "user-1",
+    new Date("2026-07-02T00:00:00.000Z"),
+    {
+      sections: [
+        "quoteTasks",
+        "purchaseTasks",
+        "sitePhotoBatches",
+        "tripSummaries",
+      ],
+      tripIds: ["00000000-0000-0000-0000-000000000001"],
+    },
+  );
+
+  const tripQuery = queries.find(({ sql }) => sql.includes("select id, trip_name"));
+  assert.deepEqual(tripQuery.params, [
+    "helper-1",
+    ["00000000-0000-0000-0000-000000000001"],
+  ]);
+  assert.match(tripQuery.sql, /id = any\(\$2::uuid\[\]\)/);
+  assert.equal(maxActiveWorkflowQueries, 4);
+});
+
 test("lists rebuy tasks by newest publication time without admin priority ordering", async () => {
   const queries = [];
   const database = {
@@ -1248,6 +1431,194 @@ test("private rebuy report keeps claimed ownership empty", async () => {
     update.params.slice(0, 5),
     ["rebuy-1", "helper-1", "report-key-1", 3, 0],
   );
+});
+
+test("staging review can start only after a trip ends", async () => {
+  const database = fakeDatabase([
+    {
+      rows: [{
+        id: "trip-1",
+        status: "active",
+      }],
+    },
+  ]);
+
+  await assert.rejects(
+    () =>
+      service.prepareStagingReview(database, {
+        actorUserId: "admin-1",
+        tripId: "trip-1",
+      }),
+    /Only ended trips/,
+  );
+});
+
+test("staging merge approval blocks unconfirmed unknown customers", async () => {
+  const database = fakeDatabase([
+    {
+      rows: [{
+        id: "merge-1",
+        status: "pending_review",
+        trip_id: "trip-1",
+        version: 3,
+      }],
+    },
+    {
+      rows: [{
+        id: "trip-1",
+        status: "ended",
+      }],
+    },
+    { rows: [{ count: 1 }] },
+  ]);
+
+  await assert.rejects(
+    () =>
+      service.approveStagingMergeJob(database, {
+        actorUserId: "admin-1",
+        expectedVersion: 3,
+        mergeJobId: "merge-1",
+      }),
+    /Unknown customer/,
+  );
+});
+
+test("reviewed staging photo edits update labels, include flags, and revoke approval", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [{
+          id: "reviewed-order-1",
+          merge_job_id: "merge-1",
+          trip_id: "trip-1",
+        }],
+      },
+      {
+        rows: [{
+          id: "merge-1",
+          status: "approved",
+        }],
+      },
+      {
+        rows: [{ id: "photo-1" }],
+      },
+      { rows: [] },
+      { rows: [] },
+      { rows: [] },
+      {
+        rows: [{
+          id: "merge-1",
+          reviewed_orders: [],
+        }],
+      },
+    ],
+    queries,
+  );
+
+  await service.editReviewedStagingOrderPhotos(database, {
+    actorUserId: "admin-1",
+    photos: [{ id: "photo-1", includeInMerge: false, label: "不合併" }],
+    reviewedOrderId: "reviewed-order-1",
+  });
+
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("include_in_merge = $3")),
+    true,
+  );
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("set status = 'pending_review'")),
+    true,
+  );
+});
+
+test("approved staging merge writes main order, source link, and selected photos", async () => {
+  const queries = [];
+  const copied = [];
+  const approvedSnapshot = {
+    orders: [
+      {
+        appearanceNotes: "",
+        customerConfirmed: false,
+        customerExists: true,
+        helperId: "helper-1",
+        lineCommunityName: "小明",
+        originalPriceJpy: 1200,
+        photos: [
+          {
+            id: "review-photo-1",
+            label: "正面",
+            photoRole: "manual_reference",
+            sourcePurchaseTaskPhotoId: "purchase-photo-1",
+            storageKey: "helper-app/trip-1/purchase/a.jpg",
+          },
+        ],
+        productName: "測試商品",
+        purchaseTaskId: "purchase-1",
+        quantity: 2,
+        reviewedOrderId: "reviewed-order-1",
+        salePriceTwd: 300,
+        sourceQuoteTaskId: null,
+        sourceQuoteTaskPhotoId: null,
+        sourceRebuyTaskId: null,
+        stagingOrderPreviewId: "preview-1",
+      },
+    ],
+    trip: {
+      business_date: "2026-07-01",
+      timezone: "Asia/Tokyo",
+      trip_name: "Slice 7 Trip",
+    },
+  };
+  const database = fakeDatabase(
+    [
+      {
+        rows: [{
+          approved_snapshot: approvedSnapshot,
+          id: "merge-1",
+          status: "approved",
+          trip_id: "trip-1",
+          version: 4,
+        }],
+      },
+      { rows: [] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [] },
+      {
+        rows: [{
+          id: "merge-1",
+          main_order_ids: ["helper_order_x"],
+          status: "merged",
+        }],
+      },
+      { rows: [] },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const result = await service.mergeApprovedStagingJob(database, {
+    actorUserId: "admin-1",
+    expectedVersion: 4,
+    idempotencyKey: "merge-key-1",
+    mergeJobId: "merge-1",
+    r2Store: {
+      async copyObject(sourceKey, destinationKey) {
+        copied.push({ destinationKey, sourceKey });
+      },
+    },
+  });
+
+  assert.equal(result.status, "merged");
+  assert.equal(queries.some((query) => String(query.sql).includes("insert into main.orders")), true);
+  assert.equal(queries.some((query) => String(query.sql).includes("insert into main.order_source_links")), true);
+  assert.equal(queries.some((query) => String(query.sql).includes("insert into main.order_photos")), true);
+  assert.deepEqual(copied, [{
+    destinationKey: "main-orders/merge-1/helper_order_748d4ca109ce9a5e6d6eeaff/helper_photo_d6aee960526e48d4a67c9801.jpg",
+    sourceKey: "helper-app/trip-1/purchase/a.jpg",
+  }]);
 });
 
 function fakeDatabase(results, queries = []) {

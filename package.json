@@ -16,7 +16,8 @@
     "acceptance:slice3": "node scripts/run-slice3-acceptance.js",
     "acceptance:slice4": "node scripts/run-slice4-acceptance.js",
     "acceptance:slice5": "node scripts/run-slice5-acceptance.js",
-    "acceptance:slice6": "node scripts/run-slice6-acceptance.js"
+    "acceptance:slice6": "node scripts/run-slice6-acceptance.js",
+    "acceptance:slice7": "node scripts/run-slice7-acceptance.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1075.0",

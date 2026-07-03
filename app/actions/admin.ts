@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import adminAuthorization from "../../src/server/admin-authorization";
 import database from "../../src/server/database";
 import service from "../../src/server/helper-app-service";
+import { createR2ObjectStore } from "../../src/server/r2-object-store";
 import { createServerSupabaseClient } from "../../src/server/supabase";
 
 export type AdminActionResult = {
@@ -275,6 +276,105 @@ export async function reviewWarehouseProofAction(formData: FormData) {
     settlementId: formText(formData, "settlementId"),
   });
   revalidatePath("/admin");
+}
+
+export async function prepareStagingReviewAction(formData: FormData) {
+  try {
+    const admin = await requireAdmin();
+    await service.prepareStagingReview(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      tripId: formText(formData, "tripId"),
+    });
+    revalidatePath("/admin");
+  } catch (error) {
+    console.error("Prepare staging review action failed", error);
+  }
+}
+
+export async function editReviewedStagingOrderAction(formData: FormData) {
+  try {
+    const admin = await requireAdmin();
+    await service.editReviewedStagingOrder(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      appearanceNotes: formText(formData, "appearanceNotes"),
+      customerConfirmed: formData.get("customerConfirmed") === "on",
+      exclusionReason: formText(formData, "exclusionReason"),
+      isExcluded: formData.get("isExcluded") === "on",
+      lineCommunityName: formText(formData, "lineCommunityName"),
+      originalPriceJpy: formText(formData, "originalPriceJpy"),
+      productName: formText(formData, "productName"),
+      quantity: formText(formData, "quantity"),
+      reviewedOrderId: formText(formData, "reviewedOrderId"),
+      salePriceTwd: formText(formData, "salePriceTwd"),
+    });
+    revalidatePath("/admin");
+  } catch (error) {
+    console.error("Edit reviewed staging order action failed", error);
+  }
+}
+
+export async function editReviewedStagingOrderPhotosAction(formData: FormData) {
+  try {
+    const admin = await requireAdmin();
+    const photoIds = formData.getAll("photoId").map((value) => String(value));
+    const included = new Set(formData.getAll("includePhoto").map((value) => String(value)));
+    await service.editReviewedStagingOrderPhotos(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      photos: photoIds.map((id) => ({
+        id,
+        includeInMerge: included.has(id),
+        label: formText(formData, `photoLabel:${id}`),
+      })),
+      reviewedOrderId: formText(formData, "reviewedOrderId"),
+    });
+    revalidatePath("/admin");
+  } catch (error) {
+    console.error("Edit reviewed staging order photos action failed", error);
+  }
+}
+
+export async function approveStagingMergeJobAction(formData: FormData) {
+  try {
+    const admin = await requireAdmin();
+    await service.approveStagingMergeJob(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      expectedVersion: formVersion(formData),
+      mergeJobId: formText(formData, "mergeJobId"),
+    });
+    revalidatePath("/admin");
+  } catch (error) {
+    console.error("Approve staging merge action failed", error);
+  }
+}
+
+export async function rejectStagingMergeJobAction(formData: FormData) {
+  try {
+    const admin = await requireAdmin();
+    await service.rejectStagingMergeJob(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      mergeJobId: formText(formData, "mergeJobId"),
+      rejectionNote: formText(formData, "rejectionNote"),
+    });
+    revalidatePath("/admin");
+  } catch (error) {
+    console.error("Reject staging merge action failed", error);
+  }
+}
+
+export async function mergeApprovedStagingJobAction(formData: FormData) {
+  try {
+    const admin = await requireAdmin();
+    await service.mergeApprovedStagingJob(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      expectedVersion: formVersion(formData),
+      idempotencyKey: formText(formData, "idempotencyKey"),
+      mergeJobId: formText(formData, "mergeJobId"),
+      r2Store: createR2ObjectStore(),
+    });
+    revalidatePath("/admin");
+  } catch (error) {
+    console.error("Merge staging job action failed", error);
+  }
 }
 
 export async function activateTripAction(formData: FormData) {
