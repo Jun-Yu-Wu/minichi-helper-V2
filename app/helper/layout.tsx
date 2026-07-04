@@ -1,5 +1,4 @@
-import { redirect } from "next/navigation";
-
+import { AuthRequired } from "../components/AuthRequired";
 import { SessionBar } from "../components/SessionBar";
 import { HelperWorkspaceNavigation } from "../components/WorkspaceNavigation";
 import { getCurrentUser } from "../../src/server/current-session";
@@ -10,7 +9,7 @@ export default async function HelperLayout({
   children: React.ReactNode;
 }) {
   const user = await getCurrentUser();
-  if (!user) redirect("/login?next=/helper");
+  if (!user) return <AuthRequired next="/helper" roleLabel="小幫手工作台" />;
 
   return (
     <>

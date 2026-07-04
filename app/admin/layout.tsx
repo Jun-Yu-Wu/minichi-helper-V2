@@ -1,5 +1,4 @@
-import { redirect } from "next/navigation";
-
+import { AuthRequired } from "../components/AuthRequired";
 import { SessionBar } from "../components/SessionBar";
 import { AdminWorkspaceNavigation } from "../components/WorkspaceNavigation";
 import { getCurrentAdmin } from "../../src/server/current-session";
@@ -13,7 +12,7 @@ export default async function AdminLayout({
   try {
     admin = await getCurrentAdmin();
   } catch {
-    redirect("/login?next=/admin");
+    return <AuthRequired next="/admin" roleLabel="管理工作台" />;
   }
 
   return (

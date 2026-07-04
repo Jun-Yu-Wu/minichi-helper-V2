@@ -1,14 +1,16 @@
-import { redirect } from "next/navigation";
 import Link from "next/link";
 import type React from "react";
 import {
   AlertCircle,
   CalendarDays,
+  Camera,
   CheckCircle2,
+  ClipboardList,
   CreditCard,
   MapPin,
   PackageSearch,
   ReceiptText,
+  ShoppingBag,
   Truck,
 } from "lucide-react";
 
@@ -21,7 +23,6 @@ import { ActionButtonForm } from "../components/ActionButtonForm";
 import {
   EmptyState,
   InsightBanner,
-  MetricTile,
   PageHeader,
   SectionTitle,
   StatusBadge,
@@ -50,7 +51,7 @@ type HelperSearchParams = {
   view?: string;
 };
 
-type TripPanel = "overview" | "purchase" | "quote" | "site" | "status";
+type TripPanel = "overview" | "purchase" | "quote" | "site" | "work";
 type TripGroupId = "completed" | "inProgress" | "notStarted";
 
 export default async function HelperPage({
@@ -66,7 +67,7 @@ export default async function HelperPage({
       ? parseOpenTripGroups(params.tripGroups, true)
       : [];
   const user = await getCurrentUser();
-  if (!user) redirect("/login?next=/helper");
+  if (!user) return null;
 
   const workspace = await service.getHelperWorkspace(
     database.getDatabasePool(),
@@ -474,36 +475,7 @@ function TripDetail({
   const canArrive = canOperate && trip.status === "departed";
   const unfinishedPurchases = Number(summary.unfinished_purchase_count || 0);
   const unfinishedQuotes = Number(summary.unfinished_quote_photo_count || 0);
-  const canEnd =
-    canOperate &&
-    ["departed", "arrived", "active"].includes(trip.status) &&
-    unfinishedPurchases === 0;
   const canOpenWorkspace = canOperate && trip.status === "active";
-  const actions = (
-    <>
-      {canDepart ? (
-        <ActionButtonForm
-          action={departTripAction}
-          fields={[
-            { name: "tripId", value: trip.id },
-            { name: "expectedVersion", value: trip.version },
-          ]}
-          label="標記出發"
-        />
-      ) : null}
-      {canArrive ? (
-        <ActionButtonForm
-          action={arriveTripAction}
-          fields={[
-            { name: "tripId", value: trip.id },
-            { name: "expectedVersion", value: trip.version },
-          ]}
-          label="標記抵達"
-        />
-      ) : null}
-      {canEnd ? <EndTripForm expectedVersion={trip.version} tripId={trip.id} /> : null}
-    </>
-  );
   if (trip.status === "ended") {
     return (
       <article className="grid gap-4">
@@ -550,31 +522,12 @@ function TripDetail({
         <Link href="/helper?view=trips">返回行程</Link>
       </Button>
       <PageHeader
-        actions={actions}
-        eyebrow="Trip Workspace"
-        metrics={[
-          { label: "報價/細節待處理", value: `${unfinishedQuotes}` },
-          { label: "採買未結案", value: `${unfinishedPurchases}` },
-          { label: "行程版本", value: `v${trip.version}` },
-        ]}
+        actions={<StatusBadge tone="green">連線中</StatusBadge>}
         subtitle={`${service.dateOnly(trip.business_date, trip.timezone)} ${trip.scheduled_time || ""} · ${
           trip.location || "未填地點"
-        } · ${trip.timezone}`}
+        }`}
         title={trip.trip_name}
       />
-      {unfinishedPurchases > 0 ? (
-        <InsightBanner
-          body="完成、取消、標記缺貨或找不到後才能結束行程。"
-          title={`尚有 ${unfinishedPurchases} 筆採買任務未結案`}
-          tone="red"
-        />
-      ) : unfinishedQuotes > 0 && canEnd ? (
-        <InsightBanner
-          body="可以結束行程，但系統會保留警告紀錄。"
-          title={`尚有 ${unfinishedQuotes} 個報價/細節子任務未完成`}
-          tone="amber"
-        />
-      ) : null}
       <TripWorkspace
         batches={batches}
         panel={panel}
@@ -664,105 +617,225 @@ function TripWorkspace({
   summary: any;
   trip: any;
 }) {
+  const unfinishedPurchases = Number(summary.unfinished_purchase_count || 0);
+  const unfinishedQuotes = Number(summary.unfinished_quote_photo_count || 0);
+  const isConnectionPanel = panel === "work" || panel === "site" || panel === "quote" || panel === "purchase";
   return (
-    <div className="grid gap-5">
-      <TripPanelNav activePanel={panel} tripId={trip.id} />
+    <div className="grid gap-5 pb-24">
       {panel === "site" ? (
-        <WorkspaceBlock eyebrow="區塊一" title="現場大圖">
+        <WorkspaceBlock eyebrow="連線 · 區塊一" title="現場大圖" tripId={trip.id}>
           <SitePhotoUploader tripId={trip.id} />
           <SubmittedBatches batches={batches} />
         </WorkspaceBlock>
       ) : panel === "quote" ? (
-        <WorkspaceBlock eyebrow="區塊二" title="細圖 / 報價任務">
+        <WorkspaceBlock eyebrow="連線 · 區塊二" title="細圖 / 報價任務" tripId={trip.id}>
           <QuoteTaskReplies tasks={quoteTasks} />
         </WorkspaceBlock>
       ) : panel === "purchase" ? (
-        <WorkspaceBlock eyebrow="區塊三" title="採買任務">
+        <WorkspaceBlock eyebrow="連線 · 區塊三" title="採買任務" tripId={trip.id}>
           <PurchaseTasks tasks={purchaseTasks} />
         </WorkspaceBlock>
-      ) : panel === "status" ? (
-        <TripStatusDashboard summary={summary} />
+      ) : panel === "work" ? (
+        <ConnectionPanel trip={trip} />
       ) : (
-        <TripOverview summary={summary} trip={trip} />
+        <TripOverview
+          canEnd={unfinishedPurchases === 0}
+          summary={summary}
+          trip={trip}
+          />
       )}
+      <TripBottomBar activeSection={isConnectionPanel ? "work" : "overview"} tripId={trip.id} />
     </div>
   );
 }
 
-function TripPanelNav({ activePanel, tripId }: { activePanel: string; tripId: string }) {
+function TripBottomBar({
+  activeSection,
+  tripId,
+}: {
+  activeSection: "overview" | "work";
+  tripId: string;
+}) {
   const items = [
-    ["overview", "行程首頁"],
-    ["status", "狀態"],
-    ["site", "現場大圖"],
-    ["quote", "細圖/報價"],
-    ["purchase", "採買"],
-  ];
+    {
+      href: `/helper?tripId=${tripId}`,
+      icon: <CheckCircle2 className="size-5" />,
+      label: "總覽",
+      section: "overview",
+    },
+    {
+      href: `/helper?tripId=${tripId}&panel=work`,
+      icon: <Camera className="size-5" />,
+      label: "連線",
+      section: "work",
+    },
+  ] as const;
   return (
-    <nav className="flex gap-2 overflow-x-auto rounded-xl border bg-card p-1">
-      {items.map(([panel, label]) => (
-        <Link
-          className={`inline-flex h-9 shrink-0 items-center rounded-lg px-3 text-sm font-semibold ${
-            activePanel === panel ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-accent hover:text-foreground"
-          }`}
-          href={`/helper?tripId=${tripId}&panel=${panel}`}
-          key={panel}
-        >
-          {label}
-        </Link>
-      ))}
+    <nav
+      aria-label="行程主要操作"
+      className="fixed inset-x-0 bottom-0 z-30 border-t bg-background/95 px-4 py-3 shadow-[0_-12px_30px_rgba(15,23,42,0.12)] backdrop-blur sm:sticky sm:bottom-4 sm:rounded-xl sm:border sm:p-2"
+    >
+      <div className="mx-auto grid max-w-2xl grid-cols-2 gap-2">
+        {items.map((item) => (
+          <Button
+            asChild
+            key={item.section}
+            size="lg"
+            variant={activeSection === item.section ? "default" : "outline"}
+          >
+            <Link
+              aria-current={activeSection === item.section ? "page" : undefined}
+              href={item.href}
+            >
+              {item.icon}
+              {item.label}
+            </Link>
+          </Button>
+        ))}
+      </div>
     </nav>
   );
 }
 
-function TripOverview({ summary, trip }: { summary: any; trip: any }) {
-  const batchCount = Number(summary.site_photo_batch_count || 0);
-  const openQuotes = Number(summary.open_quote_task_count || 0);
-  const openPurchases = Number(summary.unfinished_purchase_count || 0);
-  return (
-    <section className="grid gap-4">
-      <div className="grid gap-3 rounded-xl border bg-card p-4 shadow-sm sm:grid-cols-2">
-        <InfoItem label="地點" value={trip.location || "未填地點"} />
-        <InfoItem label="版本" value={`v${trip.version}`} />
-      </div>
-      <div className="grid gap-3 lg:grid-cols-3">
-        <WorkEntry href={`/helper?tripId=${trip.id}&panel=site`} index="1" label={`${batchCount} 批`} title="現場大圖" />
-        <WorkEntry href={`/helper?tripId=${trip.id}&panel=quote`} index="2" label={`${openQuotes} 待回覆`} title="細圖 / 報價任務" />
-        <WorkEntry href={`/helper?tripId=${trip.id}&panel=purchase`} index="3" label={`${openPurchases} 待處理`} title="採買任務" />
-      </div>
-    </section>
-  );
-}
-
-function TripStatusDashboard({ summary }: { summary: any }) {
+function TripOverview({
+  canEnd,
+  summary,
+  trip,
+}: {
+  canEnd: boolean;
+  summary: any;
+  trip: any;
+}) {
   const batchCount = Number(summary.site_photo_batch_count || 0);
   const quoteTaskCount = Number(summary.quote_task_count || 0);
-  const openQuoteCount = Number(summary.open_quote_task_count || 0);
+  const openQuotes = Number(summary.open_quote_task_count || 0);
   const purchaseTaskCount = Number(summary.purchase_task_count || 0);
   const openPurchases = Number(summary.unfinished_purchase_count || 0);
+  const completedQuotes = Math.max(quoteTaskCount - openQuotes, 0);
+  const completedPurchases = Math.max(purchaseTaskCount - openPurchases, 0);
   return (
     <section className="grid gap-3">
-      <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-        <CheckCircle2 className="size-4" />
-        連線狀態
-      </div>
-      <div className="grid gap-3 sm:grid-cols-3">
-        <MetricTile label="大圖批次" value={`${batchCount}`} />
-        <MetricTile label="報價完成" value={`${quoteTaskCount - openQuoteCount}/${quoteTaskCount}`} />
-        <MetricTile label="採買未結案" value={`${openPurchases}/${purchaseTaskCount}`} />
+      <Surface className="grid gap-3">
+        <div className="grid gap-2 text-sm">
+          <CompactStatusLine label="現場照片" value={`${batchCount} 批`} />
+          <CompactStatusLine
+            label="細圖/報價"
+            urgent={openQuotes > 0}
+            value={`${completedQuotes}/${quoteTaskCount || 0} 完成`}
+          />
+          <CompactStatusLine
+            label="採買任務"
+            urgent={openPurchases > 0}
+            value={`${completedPurchases}/${purchaseTaskCount || 0} 完成`}
+          />
+        </div>
+      </Surface>
+      <TripEndGate
+        canEnd={canEnd}
+        expectedVersion={trip.version}
+        tripId={trip.id}
+        unfinishedPurchases={openPurchases}
+      />
+    </section>
+  );
+}
+
+function ConnectionPanel({ trip }: { trip: any }) {
+  return (
+    <section className="grid gap-3">
+      <h3 className="text-lg font-semibold tracking-tight">連線工作</h3>
+      <div className="grid gap-3">
+        <WorkEntry
+          href={`/helper?tripId=${trip.id}&panel=site`}
+          icon={<Camera className="size-5" />}
+          label="區塊 1"
+          title="現場大圖"
+        />
+        <WorkEntry
+          href={`/helper?tripId=${trip.id}&panel=quote`}
+          icon={<ClipboardList className="size-5" />}
+          label="區塊 2"
+          title="細圖 / 報價"
+        />
+        <WorkEntry
+          href={`/helper?tripId=${trip.id}&panel=purchase`}
+          icon={<ShoppingBag className="size-5" />}
+          label="區塊 3"
+          title="採買任務"
+        />
       </div>
     </section>
   );
 }
 
-function WorkEntry({ href, index, label, title }: { href: string; index: string; label: string; title: string }) {
+function TripEndGate({
+  canEnd,
+  expectedVersion,
+  tripId,
+  unfinishedPurchases,
+}: {
+  canEnd: boolean;
+  expectedVersion: number;
+  tripId: string;
+  unfinishedPurchases: number;
+}) {
+  if (!canEnd) {
+    return (
+      <Button className="w-full" disabled variant="destructive">
+        採買未結案 {unfinishedPurchases}
+      </Button>
+    );
+  }
   return (
-    <Link className="flex items-center justify-between gap-4 rounded-xl border bg-card p-4 shadow-sm transition hover:border-primary/30 hover:bg-accent/40" href={href}>
-      <span className="flex size-9 items-center justify-center rounded-lg bg-secondary text-sm font-semibold text-secondary-foreground">
-        {index}
+    <EndTripForm expectedVersion={expectedVersion} tripId={tripId} />
+  );
+}
+
+function CompactStatusLine({
+  label,
+  urgent = false,
+  value,
+}: {
+  label: string;
+  urgent?: boolean;
+  value: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-lg border bg-background px-3 py-2">
+      <span className="text-muted-foreground">{label}</span>
+      <span className={urgent ? "font-semibold text-amber-700" : "font-semibold"}>
+        {value}
       </span>
-      <span className="min-w-0 flex-1">
-        <strong className="block truncate">{title}</strong>
-        <small className="text-muted-foreground">{label}</small>
+    </div>
+  );
+}
+
+function WorkEntry({
+  body,
+  href,
+  icon,
+  label,
+  title,
+  urgent = false,
+}: {
+  body?: string;
+  href: string;
+  icon: React.ReactNode;
+  label: string;
+  title: string;
+  urgent?: boolean;
+}) {
+  return (
+    <Link className="grid gap-3 rounded-xl border bg-card p-4 shadow-sm transition hover:border-primary/30 hover:bg-accent/40" href={href}>
+      <span className="flex items-center justify-between gap-3">
+        <span className="flex size-10 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
+          {icon}
+        </span>
+        <StatusBadge tone={urgent ? "amber" : "neutral"}>{label}</StatusBadge>
+      </span>
+      <span>
+        <strong className="block text-base">{title}</strong>
+        {body ? <small className="mt-1 block leading-5 text-muted-foreground">{body}</small> : null}
       </span>
     </Link>
   );
@@ -863,28 +936,26 @@ function WorkspaceBlock({
   children,
   eyebrow,
   title,
+  tripId,
 }: {
   children: React.ReactNode;
   eyebrow: string;
   title: string;
+  tripId: string;
 }) {
   return (
     <section className="grid gap-4 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
-      <div>
-        <p className="text-xs font-semibold uppercase text-muted-foreground">{eyebrow}</p>
-        <h5 className="mt-1 text-xl font-semibold tracking-tight">{title}</h5>
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <p className="text-xs font-semibold uppercase text-muted-foreground">{eyebrow}</p>
+          <h5 className="mt-1 text-xl font-semibold tracking-tight">{title}</h5>
+        </div>
+        <Button asChild className="w-full sm:w-fit" size="sm" variant="ghost">
+          <Link href={`/helper?tripId=${tripId}&panel=work`}>回連線</Link>
+        </Button>
       </div>
       {children}
     </section>
-  );
-}
-
-function InfoItem({ label, value }: { label: string; value: string }) {
-  return (
-    <div>
-      <p className="text-xs font-medium text-muted-foreground">{label}</p>
-      <p className="mt-1 truncate text-sm font-medium">{value}</p>
-    </div>
   );
 }
 
@@ -980,7 +1051,7 @@ function normalizeHelperView(value?: string) {
 }
 
 function normalizeTripPanel(value?: string): TripPanel {
-  if (value === "site" || value === "quote" || value === "purchase" || value === "status") return value;
+  if (value === "site" || value === "quote" || value === "purchase" || value === "work") return value;
   return "overview";
 }
 
@@ -1033,12 +1104,10 @@ function tripStatusesForGroups(groups: TripGroupId[]) {
 function helperWorkspaceSections(view: string, panel: TripPanel, hasSelectedTrip: boolean) {
   if (hasSelectedTrip) {
     return [
-      "tripSummaries",
+      ...(panel === "overview" ? ["tripSummaries"] : []),
       ...(panel === "quote" ? ["quoteTasks"] : []),
       ...(panel === "purchase" ? ["purchaseTasks"] : []),
-      ...(panel === "site" || panel === "overview" || panel === "status"
-        ? ["sitePhotoBatches"]
-        : []),
+      ...(panel === "site" ? ["sitePhotoBatches"] : []),
     ];
   }
   if (view === "settlement" || view === "warehouse") return ["settlements"];

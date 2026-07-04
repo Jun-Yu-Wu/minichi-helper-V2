@@ -16,13 +16,13 @@ export function EndTripForm({
 }) {
   const [state, action, pending] = useActionState(endTripAction, initialState);
   return (
-    <form action={action} className="grid justify-items-end gap-1">
+    <form action={action} className="grid gap-1">
       <input name="tripId" type="hidden" value={tripId} />
       <input name="expectedVersion" type="hidden" value={expectedVersion} />
-      <Button disabled={pending} size="sm" type="submit" variant="outline">
+      <Button className="w-full" disabled={pending} type="submit" variant="destructive">
         {pending ? "結束中…" : "結束行程"}
       </Button>
-      {state.error ? <p className="max-w-64 text-right text-xs text-destructive">{state.error}</p> : null}
+      {state.error ? <p className="text-xs text-destructive">{state.error}</p> : null}
     </form>
   );
 }

@@ -1,4 +1,3 @@
-import { redirect } from "next/navigation";
 import Link from "next/link";
 import type React from "react";
 import {
@@ -87,7 +86,7 @@ export default async function AdminPage({
   try {
     await getCurrentAdmin();
   } catch {
-    redirect("/login?next=/admin");
+    return null;
   }
 
   const [dashboard, customerNicknames] = await Promise.all([
