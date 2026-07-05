@@ -1,7 +1,18 @@
 "use client";
 
+import type React from "react";
 import { useEffect, useRef, useState } from "react";
-import { ImageUp, RefreshCw, Send, X } from "lucide-react";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Camera,
+  Check,
+  ImageUp,
+  LoaderCircle,
+  RefreshCw,
+  Send,
+  X,
+} from "lucide-react";
 
 import {
   submitSitePhotoBatchAction,
@@ -10,7 +21,8 @@ import {
 import { InsightBanner, StatusBadge } from "../components/OperationsUi";
 import { Button } from "../components/ui/button";
 
-type BatchStatus = "uploading" | "completed" | "failed";
+type BatchStatus = "uploading" | "ready" | "submitting" | "completed" | "failed";
+type PhotoUploadStatus = "pending" | "uploading" | "uploaded" | "failed";
 
 type SelectedPhoto = {
   byteSize: number;
@@ -22,25 +34,34 @@ type SelectedPhoto = {
   originalFilename: string;
   sortOrder: number;
   storageKey?: string;
+  uploadError?: string;
+  uploadStatus: PhotoUploadStatus;
 };
 
 type LocalBatch = {
   error?: string;
+  errorStage?: "submit" | "upload";
   id: string;
   note: string;
   photos: SelectedPhoto[];
   status: BatchStatus;
-  uploadedCount: number;
 };
 
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 const MAX_IMAGE_EDGE = 2400;
 const JPEG_QUALITY = 0.84;
 
-export function SitePhotoUploader({ tripId }: { tripId: string }) {
+export function SitePhotoUploader({
+  onBatchSubmitted,
+  tripId,
+}: {
+  onBatchSubmitted?: () => void;
+  tripId: string;
+}) {
   const [note, setNote] = useState("");
   const [photos, setPhotos] = useState<SelectedPhoto[]>([]);
   const [batches, setBatches] = useState<LocalBatch[]>([]);
+  const [isPreparing, setIsPreparing] = useState(false);
   const photosRef = useRef<SelectedPhoto[]>([]);
   const batchesRef = useRef<LocalBatch[]>([]);
 
@@ -60,28 +81,43 @@ export function SitePhotoUploader({ tripId }: { tripId: string }) {
   );
 
   async function addFiles(files: FileList | null) {
-    if (!files) return;
-    const currentLength = photos.length;
-    const imageFiles = Array.from(files).filter(isImageFile);
-    const preparedPhotos = await Promise.all(
-      imageFiles.map((file, index) => preparePhoto(file, currentLength + index)),
-    );
-    setPhotos((current) => [
-      ...current,
-      ...preparedPhotos.map((photo, index) => ({
-        ...photo,
-        sortOrder: current.length + index,
-      })),
-    ]);
+    if (!files?.length) return;
+    setIsPreparing(true);
+    try {
+      const imageFiles = Array.from(files).filter(isImageFile);
+      const preparedPhotos = await Promise.all(
+        imageFiles.map((file, index) => preparePhoto(file, photosRef.current.length + index)),
+      );
+      setPhotos((current) => [
+        ...current,
+        ...preparedPhotos.map((photo, index) => ({
+          ...photo,
+          sortOrder: current.length + index,
+        })),
+      ]);
+    } finally {
+      setIsPreparing(false);
+    }
   }
 
   function removePhoto(clientPhotoId: string) {
     setPhotos((current) => {
       const removed = current.find((photo) => photo.clientPhotoId === clientPhotoId);
       if (removed) URL.revokeObjectURL(removed.objectUrl);
-      return current
-        .filter((photo) => photo.clientPhotoId !== clientPhotoId)
-        .map((photo, index) => ({ ...photo, sortOrder: index }));
+      return resequencePhotos(
+        current.filter((photo) => photo.clientPhotoId !== clientPhotoId),
+      );
+    });
+  }
+
+  function movePhoto(clientPhotoId: string, direction: -1 | 1) {
+    setPhotos((current) => {
+      const currentIndex = current.findIndex((photo) => photo.clientPhotoId === clientPhotoId);
+      const nextIndex = currentIndex + direction;
+      if (currentIndex < 0 || nextIndex < 0 || nextIndex >= current.length) return current;
+      const next = [...current];
+      [next[currentIndex], next[nextIndex]] = [next[nextIndex], next[currentIndex]];
+      return resequencePhotos(next);
     });
   }
 
@@ -90,67 +126,153 @@ export function SitePhotoUploader({ tripId }: { tripId: string }) {
     const batch: LocalBatch = {
       id: createClientId("submission"),
       note,
-      photos,
+      photos: photos.map((photo) => ({
+        ...photo,
+        uploadError: undefined,
+        uploadStatus: photo.storageKey ? "uploaded" : "pending",
+      })),
       status: "uploading",
-      uploadedCount: 0,
     };
     setBatches((current) => [batch, ...current]);
     setPhotos([]);
     setNote("");
-    await processBatch(batch);
+    await processUploads(batch);
   }
 
-  async function processBatch(batch: LocalBatch) {
-    updateBatch(batch.id, { error: undefined, status: "uploading" });
-    let uploadedCount = batch.photos.filter((photo) => photo.storageKey).length;
-    updateBatch(batch.id, { uploadedCount });
+  async function processUploads(batch: LocalBatch) {
+    updateBatch(batch.id, {
+      error: undefined,
+      errorStage: undefined,
+      status: "uploading",
+    });
+    const uploadedPhotos = await Promise.all(
+      batch.photos.map(async (photo) => {
+        if (photo.storageKey) {
+          const uploaded = {
+            ...photo,
+            uploadError: undefined,
+            uploadStatus: "uploaded" as const,
+          };
+          updateBatchPhoto(batch.id, uploaded);
+          return uploaded;
+        }
+        updateBatchPhoto(batch.id, {
+          ...photo,
+          uploadError: undefined,
+          uploadStatus: "uploading",
+        });
+        try {
+          const uploaded = await uploadPhoto(photo);
+          updateBatchPhoto(batch.id, uploaded);
+          return uploaded;
+        } catch (error) {
+          const failed = {
+            ...photo,
+            uploadError: errorMessage(error, "照片上傳失敗。"),
+            uploadStatus: "failed" as const,
+          };
+          updateBatchPhoto(batch.id, failed);
+          return failed;
+        }
+      }),
+    );
 
-    try {
-      const uploadedPhotos = await Promise.all(
-        batch.photos.map(async (photo) => {
-          if (photo.storageKey) return photo;
-          const uploadedPhoto = await uploadPhoto(photo);
-          uploadedCount += 1;
-          updateBatch(batch.id, { uploadedCount });
-          return uploadedPhoto;
-        }),
-      );
-      updateBatch(batch.id, { photos: uploadedPhotos });
-
-      const formData = new FormData();
-      formData.set("tripId", tripId);
-      formData.set("submissionId", batch.id);
-      formData.set("note", batch.note);
-      formData.set(
-        "photosJson",
-        JSON.stringify(
-          uploadedPhotos.map((photo) => ({
-            byteSize: photo.byteSize,
-            clientPhotoId: photo.clientPhotoId,
-            contentType: photo.contentType,
-            originalFilename: photo.originalFilename,
-            sortOrder: photo.sortOrder,
-            storageKey: photo.storageKey,
-          })),
-        ),
-      );
-      const result: HelperActionResult = await submitSitePhotoBatchAction({}, formData);
-      if (!result.ok) throw new Error(result.error || "照片批次送出失敗。");
+    const failedCount = uploadedPhotos.filter((photo) => !photo.storageKey).length;
+    if (failedCount) {
       updateBatch(batch.id, {
-        error: undefined,
+        error: `${failedCount} 張照片尚未上傳，已成功的照片不會重傳。`,
+        errorStage: "upload",
         photos: uploadedPhotos,
-        status: "completed",
-        uploadedCount: uploadedPhotos.length,
+        status: "failed",
+      });
+      return;
+    }
+
+    const readyBatch = { ...batch, photos: uploadedPhotos, status: "ready" as const };
+    updateBatch(batch.id, readyBatch);
+    await submitBatchMetadata(readyBatch);
+  }
+
+  async function retryPhoto(batchId: string, clientPhotoId: string) {
+    const batch = batchesRef.current.find((item) => item.id === batchId);
+    const photo = batch?.photos.find((item) => item.clientPhotoId === clientPhotoId);
+    if (!batch || !photo || photo.storageKey) return;
+    updateBatch(batch.id, {
+      error: undefined,
+      errorStage: undefined,
+      status: "uploading",
+    });
+    updateBatchPhoto(batch.id, {
+      ...photo,
+      uploadError: undefined,
+      uploadStatus: "uploading",
+    });
+    try {
+      const uploaded = await uploadPhoto(photo);
+      const nextPhotos = batch.photos.map((item) =>
+        item.clientPhotoId === clientPhotoId ? uploaded : item,
+      );
+      updateBatch(batch.id, {
+        photos: nextPhotos,
+        status: nextPhotos.every((item) => item.storageKey) ? "ready" : "failed",
       });
     } catch (error) {
+      updateBatchPhoto(batch.id, {
+        ...photo,
+        uploadError: errorMessage(error, "照片上傳失敗。"),
+        uploadStatus: "failed",
+      });
       updateBatch(batch.id, {
-        error: error instanceof Error ? error.message : "照片批次送出失敗。",
+        error: "這張照片仍未上傳，其他已成功照片會保留。",
+        errorStage: "upload",
         status: "failed",
       });
     }
   }
 
-  async function uploadPhoto(photo: SelectedPhoto) {
+  async function submitBatchMetadata(batch: LocalBatch) {
+    if (!batch.photos.length || batch.photos.some((photo) => !photo.storageKey)) return;
+    updateBatch(batch.id, {
+      error: undefined,
+      errorStage: undefined,
+      status: "submitting",
+    });
+    const formData = new FormData();
+    formData.set("tripId", tripId);
+    formData.set("submissionId", batch.id);
+    formData.set("note", batch.note);
+    formData.set(
+      "photosJson",
+      JSON.stringify(
+        batch.photos.map((photo) => ({
+          byteSize: photo.byteSize,
+          clientPhotoId: photo.clientPhotoId,
+          contentType: photo.contentType,
+          originalFilename: photo.originalFilename,
+          sortOrder: photo.sortOrder,
+          storageKey: photo.storageKey,
+        })),
+      ),
+    );
+    try {
+      const result: HelperActionResult = await submitSitePhotoBatchAction({}, formData);
+      if (!result.ok) throw new Error(result.error || "照片批次送出失敗。");
+      updateBatch(batch.id, {
+        error: undefined,
+        errorStage: undefined,
+        status: "completed",
+      });
+      onBatchSubmitted?.();
+    } catch (error) {
+      updateBatch(batch.id, {
+        error: errorMessage(error, "照片批次送出失敗。"),
+        errorStage: "submit",
+        status: "failed",
+      });
+    }
+  }
+
+  async function uploadPhoto(photo: SelectedPhoto): Promise<SelectedPhoto> {
     if (photo.byteSize > MAX_UPLOAD_BYTES) {
       throw new Error("照片超過 8MB，請先在手機裁切或降低解析度後再上傳。");
     }
@@ -172,7 +294,12 @@ export function SitePhotoUploader({ tripId }: { tripId: string }) {
       method: "PUT",
     });
     if (!upload.ok) throw new Error(`R2 上傳失敗 (${upload.status})。`);
-    return { ...photo, storageKey: presignBody.storageKey };
+    return {
+      ...photo,
+      storageKey: presignBody.storageKey,
+      uploadError: undefined,
+      uploadStatus: "uploaded",
+    };
   }
 
   function updateBatch(batchId: string, patch: Partial<LocalBatch>) {
@@ -181,56 +308,87 @@ export function SitePhotoUploader({ tripId }: { tripId: string }) {
     );
   }
 
+  function updateBatchPhoto(batchId: string, nextPhoto: SelectedPhoto) {
+    setBatches((current) =>
+      current.map((batch) =>
+        batch.id === batchId
+          ? {
+              ...batch,
+              photos: batch.photos.map((photo) =>
+                photo.clientPhotoId === nextPhoto.clientPhotoId ? nextPhoto : photo,
+              ),
+            }
+          : batch,
+      ),
+    );
+  }
+
   return (
     <div className="grid gap-4">
-      <div>
-        <h4 className="font-semibold">現場照片批次</h4>
-        <p className="mt-1 text-sm leading-6 text-muted-foreground">
-          可一次選多張；手機大圖會先縮到最長邊 {MAX_IMAGE_EDGE}px，單張需小於 8MB。
-        </p>
+      <h4 className="font-semibold">上傳現場照片</h4>
+
+      <div className="grid grid-cols-2 gap-3">
+        <PhotoPicker
+          capture="environment"
+          icon={<Camera className="size-5" />}
+          label="開啟相機"
+          onFiles={addFiles}
+        />
+        <PhotoPicker
+          icon={<ImageUp className="size-5" />}
+          label="從相簿選取"
+          multiple
+          onFiles={addFiles}
+        />
       </div>
 
-      <label className="flex min-h-32 cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border border-dashed bg-muted/40 p-4 text-center transition hover:bg-accent/50">
-        <ImageUp className="size-6" aria-hidden="true" />
-        <span className="font-semibold">選擇現場照片</span>
-        <span className="text-xs text-muted-foreground">支援一次多張圖片，HEIC 會盡量以原檔上傳</span>
-        <input
-          className="sr-only"
-          type="file"
-          accept="image/*"
-          multiple
-          onChange={(event) => addFiles(event.target.files)}
+      {isPreparing ? (
+        <InsightBanner
+          title="正在準備預覽"
+          tone="blue"
         />
-      </label>
+      ) : null}
 
       {photos.length ? (
         <div className="grid gap-3">
-          <InsightBanner
-            body="送出後會先上傳到 private R2，再建立資料庫批次；失敗時可整批重試。"
-            title={`${photos.length} 張照片已在本機預覽`}
-            tone="blue"
-          />
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {photos.map((photo) => (
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+            {photos.map((photo, index) => (
               <div key={photo.clientPhotoId} className="rounded-lg border bg-background p-2">
-                <img
-                  src={photo.objectUrl}
-                  alt={photo.originalFilename}
-                  className="aspect-square w-full rounded-md object-cover"
-                />
+                <div className="relative">
+                  <img
+                    src={photo.objectUrl}
+                    alt={photo.originalFilename}
+                    className="aspect-square w-full rounded-md object-cover"
+                  />
+                  <span className="absolute left-2 top-2 flex size-7 items-center justify-center rounded-full bg-black/70 text-xs font-semibold text-white">
+                    {index + 1}
+                  </span>
+                </div>
                 <div className="mt-2 grid gap-2">
-                  <div className="flex items-start justify-between gap-2">
-                    <p className="min-w-0 truncate text-sm font-medium">
-                      {photo.sortOrder + 1}. {photo.originalFilename}
-                    </p>
-                    <button
-                      aria-label="移除照片"
-                      className="rounded-md p-1 text-muted-foreground hover:bg-muted"
-                      type="button"
+                  <p className="truncate text-xs text-muted-foreground">
+                    {photo.originalFilename}
+                  </p>
+                  <div className="grid grid-cols-3 gap-1">
+                    <IconButton
+                      disabled={index === 0}
+                      label="往前移"
+                      onClick={() => movePhoto(photo.clientPhotoId, -1)}
+                    >
+                      <ArrowLeft className="size-4" />
+                    </IconButton>
+                    <IconButton
+                      disabled={index === photos.length - 1}
+                      label="往後移"
+                      onClick={() => movePhoto(photo.clientPhotoId, 1)}
+                    >
+                      <ArrowRight className="size-4" />
+                    </IconButton>
+                    <IconButton
+                      label="移除照片"
                       onClick={() => removePhoto(photo.clientPhotoId)}
                     >
                       <X className="size-4" />
-                    </button>
+                    </IconButton>
                   </div>
                   {photo.error ? <p className="text-xs text-destructive">{photo.error}</p> : null}
                 </div>
@@ -241,70 +399,222 @@ export function SitePhotoUploader({ tripId }: { tripId: string }) {
       ) : null}
 
       <div className="grid gap-3">
-        <textarea
-          placeholder="批次備註，可留空"
-          value={note}
-          onChange={(event) => setNote(event.target.value)}
-        />
+        <label className="grid gap-1">
+          <span>批次備註（選填）</span>
+          <textarea
+            placeholder="例如：三麗鷗新品"
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+          />
+        </label>
         <Button
-          disabled={!photos.length || photos.some((photo) => Boolean(photo.error))}
+          disabled={
+            isPreparing ||
+            !photos.length ||
+            photos.some((photo) => Boolean(photo.error))
+          }
+          size="lg"
           type="button"
           onClick={submitBatch}
         >
-          <Send className="mr-2 size-4" />
-          送出照片批次
+          <Send className="size-4" />
+          上傳 {photos.length ? `${photos.length} 張` : "照片"}
         </Button>
       </div>
 
       {batches.length ? (
-        <div className="grid gap-3 border-t pt-3">
-          <h5 className="text-sm font-semibold">本次送出批次</h5>
-          {batches.map((batch) => (
-            <article className="rounded-lg border bg-background p-3" key={batch.id}>
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <p className="text-sm font-medium">{batch.photos.length} 張照片</p>
-                <StatusBadge tone={batch.status === "completed" ? "green" : batch.status === "failed" ? "red" : "blue"}>
-                  {batchStatusLabel(batch)}
-                </StatusBadge>
-              </div>
-              {batch.note ? <p className="mt-1 text-sm text-muted-foreground">{batch.note}</p> : null}
-              <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5">
-                {batch.photos.map((photo) => (
-                  <img
-                    alt={photo.originalFilename}
-                    className="aspect-square w-full rounded-md object-cover"
-                    key={photo.clientPhotoId}
-                    src={photo.objectUrl}
-                  />
-                ))}
-              </div>
-              {batch.error ? <p className="mt-2 text-sm text-destructive">{batch.error}</p> : null}
-              {batch.status === "failed" ? (
-                <Button
-                  className="mt-3"
-                  size="sm"
-                  type="button"
-                  variant="outline"
-                  onClick={() => processBatch(batch)}
-                >
-                  <RefreshCw className="mr-2 size-4" />
-                  重試整批
-                </Button>
-              ) : null}
-            </article>
-          ))}
+        <div className="grid gap-3 border-t pt-4">
+          <h5 className="text-sm font-semibold">本次上傳</h5>
+          {batches.map((batch) => {
+            const uploadedCount = batch.photos.filter((photo) => photo.storageKey).length;
+            const failedPhotos = batch.photos.filter((photo) => photo.uploadStatus === "failed");
+            return (
+              <article className="rounded-lg border bg-background p-3" key={batch.id}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <p className="text-sm font-medium">
+                    {uploadedCount}/{batch.photos.length} 張已上傳
+                  </p>
+                  <StatusBadge tone={batchTone(batch)}>
+                    {batchStatusLabel(batch)}
+                  </StatusBadge>
+                </div>
+                {batch.note ? (
+                  <p className="mt-1 text-sm text-muted-foreground">{batch.note}</p>
+                ) : null}
+                <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5">
+                  {batch.photos.map((photo) => (
+                    <div className="grid gap-1" key={photo.clientPhotoId}>
+                      <div className="relative">
+                        <img
+                          alt={photo.originalFilename}
+                          className="aspect-square w-full rounded-md object-cover"
+                          loading="lazy"
+                          src={photo.objectUrl}
+                        />
+                        <PhotoStatus status={photo.uploadStatus} />
+                      </div>
+                      {photo.uploadStatus === "failed" ? (
+                        <Button
+                          className="h-8 px-2 text-xs"
+                          disabled={batch.status === "uploading"}
+                          type="button"
+                          variant="outline"
+                          onClick={() => retryPhoto(batch.id, photo.clientPhotoId)}
+                        >
+                          <RefreshCw className="size-3" />
+                          重試
+                        </Button>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+                {batch.error ? (
+                  <p className="mt-2 text-sm text-destructive">{batch.error}</p>
+                ) : null}
+                {failedPhotos.length > 1 ? (
+                  <Button
+                    className="mt-3"
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                    onClick={() => processUploads(batch)}
+                  >
+                    <RefreshCw className="size-4" />
+                    重試 {failedPhotos.length} 張失敗照片
+                  </Button>
+                ) : null}
+                {batch.status === "ready" ? (
+                  <Button
+                    className="mt-3"
+                    size="sm"
+                    type="button"
+                    onClick={() => submitBatchMetadata(batch)}
+                  >
+                    <Send className="size-4" />
+                    完成批次送出
+                  </Button>
+                ) : null}
+                {batch.status === "failed" && batch.errorStage === "submit" ? (
+                  <Button
+                    className="mt-3"
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                    onClick={() => submitBatchMetadata(batch)}
+                  >
+                    <RefreshCw className="size-4" />
+                    重新送出批次資料
+                  </Button>
+                ) : null}
+              </article>
+            );
+          })}
         </div>
       ) : null}
     </div>
   );
 }
 
+function PhotoPicker({
+  capture,
+  icon,
+  label,
+  multiple = false,
+  onFiles,
+}: {
+  capture?: "environment";
+  icon: React.ReactNode;
+  label: string;
+  multiple?: boolean;
+  onFiles: (files: FileList | null) => Promise<void>;
+}) {
+  return (
+    <label className="flex min-h-24 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed bg-muted/30 p-3 text-center transition hover:bg-accent/50">
+      {icon}
+      <span className="text-sm font-semibold">{label}</span>
+      <input
+        accept="image/*"
+        capture={capture}
+        className="sr-only"
+        multiple={multiple}
+        type="file"
+        onChange={(event) => {
+          const selected = event.currentTarget.files;
+          void onFiles(selected);
+          event.currentTarget.value = "";
+        }}
+      />
+    </label>
+  );
+}
+
+function IconButton({
+  children,
+  disabled = false,
+  label,
+  onClick,
+}: {
+  children: React.ReactNode;
+  disabled?: boolean;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      aria-label={label}
+      className="flex h-9 items-center justify-center rounded-md border text-muted-foreground transition hover:bg-muted disabled:opacity-30"
+      disabled={disabled}
+      title={label}
+      type="button"
+      onClick={onClick}
+    >
+      {children}
+    </button>
+  );
+}
+
+function PhotoStatus({ status }: { status: PhotoUploadStatus }) {
+  const content =
+    status === "uploaded" ? (
+      <Check className="size-3" />
+    ) : status === "uploading" ? (
+      <LoaderCircle className="size-3 animate-spin" />
+    ) : status === "failed" ? (
+      <X className="size-3" />
+    ) : null;
+  if (!content) return null;
+  return (
+    <span
+      className={`absolute right-1.5 top-1.5 flex size-6 items-center justify-center rounded-full text-white ${
+        status === "failed" ? "bg-destructive" : status === "uploaded" ? "bg-emerald-600" : "bg-black/70"
+      }`}
+    >
+      {content}
+    </span>
+  );
+}
+
 function batchStatusLabel(batch: LocalBatch) {
-  if (batch.status === "uploading") {
-    return `上傳中 ${batch.uploadedCount}/${batch.photos.length}`;
-  }
-  if (batch.status === "completed") return "已完成上傳";
-  return "上傳失敗";
+  if (batch.status === "uploading") return "照片上傳中";
+  if (batch.status === "ready") return "等待送出";
+  if (batch.status === "submitting") return "正在建立批次";
+  if (batch.status === "completed") return "管理員已可查看";
+  return batch.errorStage === "submit" ? "批次送出失敗" : "部分照片失敗";
+}
+
+function batchTone(batch: LocalBatch): "blue" | "green" | "red" | "neutral" {
+  if (batch.status === "completed") return "green";
+  if (batch.status === "failed") return "red";
+  if (batch.status === "ready") return "neutral";
+  return "blue";
+}
+
+function resequencePhotos(photos: SelectedPhoto[]) {
+  return photos.map((photo, index) => ({ ...photo, sortOrder: index }));
+}
+
+function errorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
 }
 
 function createClientId(prefix: string) {
@@ -322,12 +632,13 @@ async function preparePhoto(file: File, sortOrder: number): Promise<SelectedPhot
     contentType: inferImageContentType(normalized),
     error:
       normalized.size > MAX_UPLOAD_BYTES
-        ? `照片超過 8MB，請先在手機裁切或降低解析度後再上傳。`
+        ? "照片超過 8MB，請先在手機裁切或降低解析度後再上傳。"
         : undefined,
     file: normalized,
     objectUrl: URL.createObjectURL(normalized),
     originalFilename: normalized.name || file.name,
     sortOrder,
+    uploadStatus: "pending",
   };
 }
 

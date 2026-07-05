@@ -2,15 +2,14 @@ import Link from "next/link";
 import type React from "react";
 import {
   AlertCircle,
+  ArrowLeft,
   CalendarDays,
   Camera,
   CheckCircle2,
-  ClipboardList,
   CreditCard,
   MapPin,
   PackageSearch,
   ReceiptText,
-  ShoppingBag,
   Truck,
 } from "lucide-react";
 
@@ -36,14 +35,17 @@ import { createR2ObjectStore } from "../../src/server/r2-object-store";
 import { PurchaseTasks } from "./PurchaseTasks";
 import { EndTripForm } from "./EndTripForm";
 import { ElapsedTripTimer } from "./ElapsedTripTimer";
+import { ConnectionPanel } from "./ConnectionPanel";
 import { OptimisticTripGroup } from "./OptimisticTripGroup";
 import { QuoteTaskReplies } from "./QuoteTaskReplies";
 import { RebuyTasks } from "./RebuyTasks";
-import { SitePhotoUploader } from "./SitePhotoUploader";
+import { SitePhotoWorkspace } from "./SitePhotoWorkspace";
 import { SettlementPrecheckForm, WarehouseProofForm } from "./Settlements";
+import { TripSectionSwitcher } from "./TripSectionSwitcher";
 import { WaitingForActivationRefresh } from "./WaitingForActivationRefresh";
 
 type HelperSearchParams = {
+  batchId?: string;
   panel?: string;
   settlementId?: string;
   tripId?: string;
@@ -74,7 +76,14 @@ export default async function HelperPage({
     user.id,
     new Date(),
     {
-      sections: helperWorkspaceSections(view, panel, Boolean(params.tripId)),
+      sections: helperWorkspaceSections(
+        view,
+        panel,
+        Boolean(params.tripId),
+        Boolean(params.batchId),
+      ),
+      sitePhotoBatchId:
+        panel === "site" && params.batchId ? params.batchId : null,
       tripIds: params.tripId ? [params.tripId] : null,
       tripStatuses:
         view === "trips" && !params.tripId
@@ -104,7 +113,7 @@ export default async function HelperPage({
   );
   const shouldSignTripMedia = Boolean(selectedTrip?.status === "active");
   const signedBatchesByTripId =
-    shouldSignTripMedia && panel === "site"
+    shouldSignTripMedia && panel === "site" && Boolean(params.batchId)
       ? await signBatchesByTripId(unsignedBatchesByTripId)
       : unsignedBatchesByTripId;
   const signedQuoteTasksByTripId =
@@ -131,6 +140,7 @@ export default async function HelperPage({
   return selectedTrip ? (
     <TripDetail
       batches={signedBatchesByTripId[selectedTrip.id] || []}
+      selectedBatchId={params.batchId}
       canOperate={selectedTripCanBeOpened}
       panel={panel}
       purchaseTasks={signedPurchaseTasksByTripId[selectedTrip.id] || []}
@@ -460,6 +470,7 @@ function TripDetail({
   panel,
   purchaseTasks,
   quoteTasks,
+  selectedBatchId,
   summary,
   trip,
 }: {
@@ -468,20 +479,18 @@ function TripDetail({
   panel: TripPanel;
   purchaseTasks: any[];
   quoteTasks: any[];
+  selectedBatchId?: string;
   summary: any;
   trip: any;
 }) {
   const canDepart = canOperate && ["draft", "scheduled"].includes(trip.status);
   const canArrive = canOperate && trip.status === "departed";
   const unfinishedPurchases = Number(summary.unfinished_purchase_count || 0);
-  const unfinishedQuotes = Number(summary.unfinished_quote_photo_count || 0);
   const canOpenWorkspace = canOperate && trip.status === "active";
   if (trip.status === "ended") {
     return (
       <article className="grid gap-4">
-        <Button asChild className="w-fit" size="sm" variant="ghost">
-          <Link href="/helper?view=trips">返回行程</Link>
-        </Button>
+        <ReturnToTripsButton />
         <Surface className="grid gap-3">
           <StatusBadge tone="green">已完成</StatusBadge>
           <div>
@@ -504,9 +513,7 @@ function TripDetail({
   if (!canOpenWorkspace) {
     return (
       <article className="grid gap-4">
-        <Button asChild className="w-fit" size="sm" variant="ghost">
-          <Link href="/helper?view=trips">返回行程</Link>
-        </Button>
+        <ReturnToTripsButton />
         <TripPreActiveState
           canArrive={canArrive}
           canDepart={canDepart}
@@ -518,25 +525,32 @@ function TripDetail({
 
   return (
     <article className="grid gap-4">
-      <Button asChild className="w-fit" size="sm" variant="ghost">
-        <Link href="/helper?view=trips">返回行程</Link>
-      </Button>
-      <PageHeader
-        actions={<StatusBadge tone="green">連線中</StatusBadge>}
-        subtitle={`${service.dateOnly(trip.business_date, trip.timezone)} ${trip.scheduled_time || ""} · ${
-          trip.location || "未填地點"
-        }`}
-        title={trip.trip_name}
-      />
       <TripWorkspace
         batches={batches}
         panel={panel}
         purchaseTasks={purchaseTasks}
         quoteTasks={quoteTasks}
+        selectedBatchId={selectedBatchId}
         summary={summary}
         trip={trip}
       />
     </article>
+  );
+}
+
+function ReturnToTripsButton() {
+  return (
+    <Button
+      asChild
+      className="w-fit justify-start border-border/80 bg-background px-2.5 text-xs shadow-sm"
+      size="sm"
+      variant="outline"
+    >
+      <Link href="/helper?view=trips">
+        <ArrowLeft className="size-4" />
+        返回行程列表
+      </Link>
+    </Button>
   );
 }
 
@@ -607,6 +621,7 @@ function TripWorkspace({
   panel,
   purchaseTasks,
   quoteTasks,
+  selectedBatchId,
   summary,
   trip,
 }: {
@@ -614,38 +629,99 @@ function TripWorkspace({
   panel: TripPanel;
   purchaseTasks: any[];
   quoteTasks: any[];
+  selectedBatchId?: string;
   summary: any;
   trip: any;
 }) {
   const unfinishedPurchases = Number(summary.unfinished_purchase_count || 0);
-  const unfinishedQuotes = Number(summary.unfinished_quote_photo_count || 0);
-  const isConnectionPanel = panel === "work" || panel === "site" || panel === "quote" || panel === "purchase";
-  return (
-    <div className="grid gap-5 pb-24">
-      {panel === "site" ? (
-        <WorkspaceBlock eyebrow="連線 · 區塊一" title="現場大圖" tripId={trip.id}>
-          <SitePhotoUploader tripId={trip.id} />
-          <SubmittedBatches batches={batches} />
-        </WorkspaceBlock>
-      ) : panel === "quote" ? (
-        <WorkspaceBlock eyebrow="連線 · 區塊二" title="細圖 / 報價任務" tripId={trip.id}>
-          <QuoteTaskReplies tasks={quoteTasks} />
-        </WorkspaceBlock>
-      ) : panel === "purchase" ? (
-        <WorkspaceBlock eyebrow="連線 · 區塊三" title="採買任務" tripId={trip.id}>
-          <PurchaseTasks tasks={purchaseTasks} />
-        </WorkspaceBlock>
-      ) : panel === "work" ? (
-        <ConnectionPanel trip={trip} />
-      ) : (
-        <TripOverview
-          canEnd={unfinishedPurchases === 0}
-          summary={summary}
-          trip={trip}
+  const overviewPanel = (
+    <TripOverview
+      canEnd={unfinishedPurchases === 0}
+      summary={summary}
+      trip={trip}
+    />
+  );
+  const connectionPanel = <ConnectionPanel tripId={trip.id} />;
+  const chrome = <ActiveTripChrome trip={trip} />;
+  const sitePanel = <SitePhotoWorkspace tripId={trip.id} />;
+
+  if (panel === "overview") {
+    return (
+      <TripSectionSwitcher
+        chrome={chrome}
+        connection={connectionPanel}
+        initialSection="overview"
+        key={panel}
+        overview={overviewPanel}
+        site={sitePanel}
+      />
+    );
+  }
+
+  if (panel === "work") {
+    return (
+      <div className="grid gap-5 pb-24">
+        {chrome}
+        {connectionPanel}
+        <TripBottomBar activeSection="work" tripId={trip.id} />
+      </div>
+    );
+  }
+
+  const detailPanel =
+    panel === "site" ? (
+      selectedBatchId ? (
+        <WorkspaceBlock eyebrow="區塊一" title="現場大圖">
+          <SitePhotoBatchDetail
+            batch={batches.find((batch) => batch.id === selectedBatchId)}
+            tripId={trip.id}
           />
-      )}
-      <TripBottomBar activeSection={isConnectionPanel ? "work" : "overview"} tripId={trip.id} />
-    </div>
+        </WorkspaceBlock>
+      ) : (
+        sitePanel
+      )
+    ) : panel === "quote" ? (
+      <WorkspaceBlock eyebrow="區塊二" title="細圖 / 報價任務">
+        <QuoteTaskReplies tasks={quoteTasks} />
+      </WorkspaceBlock>
+    ) : (
+      <WorkspaceBlock eyebrow="區塊三" title="採買任務">
+        <PurchaseTasks tasks={purchaseTasks} />
+      </WorkspaceBlock>
+    );
+
+  return (
+    <TripSectionSwitcher
+      chrome={chrome}
+      connection={connectionPanel}
+      detail={detailPanel}
+      hideChromeInDetail={panel === "site"}
+      initialSection="detail"
+      key={panel}
+      overview={overviewPanel}
+      site={sitePanel}
+    />
+  );
+}
+
+function ActiveTripChrome({ trip }: { trip: any }) {
+  return (
+    <>
+      <ReturnToTripsButton />
+      <Surface className="grid gap-3">
+        <div>
+          <StatusBadge tone="green">連線中</StatusBadge>
+        </div>
+        <div>
+          <h2 className="text-2xl font-semibold tracking-tight">{trip.trip_name}</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {service.dateOnly(trip.business_date, trip.timezone)} {trip.scheduled_time || ""}
+            {" · "}
+            {trip.location || "未填地點"}
+          </p>
+        </div>
+      </Surface>
+    </>
   );
 }
 
@@ -740,34 +816,6 @@ function TripOverview({
   );
 }
 
-function ConnectionPanel({ trip }: { trip: any }) {
-  return (
-    <section className="grid gap-3">
-      <h3 className="text-lg font-semibold tracking-tight">連線工作</h3>
-      <div className="grid gap-3">
-        <WorkEntry
-          href={`/helper?tripId=${trip.id}&panel=site`}
-          icon={<Camera className="size-5" />}
-          label="區塊 1"
-          title="現場大圖"
-        />
-        <WorkEntry
-          href={`/helper?tripId=${trip.id}&panel=quote`}
-          icon={<ClipboardList className="size-5" />}
-          label="區塊 2"
-          title="細圖 / 報價"
-        />
-        <WorkEntry
-          href={`/helper?tripId=${trip.id}&panel=purchase`}
-          icon={<ShoppingBag className="size-5" />}
-          label="區塊 3"
-          title="採買任務"
-        />
-      </div>
-    </section>
-  );
-}
-
 function TripEndGate({
   canEnd,
   expectedVersion,
@@ -810,67 +858,68 @@ function CompactStatusLine({
   );
 }
 
-function WorkEntry({
-  body,
-  href,
-  icon,
-  label,
-  title,
-  urgent = false,
+function SitePhotoBatchDetail({
+  batch,
+  tripId,
 }: {
-  body?: string;
-  href: string;
-  icon: React.ReactNode;
-  label: string;
-  title: string;
-  urgent?: boolean;
+  batch?: any;
+  tripId: string;
 }) {
   return (
-    <Link className="grid gap-3 rounded-xl border bg-card p-4 shadow-sm transition hover:border-primary/30 hover:bg-accent/40" href={href}>
-      <span className="flex items-center justify-between gap-3">
-        <span className="flex size-10 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
-          {icon}
-        </span>
-        <StatusBadge tone={urgent ? "amber" : "neutral"}>{label}</StatusBadge>
-      </span>
-      <span>
-        <strong className="block text-base">{title}</strong>
-        {body ? <small className="mt-1 block leading-5 text-muted-foreground">{body}</small> : null}
-      </span>
-    </Link>
-  );
-}
-
-function SubmittedBatches({ batches }: { batches: any[] }) {
-  if (!batches.length) {
-    return <EmptyState title="尚未送出現場照片批次" body="小幫手送出照片後，這裡會保留本行程已提交的批次。" />;
-  }
-  return (
     <div className="grid gap-3">
-      {batches.map((batch) => (
-        <div key={batch.id} className="rounded-lg border bg-background p-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <p className="text-sm font-medium">
-              {new Date(batch.created_at).toLocaleString("zh-TW", { timeZone: "Asia/Taipei" })}
+      <Button asChild className="w-fit" size="sm" variant="outline">
+        <Link href={`/helper?tripId=${tripId}&panel=site`}>
+          <ArrowLeft className="size-4" />
+          返回批次列表
+        </Link>
+      </Button>
+      {batch ? (
+        <>
+          <div>
+            <h6 className="font-semibold">{sitePhotoBatchName(batch)}</h6>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {formatBatchTime(batch.created_at)} · {Number(batch.photo_count || 0)} 張照片
             </p>
-            <p className="text-xs text-muted-foreground">{batch.photos.length} 張照片</p>
           </div>
-          {batch.note ? <p className="mt-1 text-sm text-muted-foreground">{batch.note}</p> : null}
-          <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5">
-            {batch.photos.map((photo: any) => (
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {(batch.photos || []).map((photo: any) => (
               <a key={photo.id} href={photo.signed_url} target="_blank" rel="noreferrer">
                 <img
                   alt={photo.original_filename || "site photo"}
                   className="aspect-square w-full rounded-md object-cover"
+                  loading="lazy"
                   src={photo.signed_url}
                 />
               </a>
             ))}
           </div>
-        </div>
-      ))}
+        </>
+      ) : (
+        <EmptyState title="找不到這個照片批次" body="批次可能已被移除，請返回列表重新選擇。" />
+      )}
     </div>
   );
+}
+
+function sitePhotoBatchName(batch: any) {
+  const note = String(batch.note || "").trim();
+  if (note) return note;
+  return `批次${chineseBatchNumber(Number(batch.batch_number || 1))}`;
+}
+
+function chineseBatchNumber(value: number) {
+  const digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+  if (value <= 10) return value === 10 ? "十" : digits[value] || String(value);
+  if (value < 20) return `十${digits[value % 10]}`;
+  if (value < 100) {
+    const remainder = value % 10;
+    return `${digits[Math.floor(value / 10)]}十${remainder ? digits[remainder] : ""}`;
+  }
+  return String(value);
+}
+
+function formatBatchTime(value: string) {
+  return new Date(value).toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
 }
 
 function HomeShortcut({
@@ -936,23 +985,16 @@ function WorkspaceBlock({
   children,
   eyebrow,
   title,
-  tripId,
 }: {
   children: React.ReactNode;
   eyebrow: string;
   title: string;
-  tripId: string;
 }) {
   return (
     <section className="grid gap-4 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <p className="text-xs font-semibold uppercase text-muted-foreground">{eyebrow}</p>
-          <h5 className="mt-1 text-xl font-semibold tracking-tight">{title}</h5>
-        </div>
-        <Button asChild className="w-full sm:w-fit" size="sm" variant="ghost">
-          <Link href={`/helper?tripId=${tripId}&panel=work`}>回連線</Link>
-        </Button>
+      <div>
+        <p className="text-xs font-semibold uppercase text-muted-foreground">{eyebrow}</p>
+        <h5 className="mt-1 text-xl font-semibold tracking-tight">{title}</h5>
       </div>
       {children}
     </section>
@@ -1101,13 +1143,20 @@ function tripStatusesForGroups(groups: TripGroupId[]) {
   return Array.from(statuses);
 }
 
-function helperWorkspaceSections(view: string, panel: TripPanel, hasSelectedTrip: boolean) {
+function helperWorkspaceSections(
+  view: string,
+  panel: TripPanel,
+  hasSelectedTrip: boolean,
+  hasSelectedBatch: boolean,
+) {
   if (hasSelectedTrip) {
     return [
-      ...(panel === "overview" ? ["tripSummaries"] : []),
+      ...(["overview", "site", "quote", "purchase"].includes(panel)
+        ? ["tripSummaries"]
+        : []),
       ...(panel === "quote" ? ["quoteTasks"] : []),
       ...(panel === "purchase" ? ["purchaseTasks"] : []),
-      ...(panel === "site" ? ["sitePhotoBatches"] : []),
+      ...(panel === "site" && hasSelectedBatch ? ["sitePhotoBatches"] : []),
     ];
   }
   if (view === "settlement" || view === "warehouse") return ["settlements"];

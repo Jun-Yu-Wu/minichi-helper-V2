@@ -24,16 +24,22 @@ async function loadSdk() {
 }
 
 function createR2ObjectStore(config = r2Config()) {
+  let clientPromise = null;
+
   async function client() {
-    const { S3Client } = await loadSdk();
-    return new S3Client({
-      credentials: {
-        accessKeyId: config.accessKeyId,
-        secretAccessKey: config.secretAccessKey,
-      },
-      endpoint: config.endpoint,
-      region: config.region,
-    });
+    if (!clientPromise) {
+      clientPromise = loadSdk().then(({ S3Client }) =>
+        new S3Client({
+          credentials: {
+            accessKeyId: config.accessKeyId,
+            secretAccessKey: config.secretAccessKey,
+          },
+          endpoint: config.endpoint,
+          region: config.region,
+        }),
+      );
+    }
+    return clientPromise;
   }
 
   return {

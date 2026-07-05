@@ -171,6 +171,62 @@ test("admin live dashboard scopes active trips and workflow reads to the selecte
   );
 });
 
+test("admin live photo section skips quote purchase and staging reads", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return { rows: [] };
+    },
+  };
+
+  await service.listAdminDashboard(database, {
+    sections: ["trips", "sitePhotoBatches"],
+    tripStatuses: ["active"],
+    workflowTripIds: ["00000000-0000-0000-0000-000000000001"],
+  });
+
+  assert.equal(queries.length, 2);
+  assert.equal(
+    queries.some(({ sql }) => sql.includes("helper_app.site_photo_batches")),
+    true,
+  );
+  assert.equal(
+    queries.some(({ sql }) =>
+      /quote_tasks qt|purchase_tasks pt|staging_order_previews/.test(sql),
+    ),
+    false,
+  );
+});
+
+test("admin live quote section skips photo purchase and staging reads", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return { rows: [] };
+    },
+  };
+
+  await service.listAdminDashboard(database, {
+    sections: ["trips", "quoteTasks"],
+    tripStatuses: ["active"],
+    workflowTripIds: ["00000000-0000-0000-0000-000000000001"],
+  });
+
+  assert.equal(queries.length, 2);
+  assert.equal(
+    queries.some(({ sql }) => sql.includes("helper_app.quote_tasks qt")),
+    true,
+  );
+  assert.equal(
+    queries.some(({ sql }) =>
+      /site_photo_batches|purchase_tasks pt|staging_order_previews/.test(sql),
+    ),
+    false,
+  );
+});
+
 test("helper workspace skips workflow reads that are not needed by the current view", async () => {
   const queries = [];
   const database = {
@@ -263,6 +319,134 @@ test("helper workspace scopes the trip read and runs selected workflow reads con
   ]);
   assert.match(tripQuery.sql, /id = any\(\$2::uuid\[\]\)/);
   assert.equal(maxActiveWorkflowQueries, 4);
+});
+
+test("helper site photo list reads batch summaries without photo payloads", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return {
+        rows: [{
+          batch_number: 1,
+          id: "batch-1",
+          note: "",
+          photo_count: 3,
+          trip_id: "trip-1",
+        }],
+      };
+    },
+  };
+
+  const batches = await service.listSitePhotoBatchSummaries(database, {
+    helperId: "helper-1",
+    tripIds: ["00000000-0000-0000-0000-000000000001"],
+  });
+
+  assert.equal(batches[0].photo_count, 3);
+  assert.equal(batches[0].batch_number, 1);
+  assert.match(queries[0].sql, /count\(p\.id\)::int as photo_count/);
+  assert.match(queries[0].sql, /row_number\(\) over/);
+  assert.doesNotMatch(queries[0].sql, /storage_key|jsonb_agg/);
+  assert.deepEqual(queries[0].params, [
+    "helper-1",
+    ["00000000-0000-0000-0000-000000000001"],
+  ]);
+});
+
+test("helper site photo P0 read model authorizes and lists summaries in one query", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return {
+        rows: [{
+          batch_number: 2,
+          helper_id: "helper-1",
+          id: "batch-2",
+          note: "三麗鷗新品",
+          photo_count: 4,
+          trip_id: "00000000-0000-0000-0000-000000000001",
+        }],
+      };
+    },
+  };
+
+  const result = await service.listAuthorizedHelperSitePhotoBatchSummaries(
+    database,
+    {
+      authUserId: "00000000-0000-0000-0000-000000000009",
+      tripId: "00000000-0000-0000-0000-000000000001",
+    },
+  );
+
+  assert.equal(queries.length, 1);
+  assert.equal(result.authorized, true);
+  assert.equal(result.batches[0].photo_count, 4);
+  assert.match(queries[0].sql, /hp\.auth_user_id = \$1/);
+  assert.match(queries[0].sql, /t\.id = \$2::uuid/);
+  assert.match(queries[0].sql, /t\.status = 'active'/);
+  assert.doesNotMatch(queries[0].sql, /storage_key|jsonb_agg/);
+  assert.deepEqual(queries[0].params, [
+    "00000000-0000-0000-0000-000000000009",
+    "00000000-0000-0000-0000-000000000001",
+  ]);
+});
+
+test("helper site photo detail loads photos only for the selected owned batch", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      if (sql.includes("from helper_app.helper_profiles")) {
+        return { rows: [{ id: "helper-1", is_active: true }] };
+      }
+      if (sql.includes("select id, trip_name")) {
+        return {
+          rows: [{
+            business_date: "2026-07-05",
+            id: "00000000-0000-0000-0000-000000000001",
+            status: "active",
+            timezone: "Asia/Tokyo",
+          }],
+        };
+      }
+      return {
+        rows: [{
+          id: "00000000-0000-0000-0000-000000000002",
+          photos: [{ storage_key: "site/photo.jpg" }],
+          trip_id: "00000000-0000-0000-0000-000000000001",
+        }],
+      };
+    },
+  };
+
+  const workspace = await service.getHelperWorkspace(
+    database,
+    "user-1",
+    new Date("2026-07-05T00:00:00.000Z"),
+    {
+      sections: ["sitePhotoBatches"],
+      sitePhotoBatchId: "00000000-0000-0000-0000-000000000002",
+      tripIds: ["00000000-0000-0000-0000-000000000001"],
+    },
+  );
+
+  const detailQuery = queries.find(({ sql }) => sql.includes("with ranked_batches"));
+  assert.match(detailQuery.sql, /jsonb_agg/);
+  assert.match(detailQuery.sql, /storage_key/);
+  assert.match(detailQuery.sql, /b\.id = \$1/);
+  assert.match(detailQuery.sql, /b\.helper_id = \$2/);
+  assert.match(detailQuery.sql, /b\.trip_id = any\(\$3::uuid\[\]\)/);
+  assert.deepEqual(detailQuery.params, [
+    "00000000-0000-0000-0000-000000000002",
+    "helper-1",
+    ["00000000-0000-0000-0000-000000000001"],
+  ]);
+  assert.equal(
+    workspace.sitePhotoBatchesByTripId["00000000-0000-0000-0000-000000000001"][0].photos.length,
+    1,
+  );
 });
 
 test("lists rebuy tasks by newest publication time without admin priority ordering", async () => {

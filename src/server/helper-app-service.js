@@ -175,11 +175,17 @@ const HELPER_WORKSPACE_SECTIONS = [
  * @param {object} database
  * @param {string} authUserId
  * @param {Date} [now]
- * @param {{ sections?: string[], tripIds?: string[] | null, tripStatuses?: string[] | null }} [options]
+ * @param {{
+ *   sections?: string[],
+ *   sitePhotoBatchId?: string | null,
+ *   tripIds?: string[] | null,
+ *   tripStatuses?: string[] | null
+ * }} [options]
  */
 async function getHelperWorkspace(database, authUserId, now = new Date(), options = {}) {
   const {
     sections = HELPER_WORKSPACE_SECTIONS,
+    sitePhotoBatchId = null,
     tripIds = null,
     tripStatuses = null,
   } = options;
@@ -262,10 +268,16 @@ async function getHelperWorkspace(database, authUserId, now = new Date(), option
       ? listSettlements(database, { helperId: profile.id })
       : Promise.resolve([]),
     included.has("sitePhotoBatches")
-      ? listSitePhotoBatches(database, {
-          helperId: profile.id,
-          tripIds: workflowTripIds,
-        })
+      ? sitePhotoBatchId
+        ? listHelperSitePhotoBatchDetail(database, {
+            batchId: sitePhotoBatchId,
+            helperId: profile.id,
+            tripIds: workflowTripIds,
+          })
+        : listSitePhotoBatchSummaries(database, {
+            helperId: profile.id,
+            tripIds: workflowTripIds,
+          })
       : Promise.resolve([]),
     shouldLoadTripSummaries
       ? listHelperTripSummaries(database, {
@@ -667,6 +679,134 @@ async function listSitePhotoBatches(database, { helperId = null, tripIds = null 
      ${where}
      group by b.id, t.id, hp.id
      order by b.created_at desc`,
+    params,
+  );
+  return result.rows;
+}
+
+async function listSitePhotoBatchSummaries(
+  database,
+  { helperId = null, tripIds = null } = {},
+) {
+  if (tripIds && tripIds.length === 0) return [];
+  const conditions = [];
+  const params = [];
+  if (helperId) {
+    params.push(helperId);
+    conditions.push(`b.helper_id = $${params.length}`);
+  }
+  if (tripIds) {
+    params.push(tripIds);
+    conditions.push(`b.trip_id = any($${params.length}::uuid[])`);
+  }
+  const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+  const result = await database.query(
+    `select b.id, b.trip_id, b.helper_id, b.note, b.status,
+            b.created_at, b.updated_at,
+            count(p.id)::int as photo_count,
+            (row_number() over (
+              partition by b.trip_id
+              order by b.created_at asc, b.id asc
+            ))::int as batch_number
+     from helper_app.site_photo_batches b
+     left join helper_app.site_photos p on p.batch_id = b.id
+     ${where}
+     group by b.id
+     order by b.created_at desc, b.id desc`,
+    params,
+  );
+  return result.rows;
+}
+
+async function listAuthorizedHelperSitePhotoBatchSummaries(
+  database,
+  { authUserId, tripId },
+) {
+  const result = await database.query(
+    `with authorized_trip as (
+       select t.id as trip_id, hp.id as helper_id
+       from helper_app.helper_profiles hp
+       join helper_app.trips t on t.assigned_helper_id = hp.id
+       where hp.auth_user_id = $1
+         and hp.is_active = true
+         and t.id = $2::uuid
+         and t.status = 'active'
+     ),
+     ranked_batches as (
+       select b.id, b.trip_id, b.helper_id, b.note, b.status,
+              b.created_at, b.updated_at,
+              (row_number() over (
+                partition by b.trip_id
+                order by b.created_at asc, b.id asc
+              ))::int as batch_number,
+              (select count(*)::int
+               from helper_app.site_photos p
+               where p.batch_id = b.id) as photo_count
+       from helper_app.site_photo_batches b
+       join authorized_trip permitted
+         on permitted.trip_id = b.trip_id
+        and permitted.helper_id = b.helper_id
+     )
+     select permitted.trip_id, permitted.helper_id,
+            b.id, b.note, b.status, b.created_at, b.updated_at,
+            b.batch_number, b.photo_count
+     from authorized_trip permitted
+     left join ranked_batches b on true
+     order by b.created_at desc nulls last, b.id desc nulls last`,
+    [authUserId, tripId],
+  );
+  return {
+    authorized: result.rows.length > 0,
+    batches: result.rows.filter((row) => row.id),
+  };
+}
+
+async function listHelperSitePhotoBatchDetail(
+  database,
+  { batchId, helperId, tripIds = null },
+) {
+  if (tripIds && tripIds.length === 0) return [];
+  const params = [batchId, helperId];
+  const conditions = ["b.id = $1", "b.helper_id = $2"];
+  if (tripIds) {
+    params.push(tripIds);
+    conditions.push(`b.trip_id = any($${params.length}::uuid[])`);
+  }
+  const result = await database.query(
+    `with ranked_batches as (
+       select source.*,
+              (row_number() over (
+                partition by source.trip_id
+                order by source.created_at asc, source.id asc
+              ))::int as batch_number
+       from helper_app.site_photo_batches source
+     )
+     select b.id, b.trip_id, b.helper_id, b.note, b.status,
+            b.created_at, b.updated_at, b.batch_number,
+            count(p.id)::int as photo_count,
+            coalesce(
+              jsonb_agg(
+                jsonb_build_object(
+                  'id', p.id,
+                  'client_photo_id', p.client_photo_id,
+                  'storage_key', p.storage_key,
+                  'original_filename', p.original_filename,
+                  'content_type', p.content_type,
+                  'byte_size', p.byte_size,
+                  'sort_order', p.sort_order,
+                  'saved_by_admin', p.saved_by_admin,
+                  'saved_at', p.saved_at,
+                  'created_at', p.created_at
+                )
+                order by p.sort_order asc
+              ) filter (where p.id is not null),
+              '[]'::jsonb
+            ) as photos
+     from ranked_batches b
+     left join helper_app.site_photos p on p.batch_id = b.id
+     where ${conditions.join(" and ")}
+     group by b.id, b.trip_id, b.helper_id, b.note, b.status,
+              b.created_at, b.updated_at, b.batch_number`,
     params,
   );
   return result.rows;
@@ -4123,7 +4263,9 @@ module.exports = {
   listQuoteTasks,
   listRebuyTasks,
   listSettlements,
+  listAuthorizedHelperSitePhotoBatchSummaries,
   listSitePhotoBatches,
+  listSitePhotoBatchSummaries,
   listStagingMergeJobs,
   listStagingOrderPreviews,
   listAdminDashboard,

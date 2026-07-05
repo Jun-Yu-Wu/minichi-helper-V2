@@ -27,7 +27,6 @@ import {
   rejectStagingMergeJobAction,
   reviewSettlementAction,
   reviewWarehouseProofAction,
-  saveSitePhotoAction,
   setSettlementExchangeRateAction,
   reviewFaceCheckPurchaseAction,
 } from "../actions/admin";
@@ -56,10 +55,12 @@ import {
   QuickPublishPurchaseForm,
   RepairTripForm,
 } from "./AdminForms";
+import { AdminLivePhotosWorkspace } from "./AdminLivePhotosWorkspace";
 
 type AdminSearchParams = {
   helperId?: string;
   helperMode?: string;
+  liveSection?: string;
   liveTripId?: string;
   mainSection?: string;
   taskCategory?: string;
@@ -71,6 +72,7 @@ type AdminSearchParams = {
 };
 
 type TripGroupId = "completed" | "inProgress" | "notStarted";
+type LiveSection = "photos" | "purchase" | "quote" | "staging";
 
 export default async function AdminPage({
   searchParams,
@@ -79,6 +81,7 @@ export default async function AdminPage({
 }) {
   const params = (await searchParams) || {};
   const activeView = normalizeAdminView(params.view);
+  const liveSection = normalizeLiveSection(params.liveSection);
   const adminMainOpenTripGroups =
     activeView === "main" && params.mainSection === "trips"
       ? parseOpenTripGroups(params.tripGroups ?? params.tripGroup, true)
@@ -91,7 +94,7 @@ export default async function AdminPage({
 
   const [dashboard, customerNicknames] = await Promise.all([
     service.listAdminDashboard(database.getDatabasePool(), {
-      sections: adminDashboardSections(activeView, params.mainSection),
+      sections: adminDashboardSections(activeView, params.mainSection, liveSection),
       tripStatuses:
         activeView === "main" && params.mainSection === "trips"
           ? tripStatusesForGroups(adminMainOpenTripGroups)
@@ -110,26 +113,29 @@ export default async function AdminPage({
             : null,
     }),
     activeView === "rebuy" ||
-    (activeView === "live" && Boolean(params.liveTripId)) ||
+    (activeView === "live" &&
+      ["purchase", "quote"].includes(liveSection) &&
+      Boolean(params.liveTripId)) ||
     (activeView === "tasks" &&
       params.taskCategory === "purchase" &&
       Boolean(params.taskTripId))
       ? service.listCustomerNicknames(database.getDatabasePool())
       : Promise.resolve([]),
   ]);
-  const sitePhotoBatches = ["live", "tasks"].includes(activeView) && dashboard.sitePhotoBatches.length
+  const sitePhotoBatches =
+    activeView === "tasks" && dashboard.sitePhotoBatches.length
     ? await service.attachSignedPhotoUrls(
         dashboard.sitePhotoBatches,
         createR2ObjectStore(),
       )
     : [];
-  const quoteTasks = activeView === "live" && dashboard.quoteTasks.length
+  const quoteTasks = activeView === "live" && liveSection === "quote" && dashboard.quoteTasks.length
     ? await service.attachSignedQuoteTaskUrls(
         dashboard.quoteTasks,
         createR2ObjectStore(),
       )
     : [];
-  const purchaseTasks = activeView === "live" && dashboard.purchaseTasks.length
+  const purchaseTasks = activeView === "live" && liveSection === "purchase" && dashboard.purchaseTasks.length
     ? await service.attachSignedPurchaseTaskUrls(
         dashboard.purchaseTasks,
         createR2ObjectStore(),
@@ -179,14 +185,18 @@ export default async function AdminPage({
         <AdminRebuyList tasks={rebuyTasks} />
       </div>
     </AdminSection>
+  ) : activeView === "live" && liveSection === "photos" ? (
+    <AdminSection icon={<Radio className="size-5" />} title="即時回傳">
+      <AdminLivePhotosWorkspace initialTripId={params.liveTripId} />
+    </AdminSection>
   ) : activeView === "live" ? (
     <AdminLiveReturn
       activeTrips={dashboard.trips.filter((trip: any) => trip.status === "active")}
       customerNicknames={customerNicknames}
       purchaseTasks={purchaseTasks}
       quoteTasks={quoteTasks}
+      selectedSection={liveSection}
       selectedTripId={params.liveTripId}
-      sitePhotoBatches={sitePhotoBatches}
       stagingOrderPreviews={dashboard.stagingOrderPreviews}
     />
   ) : activeView === "merge" ? (
@@ -732,25 +742,36 @@ function AdminLiveReturn({
   customerNicknames,
   purchaseTasks,
   quoteTasks,
+  selectedSection,
   selectedTripId,
-  sitePhotoBatches,
   stagingOrderPreviews,
 }: {
   activeTrips: any[];
   customerNicknames: string[];
   purchaseTasks: any[];
   quoteTasks: any[];
+  selectedSection: LiveSection;
   selectedTripId?: string;
-  sitePhotoBatches: any[];
   stagingOrderPreviews: any[];
 }) {
   const selectedTrip = activeTrips.find((trip) => trip.id === selectedTripId);
-  const visibleBatches = selectedTrip
-    ? sitePhotoBatches.filter((batch) => batch.trip_id === selectedTrip.id)
-    : [];
   const visibleQuoteTasks = selectedTrip
     ? quoteTasks.filter((task) => task.trip_id === selectedTrip.id)
     : [];
+  const quotePhotoCount = visibleQuoteTasks.reduce(
+    (total, task) => total + (task.photos?.length || 0),
+    0,
+  );
+  const quoteRepliedCount = visibleQuoteTasks.reduce(
+    (total, task) =>
+      total + (task.photos || []).filter((photo: any) => photo.latest_reply).length,
+    0,
+  );
+  const quoteNeedsReviewCount = visibleQuoteTasks.reduce(
+    (total, task) =>
+      total + (task.photos || []).filter((photo: any) => photo.needs_review).length,
+    0,
+  );
   const visiblePurchaseTasks = selectedTrip
     ? purchaseTasks.filter((task) => task.trip_id === selectedTrip.id)
     : [];
@@ -767,7 +788,7 @@ function AdminLiveReturn({
               <SelectionCard
                 active={selectedTrip?.id === trip.id}
                 body={`${trip.helper_display_name || "未指派"} · ${statusLabel(trip.status)}`}
-                href={`/admin?view=live&liveTripId=${encodeURIComponent(trip.id)}`}
+                href={`/admin?view=live&liveTripId=${encodeURIComponent(trip.id)}&liveSection=${selectedSection}`}
                 key={trip.id}
                 title={trip.trip_name}
               />
@@ -779,87 +800,57 @@ function AdminLiveReturn({
       </TaskStep>
 
       {!selectedTrip ? (
-        <EmptyPanel title="尚未選擇監聽行程" body="先選擇上方行程，才會顯示該行程的即時回傳。" />
+        selectedSection === "photos" ? (
+          <AdminLivePhotosWorkspace initialTripId={selectedTripId} />
+        ) : (
+          <EmptyPanel title="尚未選擇監聽行程" body="先選擇上方行程，才會顯示該行程的即時回傳。" />
+        )
       ) : (
         <>
-          <Surface className="grid gap-3 md:grid-cols-4">
-            <MetricTile label="現場照片批次" value={`${visibleBatches.length}`} />
-            <MetricTile label="詢價/細節任務" value={`${visibleQuoteTasks.length}`} />
-            <MetricTile label="採買任務" value={`${visiblePurchaseTasks.length}`} />
-            <MetricTile label="暫存訂單" value={`${visibleStagingPreviews.length}`} />
-          </Surface>
-          <section className="grid gap-3">
-            <SectionTitle eyebrow={selectedTrip.trip_name} title="現場照片" />
-            {visibleBatches.length === 0 ? (
-              <EmptyPanel title="尚未收到現場照片" body="正在監聽此行程，等待小幫手上傳。" />
-            ) : (
-              <div className="grid gap-3">
-                {visibleBatches.map((batch: any) => (
-                  <article key={batch.id} className="rounded-xl border bg-card p-4 shadow-sm">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <h3 className="font-semibold">{batch.trip_name}</h3>
-                        <p className="text-sm text-muted-foreground">
-                          {service.dateOnly(batch.business_date, batch.timezone)} ·{" "}
-                          {batch.helper_display_name} · {batch.photos.length} 張
-                        </p>
-                        {batch.note ? <p className="mt-1 text-sm">{batch.note}</p> : null}
-                      </div>
-                      <p className="text-xs text-muted-foreground">
-                        {new Date(batch.created_at).toLocaleString("zh-TW", {
-                          timeZone: "Asia/Taipei",
-                        })}
-                      </p>
-                    </div>
-                    <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                      {batch.photos.map((photo: any) => (
-                          <div key={photo.id} className="rounded-lg border bg-background p-2">
-                          <a href={photo.signed_url} target="_blank" rel="noreferrer">
-                            <img
-                              alt={photo.original_filename || "site photo"}
-                              className="aspect-square w-full rounded-md object-cover"
-                              src={photo.signed_url}
-                            />
-                          </a>
-                          <div className="mt-2 grid gap-2">
-                            <p className="truncate text-sm font-medium">
-                              {photo.sort_order + 1}. {photo.original_filename || "現場照片"}
-                            </p>
-                            <p className="text-xs text-muted-foreground">
-                              {photo.saved_by_admin ? "已保存" : "暫存"}
-                            </p>
-                            <div className="flex flex-wrap gap-2">
-                              {!photo.saved_by_admin ? (
-                                <ActionButtonForm
-                                  action={saveSitePhotoAction}
-                                  fields={[{ name: "photoId", value: photo.id }]}
-                                  label="保存"
-                                  variant="outline"
-                                />
-                              ) : null}
-                              <Button asChild size="sm" variant="secondary">
-                                <a href={photo.signed_url} target="_blank" rel="noreferrer">
-                                  分享
-                                </a>
-                              </Button>
-                              <Button asChild size="sm" variant="secondary">
-                                <a href={photo.signed_url} download>
-                                  下載
-                                </a>
-                              </Button>
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            )}
-          </section>
+          <nav aria-label="即時回傳工作區" className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+            {[
+              { id: "photos", label: "現場照片" },
+              { id: "quote", label: "詢價回覆" },
+              { id: "purchase", label: "採買任務" },
+              { id: "staging", label: "暫存訂單" },
+            ].map((item) => (
+              <Button
+                asChild
+                key={item.id}
+                size="lg"
+                variant={selectedSection === item.id ? "default" : "outline"}
+              >
+                <Link
+                  aria-current={selectedSection === item.id ? "page" : undefined}
+                  href={`/admin?view=live&liveTripId=${encodeURIComponent(selectedTrip.id)}&liveSection=${item.id}`}
+                >
+                  {item.label}
+                </Link>
+              </Button>
+            ))}
+          </nav>
 
+          {selectedSection === "photos" ? (
+            <AdminLivePhotosWorkspace initialTripId={selectedTrip.id} />
+          ) : null}
+
+          {selectedSection === "quote" ? (
           <section className="grid gap-3">
-            <SectionTitle title="詢價 / 細節回覆" />
+            <SectionTitle eyebrow={selectedTrip.trip_name} title="詢價 / 細節回覆" />
+            <div className="grid gap-2 sm:grid-cols-3">
+              <Surface className="p-3">
+                <p className="text-xs text-muted-foreground">任務</p>
+                <p className="text-xl font-semibold">{visibleQuoteTasks.length}</p>
+              </Surface>
+              <Surface className="p-3">
+                <p className="text-xs text-muted-foreground">已回覆照片</p>
+                <p className="text-xl font-semibold">{quoteRepliedCount}/{quotePhotoCount}</p>
+              </Surface>
+              <Surface className="p-3">
+                <p className="text-xs text-muted-foreground">需確認</p>
+                <p className="text-xl font-semibold">{quoteNeedsReviewCount}</p>
+              </Surface>
+            </div>
             {visibleQuoteTasks.length === 0 ? (
               <EmptyPanel title="尚無詢價/細節任務" body="等待發布。" />
             ) : (
@@ -868,11 +859,18 @@ function AdminLiveReturn({
                   <article key={task.id} className="rounded-xl border bg-card p-4 shadow-sm">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
-                        <h3 className="font-semibold">
-                          {task.product_name || "未命名任務"} · {taskTypeLabel(task.task_type)}
-                        </h3>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <StatusBadge tone={task.status === "completed" ? "green" : "blue"}>
+                            {taskTypeLabel(task.task_type)}
+                          </StatusBadge>
+                          <h3 className="font-semibold">{task.product_name || "未命名任務"}</h3>
+                        </div>
                         <p className="text-sm text-muted-foreground">
                           {task.trip_name} · {task.helper_display_name} · {statusLabel(task.status)}
+                        </p>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {(task.photos || []).filter((photo: any) => photo.latest_reply).length}
+                          /{task.photos?.length || 0} 張已回覆
                         </p>
                         {task.instruction ? <p className="mt-1 text-sm">{task.instruction}</p> : null}
                       </div>
@@ -890,14 +888,17 @@ function AdminLiveReturn({
                               <img
                                 alt={photo.product_name || "quote task photo"}
                                 className="aspect-square w-full rounded-md object-cover"
+                                loading="lazy"
                                 src={photo.signed_url}
                               />
                             </a>
                             <div className="grid gap-2">
-                              <p className="text-sm font-medium">
-                                #{photo.sort_order + 1} · {replyStatusLabel(photo.reply_status)}
-                                {photo.needs_review ? " · 需確認" : ""}
-                              </p>
+                              <div className="flex flex-wrap items-center gap-2">
+                                <StatusBadge tone={photo.latest_reply ? "green" : "amber"}>
+                                  #{photo.sort_order + 1} {replyStatusLabel(photo.reply_status)}
+                                </StatusBadge>
+                                {photo.needs_review ? <StatusBadge tone="amber">需確認</StatusBadge> : null}
+                              </div>
                               {photo.latest_reply ? (
                                 <div className="grid gap-2 text-sm">
                                   {photo.latest_reply.price_jpy != null ? (
@@ -916,6 +917,7 @@ function AdminLiveReturn({
                                           <img
                                             alt={detailPhoto.original_filename || "detail photo"}
                                             className="aspect-square w-full rounded-md object-cover"
+                                            loading="lazy"
                                             src={detailPhoto.signed_url}
                                           />
                                         </a>
@@ -941,7 +943,9 @@ function AdminLiveReturn({
               </div>
             )}
           </section>
+          ) : null}
 
+          {selectedSection === "purchase" ? (
           <section className="grid gap-3">
             <SectionTitle title="採買任務" />
             {visiblePurchaseTasks.length === 0 ? (
@@ -1004,7 +1008,9 @@ function AdminLiveReturn({
               </div>
             )}
           </section>
+          ) : null}
 
+          {selectedSection === "staging" ? (
           <section className="grid gap-3">
             <SectionTitle title="暫存訂單預覽" />
             {visibleStagingPreviews.length === 0 ? (
@@ -1024,6 +1030,7 @@ function AdminLiveReturn({
               </div>
             )}
           </section>
+          ) : null}
         </>
       )}
     </AdminSection>
@@ -1754,17 +1761,26 @@ function normalizeAdminView(value?: string) {
   return "home";
 }
 
-function adminDashboardSections(view: string, mainSection?: string) {
+function normalizeLiveSection(value?: string): LiveSection {
+  if (value === "quote" || value === "purchase" || value === "staging") return value;
+  return "photos";
+}
+
+function adminDashboardSections(
+  view: string,
+  mainSection?: string,
+  liveSection: LiveSection = "photos",
+) {
+  const liveSectionMap: Record<LiveSection, string[]> = {
+    photos: [],
+    purchase: ["trips", "purchaseTasks"],
+    quote: ["trips", "quoteTasks"],
+    staging: ["trips", "stagingOrderPreviews"],
+  };
   const sectionsByView: Record<string, string[]> = {
     checkout: ["settlements"],
     home: ["summary"],
-    live: [
-      "trips",
-      "sitePhotoBatches",
-      "quoteTasks",
-      "purchaseTasks",
-      "stagingOrderPreviews",
-    ],
+    live: liveSectionMap[liveSection],
     main:
       mainSection === "trips"
         ? ["summary", "trips"]

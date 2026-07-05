@@ -29,7 +29,7 @@ const initialState: HelperActionResult = {};
 
 export function QuoteTaskReplies({ tasks }: { tasks: any[] }) {
   if (!tasks.length) {
-    return <EmptyState title="目前沒有詢價或細節任務" body="管理員發布任務後，會依照片逐張顯示需要回覆的內容。" />;
+    return <EmptyState title="目前沒有細圖 / 報價任務" body="管理員發布任務後，這裡會只顯示需要你回覆的照片。" />;
   }
   return (
     <div className="grid gap-3">
@@ -46,6 +46,9 @@ export function QuoteTaskReplies({ tasks }: { tasks: any[] }) {
               {completedCount(task.photos)} / {task.photos.length} 張已回覆
             </p>
             {task.instruction ? <p className="mt-1 text-sm">{task.instruction}</p> : null}
+            {task.status === "completed" ? (
+              <p className="mt-1 text-xs text-primary">這個任務已完成；如需修正，可直接覆蓋回覆。</p>
+            ) : null}
           </div>
           <div className="grid gap-3">
             {task.photos.map((photo: any) => (
@@ -187,6 +190,7 @@ function QuotePhotoReplyForm({ photo, taskType }: { photo: any; taskType: string
           <img
             alt={photo.product_name || "quote task photo"}
             className="aspect-square w-full rounded-md object-cover"
+            loading="lazy"
             src={photo.signed_url}
           />
         </a>
@@ -206,6 +210,7 @@ function QuotePhotoReplyForm({ photo, taskType }: { photo: any; taskType: string
           </p>
           {photo.latest_reply ? (
             <div className="rounded-md bg-muted/40 p-2 text-sm">
+              <p className="mb-1 text-xs font-medium text-muted-foreground">目前已送出的回覆</p>
               {photo.latest_reply.price_jpy != null ? <p>上次報價：JPY {photo.latest_reply.price_jpy}</p> : null}
               {photo.latest_reply.note ? <p>{photo.latest_reply.note}</p> : null}
             </div>
