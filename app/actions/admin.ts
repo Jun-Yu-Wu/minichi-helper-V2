@@ -124,8 +124,10 @@ export async function createQuoteTaskAction(
   _previousState: AdminActionResult,
   formData: FormData,
 ): Promise<AdminActionResult> {
+  const startedAt = performance.now();
   try {
     const admin = await requireAdmin();
+    const authenticatedAt = performance.now();
     const uploadedPhotosJson = formText(formData, "uploadedPhotosJson");
     await service.createQuoteTask(database.getDatabasePool(), {
       actorUserId: admin.user.id,
@@ -136,7 +138,13 @@ export async function createQuoteTaskAction(
       tripId: formText(formData, "tripId"),
       uploadedPhotos: uploadedPhotosJson ? JSON.parse(uploadedPhotosJson) : [],
     });
-    revalidatePath("/admin");
+    const completedAt = performance.now();
+    console.info(JSON.stringify({
+      event: "admin_quote_task_created",
+      authMs: Math.round(authenticatedAt - startedAt),
+      databaseMs: Math.round(completedAt - authenticatedAt),
+      totalMs: Math.round(completedAt - startedAt),
+    }));
     return { ok: true };
   } catch (error) {
     return actionError(error);
@@ -147,8 +155,10 @@ export async function createPurchaseTaskAction(
   _previousState: AdminActionResult,
   formData: FormData,
 ): Promise<AdminActionResult> {
+  const startedAt = performance.now();
   try {
     const admin = await requireAdmin();
+    const authenticatedAt = performance.now();
     const referencePhotosJson = formText(formData, "referencePhotosJson");
     await service.createPurchaseTask(database.getDatabasePool(), {
       actorUserId: admin.user.id,
@@ -162,7 +172,13 @@ export async function createPurchaseTaskAction(
       salePriceTwd: formText(formData, "salePriceTwd"),
       tripId: formText(formData, "tripId"),
     });
-    revalidatePath("/admin");
+    const completedAt = performance.now();
+    console.info(JSON.stringify({
+      event: "admin_purchase_task_created",
+      authMs: Math.round(authenticatedAt - startedAt),
+      databaseMs: Math.round(completedAt - authenticatedAt),
+      totalMs: Math.round(completedAt - startedAt),
+    }));
     return { ok: true };
   } catch (error) {
     return actionError(error);
@@ -200,8 +216,10 @@ export async function quickPublishPurchaseTaskAction(
   _previousState: AdminActionResult,
   formData: FormData,
 ): Promise<AdminActionResult> {
+  const startedAt = performance.now();
   try {
     const admin = await requireAdmin();
+    const authenticatedAt = performance.now();
     await service.quickPublishPurchaseTask(database.getDatabasePool(), {
       actorUserId: admin.user.id,
       lineCommunityName: formText(formData, "lineCommunityName"),
@@ -214,7 +232,13 @@ export async function quickPublishPurchaseTaskAction(
       salePriceTwd: formText(formData, "salePriceTwd"),
       tripId: formText(formData, "tripId"),
     });
-    revalidatePath("/admin");
+    const completedAt = performance.now();
+    console.info(JSON.stringify({
+      event: "admin_quick_purchase_task_created",
+      authMs: Math.round(authenticatedAt - startedAt),
+      databaseMs: Math.round(completedAt - authenticatedAt),
+      totalMs: Math.round(completedAt - startedAt),
+    }));
     return { ok: true };
   } catch (error) {
     return actionError(error);

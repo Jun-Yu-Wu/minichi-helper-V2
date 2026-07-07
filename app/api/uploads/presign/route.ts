@@ -7,12 +7,14 @@ import service from "../../../../src/server/helper-app-service";
 import { createServerSupabaseClient } from "../../../../src/server/supabase";
 
 export async function POST(request: Request) {
+  const startedAt = performance.now();
   try {
     const authClient = await createServerSupabaseClient();
     const { data, error } = await authClient.auth.getUser();
     if (error || !data?.user) {
       return NextResponse.json({ error: "請先登入。" }, { status: 401 });
     }
+    const authenticatedAt = performance.now();
 
     const body = await request.json();
     const tripId = String(body.tripId || "").trim();
@@ -34,7 +36,7 @@ export async function POST(request: Request) {
 
     let storageKeyTripId = tripId;
     if (uploadPurpose === "admin_quote_task_photo") {
-      await adminAuthorization.authorizeAdminByAllowlist(authClient);
+      adminAuthorization.authorizeAdminUserByAllowlist(data.user);
       if (!tripId) {
         return NextResponse.json({ error: "缺少行程資訊。" }, { status: 400 });
       }
@@ -93,6 +95,7 @@ export async function POST(request: Request) {
         tripId,
       });
     }
+    const authorizedAt = performance.now();
 
     const r2Store = createR2ObjectStore();
     const storageKey = uploadPurpose === "admin_quote_task_photo"
@@ -148,11 +151,21 @@ export async function POST(request: Request) {
           });
     const uploadUrl = await r2Store.signedPutUrl(storageKey, contentType);
     const expiresAt = new Date(Date.now() + r2Store.ttlSeconds * 1000).toISOString();
+    const completedAt = performance.now();
 
     return NextResponse.json({
       expiresAt,
       storageKey,
       uploadUrl,
+    }, {
+      headers: {
+        "Server-Timing": [
+          `auth;dur=${(authenticatedAt - startedAt).toFixed(1)}`,
+          `authorize;dur=${(authorizedAt - authenticatedAt).toFixed(1)}`,
+          `sign;dur=${(completedAt - authorizedAt).toFixed(1)}`,
+          `total;dur=${(completedAt - startedAt).toFixed(1)}`,
+        ].join(", "),
+      },
     });
   } catch (error) {
     console.error("Presign upload failed", error);

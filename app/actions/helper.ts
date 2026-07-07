@@ -113,7 +113,6 @@ export async function submitQuotePhotoReplyAction(
       priceJpy: formText(formData, "priceJpy"),
       quoteTaskPhotoId: formText(formData, "quoteTaskPhotoId"),
     });
-    revalidatePath("/helper");
     return { ok: true, submissionId: formText(formData, "idempotencyKey") };
   } catch (error) {
     return actionError(error);
@@ -136,6 +135,7 @@ export async function respondPurchaseTaskAction(
       helperNote: formText(formData, "helperNote"),
       idempotencyKey: formText(formData, "idempotencyKey"),
       purchaseTaskId: formText(formData, "purchaseTaskId"),
+      remainingResolution: formText(formData, "remainingResolution"),
       unavailableQuantity: formText(formData, "unavailableQuantity"),
     });
     revalidatePath("/helper");

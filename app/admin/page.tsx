@@ -47,15 +47,16 @@ import service from "../../src/server/helper-app-service";
 import { createR2ObjectStore } from "../../src/server/r2-object-store";
 import {
   CreateHelperForm,
-  CreatePurchaseTaskForm,
-  CreateQuoteTaskForm,
   CreateRebuyTaskForm,
   CreateTripForm,
   EditHelperForm,
-  QuickPublishPurchaseForm,
   RepairTripForm,
+  TaskSubtypePublisher,
 } from "./AdminForms";
 import { AdminLivePhotosWorkspace } from "./AdminLivePhotosWorkspace";
+import { AdminLivePurchaseWorkspace } from "./AdminLivePurchaseWorkspace";
+import { AdminLiveQuoteWorkspace } from "./AdminLiveQuoteWorkspace";
+import { AdminPurchasePhotos } from "./AdminPurchasePhotos";
 
 type AdminSearchParams = {
   helperId?: string;
@@ -92,8 +93,7 @@ export default async function AdminPage({
     return null;
   }
 
-  const [dashboard, customerNicknames] = await Promise.all([
-    service.listAdminDashboard(database.getDatabasePool(), {
+  const dashboard = await service.listAdminDashboard(database.getDatabasePool(), {
       sections: adminDashboardSections(activeView, params.mainSection, liveSection),
       tripStatuses:
         activeView === "main" && params.mainSection === "trips"
@@ -111,36 +111,8 @@ export default async function AdminPage({
               ? [params.taskTripId]
               : []
             : null,
-    }),
-    activeView === "rebuy" ||
-    (activeView === "live" &&
-      ["purchase", "quote"].includes(liveSection) &&
-      Boolean(params.liveTripId)) ||
-    (activeView === "tasks" &&
-      params.taskCategory === "purchase" &&
-      Boolean(params.taskTripId))
-      ? service.listCustomerNicknames(database.getDatabasePool())
-      : Promise.resolve([]),
-  ]);
-  const sitePhotoBatches =
-    activeView === "tasks" && dashboard.sitePhotoBatches.length
-    ? await service.attachSignedPhotoUrls(
-        dashboard.sitePhotoBatches,
-        createR2ObjectStore(),
-      )
-    : [];
-  const quoteTasks = activeView === "live" && liveSection === "quote" && dashboard.quoteTasks.length
-    ? await service.attachSignedQuoteTaskUrls(
-        dashboard.quoteTasks,
-        createR2ObjectStore(),
-      )
-    : [];
-  const purchaseTasks = activeView === "live" && liveSection === "purchase" && dashboard.purchaseTasks.length
-    ? await service.attachSignedPurchaseTaskUrls(
-        dashboard.purchaseTasks,
-        createR2ObjectStore(),
-      )
-    : dashboard.purchaseTasks;
+    });
+  const purchaseTasks = dashboard.purchaseTasks;
   const settlements = activeView === "checkout" && dashboard.settlements.length
     ? await service.attachSignedSettlementUrls(
         dashboard.settlements,
@@ -153,8 +125,6 @@ export default async function AdminPage({
         createR2ObjectStore(),
       )
     : [];
-  const sitePhotosByTripId = groupSitePhotosByTripId(sitePhotoBatches);
-
   return activeView === "main" ? (
     <AdminMain
       dashboard={dashboard}
@@ -167,18 +137,15 @@ export default async function AdminPage({
     <AdminCheckout settlements={settlements} />
   ) : activeView === "tasks" ? (
     <AdminTaskPublishing
-      customerNicknames={customerNicknames}
       dashboard={dashboard}
       selectedCategory={params.taskCategory}
       selectedSubType={params.taskSubType}
       selectedTripId={params.taskTripId}
-      sitePhotosByTripId={sitePhotosByTripId}
     />
   ) : activeView === "rebuy" ? (
     <AdminSection icon={<PackageSearch className="size-5" />} title="補買">
       <div className="grid gap-4">
         <CreateRebuyTaskForm
-          customerNicknames={customerNicknames}
           helpers={dashboard.helpers}
           purchaseTasks={dashboard.purchaseTasks}
         />
@@ -189,12 +156,18 @@ export default async function AdminPage({
     <AdminSection icon={<Radio className="size-5" />} title="即時回傳">
       <AdminLivePhotosWorkspace initialTripId={params.liveTripId} />
     </AdminSection>
+  ) : activeView === "live" && liveSection === "quote" ? (
+    <AdminSection icon={<Radio className="size-5" />} title="即時回傳">
+      <AdminLiveQuoteWorkspace initialTripId={params.liveTripId} />
+    </AdminSection>
+  ) : activeView === "live" && liveSection === "purchase" ? (
+    <AdminSection icon={<Radio className="size-5" />} title="即時回傳">
+      <AdminLivePurchaseWorkspace initialTripId={params.liveTripId} />
+    </AdminSection>
   ) : activeView === "live" ? (
     <AdminLiveReturn
       activeTrips={dashboard.trips.filter((trip: any) => trip.status === "active")}
-      customerNicknames={customerNicknames}
       purchaseTasks={purchaseTasks}
-      quoteTasks={quoteTasks}
       selectedSection={liveSection}
       selectedTripId={params.liveTripId}
       stagingOrderPreviews={dashboard.stagingOrderPreviews}
@@ -604,34 +577,20 @@ function AdminMain({
 }
 
 function AdminTaskPublishing({
-  customerNicknames,
   dashboard,
   selectedCategory,
   selectedSubType,
   selectedTripId,
-  sitePhotosByTripId,
 }: {
-  customerNicknames: string[];
   dashboard: any;
   selectedCategory?: string;
   selectedSubType?: string;
   selectedTripId?: string;
-  sitePhotosByTripId: Record<string, any[]>;
 }) {
   const activeTrips = dashboard.trips.filter((trip: any) => trip.status === "active");
   const category = normalizeTaskCategory(selectedCategory);
   const subType = normalizeTaskSubType(category, selectedSubType);
   const selectedTrip = activeTrips.find((trip: any) => trip.id === selectedTripId);
-  const quoteTypes = [
-    { id: "quote", label: "報價", body: "請小幫手回傳商品價格。" },
-    { id: "detail", label: "細圖", body: "請小幫手補拍商品細節。" },
-    { id: "quote_and_detail", label: "報價＋細圖", body: "同時回傳價格與商品細節照。" },
-  ];
-  const purchaseTypes = [
-    { id: "standard", label: "一般採買", body: "發布一般數量的採買指示。" },
-    { id: "face_check", label: "挑臉採買", body: "採買後需由管理員審核商品狀態。" },
-  ];
-  const subTypes = category === "quote" ? quoteTypes : category === "purchase" ? purchaseTypes : [];
 
   return (
     <AdminSection icon={<ClipboardList className="size-5" />} title="任務發布">
@@ -656,30 +615,14 @@ function AdminTaskPublishing({
         </TaskStep>
 
         {category ? (
-          <TaskStep number="2" title="選擇細任務">
-            <div className="grid gap-3 sm:grid-cols-3">
-              {subTypes.map((item) => (
-                <SelectionCard
-                  active={subType === item.id}
-                  body={item.body}
-                  href={adminTaskHref(category, item.id)}
-                  key={item.id}
-                  title={item.label}
-                />
-              ))}
-            </div>
-          </TaskStep>
-        ) : null}
-
-        {category && subType ? (
-          <TaskStep number="3" title="選擇正在進行中的行程">
+          <TaskStep number="2" title="選擇正在進行中的行程">
             {activeTrips.length ? (
               <div className="grid gap-3 sm:grid-cols-2">
                 {activeTrips.map((trip: any) => (
                   <SelectionCard
                     active={selectedTrip?.id === trip.id}
-                    body={`${trip.helper_display_name || "未指派"} · 選取後載入現場照片`}
-                    href={adminTaskHref(category, subType, trip.id)}
+                    body={`${trip.helper_display_name || "未指派"} · 選取後選擇細任務`}
+                    href={adminTaskHref(category, undefined, trip.id)}
                     key={trip.id}
                     title={trip.trip_name}
                   />
@@ -691,46 +634,12 @@ function AdminTaskPublishing({
           </TaskStep>
         ) : null}
 
-        {selectedTrip && category === "quote" && isQuoteTaskType(subType) ? (
-          <TaskStep number="4" title={`發布${taskTypeLabel(subType)}任務`}>
-            <article className="rounded-xl border bg-card p-4 shadow-sm">
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h3 className="font-semibold">{selectedTrip.trip_name}</h3>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {selectedTrip.helper_display_name || "未指派"} · {statusLabel(selectedTrip.status)}
-                  </p>
-                </div>
-                <StatusBadge tone="neutral">
-                  {(sitePhotosByTripId[selectedTrip.id] || []).length} 張可選
-                </StatusBadge>
-              </div>
-              <CreateQuoteTaskForm
-                availablePhotos={sitePhotosByTripId[selectedTrip.id] || []}
-                taskType={subType}
-                trip={selectedTrip}
-              />
-            </article>
-          </TaskStep>
-        ) : null}
-
-        {selectedTrip && category === "purchase" ? (
-          <TaskStep number="4" title="建立採買內容">
-            <article className="rounded-xl border bg-card p-4 shadow-sm">
-              <div>
-                <h3 className="font-semibold">{selectedTrip.trip_name}</h3>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  {selectedTrip.helper_display_name || "未指派"} ·{" "}
-                  {purchaseTypes.find((item) => item.id === subType)?.label}
-                </p>
-              </div>
-              <CreatePurchaseTaskForm
-                customerNicknames={customerNicknames}
-                requiresFaceCheck={subType === "face_check"}
-                trip={selectedTrip}
-              />
-            </article>
-          </TaskStep>
+        {category && selectedTrip ? (
+          <TaskSubtypePublisher
+            category={category}
+            initialSubType={subType}
+            trip={selectedTrip}
+          />
         ) : null}
       </div>
     </AdminSection>
@@ -739,42 +648,30 @@ function AdminTaskPublishing({
 
 function AdminLiveReturn({
   activeTrips,
-  customerNicknames,
   purchaseTasks,
-  quoteTasks,
   selectedSection,
   selectedTripId,
   stagingOrderPreviews,
 }: {
   activeTrips: any[];
-  customerNicknames: string[];
   purchaseTasks: any[];
-  quoteTasks: any[];
   selectedSection: LiveSection;
   selectedTripId?: string;
   stagingOrderPreviews: any[];
 }) {
   const selectedTrip = activeTrips.find((trip) => trip.id === selectedTripId);
-  const visibleQuoteTasks = selectedTrip
-    ? quoteTasks.filter((task) => task.trip_id === selectedTrip.id)
-    : [];
-  const quotePhotoCount = visibleQuoteTasks.reduce(
-    (total, task) => total + (task.photos?.length || 0),
-    0,
-  );
-  const quoteRepliedCount = visibleQuoteTasks.reduce(
-    (total, task) =>
-      total + (task.photos || []).filter((photo: any) => photo.latest_reply).length,
-    0,
-  );
-  const quoteNeedsReviewCount = visibleQuoteTasks.reduce(
-    (total, task) =>
-      total + (task.photos || []).filter((photo: any) => photo.needs_review).length,
-    0,
-  );
   const visiblePurchaseTasks = selectedTrip
     ? purchaseTasks.filter((task) => task.trip_id === selectedTrip.id)
     : [];
+  const openPurchaseCount = visiblePurchaseTasks.filter((task) => task.status === "open").length;
+  const faceCheckReviewCount = visiblePurchaseTasks.filter((task) => task.status === "review_pending").length;
+  const helperFinalConfirmCount = visiblePurchaseTasks.filter(
+    (task) => task.status === "approved_pending_helper_confirmation",
+  ).length;
+  const completedPurchaseCount = visiblePurchaseTasks.filter((task) => task.status === "completed").length;
+  const exceptionPurchaseCount = visiblePurchaseTasks.filter((task) =>
+    ["canceled", "unavailable", "not_found"].includes(task.status),
+  ).length;
   const visibleStagingPreviews = selectedTrip
     ? stagingOrderPreviews.filter((preview) => preview.trip_id === selectedTrip.id)
     : [];
@@ -834,120 +731,31 @@ function AdminLiveReturn({
             <AdminLivePhotosWorkspace initialTripId={selectedTrip.id} />
           ) : null}
 
-          {selectedSection === "quote" ? (
-          <section className="grid gap-3">
-            <SectionTitle eyebrow={selectedTrip.trip_name} title="詢價 / 細節回覆" />
-            <div className="grid gap-2 sm:grid-cols-3">
-              <Surface className="p-3">
-                <p className="text-xs text-muted-foreground">任務</p>
-                <p className="text-xl font-semibold">{visibleQuoteTasks.length}</p>
-              </Surface>
-              <Surface className="p-3">
-                <p className="text-xs text-muted-foreground">已回覆照片</p>
-                <p className="text-xl font-semibold">{quoteRepliedCount}/{quotePhotoCount}</p>
-              </Surface>
-              <Surface className="p-3">
-                <p className="text-xs text-muted-foreground">需確認</p>
-                <p className="text-xl font-semibold">{quoteNeedsReviewCount}</p>
-              </Surface>
-            </div>
-            {visibleQuoteTasks.length === 0 ? (
-              <EmptyPanel title="尚無詢價/細節任務" body="等待發布。" />
-            ) : (
-              <div className="grid gap-3">
-                {visibleQuoteTasks.map((task: any) => (
-                  <article key={task.id} className="rounded-xl border bg-card p-4 shadow-sm">
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <StatusBadge tone={task.status === "completed" ? "green" : "blue"}>
-                            {taskTypeLabel(task.task_type)}
-                          </StatusBadge>
-                          <h3 className="font-semibold">{task.product_name || "未命名任務"}</h3>
-                        </div>
-                        <p className="text-sm text-muted-foreground">
-                          {task.trip_name} · {task.helper_display_name} · {statusLabel(task.status)}
-                        </p>
-                        <p className="mt-1 text-xs text-muted-foreground">
-                          {(task.photos || []).filter((photo: any) => photo.latest_reply).length}
-                          /{task.photos?.length || 0} 張已回覆
-                        </p>
-                        {task.instruction ? <p className="mt-1 text-sm">{task.instruction}</p> : null}
-                      </div>
-                      <p className="text-xs text-muted-foreground">
-                        {new Date(task.created_at).toLocaleString("zh-TW", {
-                          timeZone: "Asia/Taipei",
-                        })}
-                      </p>
-                    </div>
-                    <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      {task.photos.map((photo: any) => (
-                          <div key={photo.id} className="rounded-lg border bg-background p-3">
-                          <div className="grid gap-3 sm:grid-cols-[120px_1fr]">
-                            <a href={photo.signed_url} target="_blank" rel="noreferrer">
-                              <img
-                                alt={photo.product_name || "quote task photo"}
-                                className="aspect-square w-full rounded-md object-cover"
-                                loading="lazy"
-                                src={photo.signed_url}
-                              />
-                            </a>
-                            <div className="grid gap-2">
-                              <div className="flex flex-wrap items-center gap-2">
-                                <StatusBadge tone={photo.latest_reply ? "green" : "amber"}>
-                                  #{photo.sort_order + 1} {replyStatusLabel(photo.reply_status)}
-                                </StatusBadge>
-                                {photo.needs_review ? <StatusBadge tone="amber">需確認</StatusBadge> : null}
-                              </div>
-                              {photo.latest_reply ? (
-                                <div className="grid gap-2 text-sm">
-                                  {photo.latest_reply.price_jpy != null ? (
-                                    <p>JPY {photo.latest_reply.price_jpy}</p>
-                                  ) : null}
-                                  {photo.latest_reply.note ? <p>{photo.latest_reply.note}</p> : null}
-                                  {photo.latest_reply.detail_photos?.length ? (
-                                    <div className="grid grid-cols-3 gap-2">
-                                      {photo.latest_reply.detail_photos.map((detailPhoto: any) => (
-                                        <a
-                                          key={detailPhoto.storage_key}
-                                          href={detailPhoto.signed_url}
-                                          target="_blank"
-                                          rel="noreferrer"
-                                        >
-                                          <img
-                                            alt={detailPhoto.original_filename || "detail photo"}
-                                            className="aspect-square w-full rounded-md object-cover"
-                                            loading="lazy"
-                                            src={detailPhoto.signed_url}
-                                          />
-                                        </a>
-                                      ))}
-                                    </div>
-                                  ) : null}
-                                  <QuickPublishPurchaseForm
-                                    customerNicknames={customerNicknames}
-                                    photo={photo}
-                                    task={task}
-                                  />
-                                </div>
-                              ) : (
-                                <p className="text-sm text-muted-foreground">等待小幫手回覆。</p>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </article>
-                ))}
-              </div>
-            )}
-          </section>
-          ) : null}
-
           {selectedSection === "purchase" ? (
           <section className="grid gap-3">
-            <SectionTitle title="採買任務" />
+            <SectionTitle eyebrow={selectedTrip.trip_name} title="採買回傳" />
+            <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
+              <Surface className="p-3 text-center">
+                <p className="text-xs text-muted-foreground">待處理</p>
+                <p className="text-xl font-semibold">{openPurchaseCount}</p>
+              </Surface>
+              <Surface className="p-3 text-center">
+                <p className="text-xs text-muted-foreground">挑臉待審</p>
+                <p className="text-xl font-semibold">{faceCheckReviewCount}</p>
+              </Surface>
+              <Surface className="p-3 text-center">
+                <p className="text-xs text-muted-foreground">待小幫手確認</p>
+                <p className="text-xl font-semibold">{helperFinalConfirmCount}</p>
+              </Surface>
+              <Surface className="p-3 text-center">
+                <p className="text-xs text-muted-foreground">已完成</p>
+                <p className="text-xl font-semibold">{completedPurchaseCount}</p>
+              </Surface>
+              <Surface className="p-3 text-center">
+                <p className="text-xs text-muted-foreground">未購得</p>
+                <p className="text-xl font-semibold">{exceptionPurchaseCount}</p>
+              </Surface>
+            </div>
             {visiblePurchaseTasks.length === 0 ? (
               <EmptyPanel title="尚無採買任務" body="可從任務發布建立，或從已回覆的詢價項目快速發布。" />
             ) : (
@@ -956,15 +764,42 @@ function AdminLiveReturn({
                   <article key={task.id} className="rounded-xl border bg-card p-4 shadow-sm">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
-                        <h3 className="font-semibold">{task.product_name}</h3>
-                        <p className="text-sm text-muted-foreground">
-                          {task.line_community_name} · {task.quantity} 件 · {purchaseStatusLabel(task.status)}
-                          {task.requires_face_check ? " · 挑臉" : ""}
-                        </p>
-                        <p className="mt-1 text-sm">
-                          JPY {task.original_price_jpy ?? "-"} · TWD {task.sale_price_twd}
-                        </p>
-                        {task.helper_note ? <p className="mt-1 text-sm">{task.helper_note}</p> : null}
+                        <div className="flex flex-wrap items-center gap-2">
+                          <StatusBadge tone={purchaseStatusTone(task.status)}>
+                            {purchaseStatusLabel(task.status)}
+                          </StatusBadge>
+                          <StatusBadge tone={task.requires_face_check ? "amber" : "neutral"}>
+                            {task.requires_face_check ? "挑臉採買" : "一般採買"}
+                          </StatusBadge>
+                        </div>
+                        <h3 className="mt-2 text-lg font-semibold">{task.product_name}</h3>
+                        <p className="mt-1 text-sm text-muted-foreground">{task.line_community_name}</p>
+                        <dl className="mt-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
+                          <AdminPurchaseFact label="要求數量" value={`${task.quantity} 件`} />
+                          <AdminPurchaseFact
+                            label="完成數量"
+                            value={task.completed_quantity == null ? "—" : `${task.completed_quantity} 件`}
+                          />
+                          <AdminPurchaseFact label="原價" value={`JPY ${task.original_price_jpy ?? "-"}`} />
+                          <AdminPurchaseFact label="售價" value={`TWD ${task.sale_price_twd}`} />
+                        </dl>
+                        {task.helper_note ? (
+                          <InsightBanner body={task.helper_note} title="小幫手回報" tone="neutral" />
+                        ) : null}
+                        {task.status === "review_pending" ? (
+                          <InsightBanner
+                            body="審核通過後仍會等待小幫手最後確認；此時還不會建立暫存訂單。"
+                            title="挑臉照片待審"
+                            tone="amber"
+                          />
+                        ) : null}
+                        {task.status === "approved_pending_helper_confirmation" ? (
+                          <InsightBanner
+                            body="請等小幫手確認實際買到數量。確認後才會變成 completed 並出現在暫存訂單預覽。"
+                            title="已通過，待小幫手最終確認"
+                            tone="green"
+                          />
+                        ) : null}
                       </div>
                       {task.status === "review_pending" ? (
                         <div className="flex flex-wrap gap-2">
@@ -990,19 +825,10 @@ function AdminLiveReturn({
                         </div>
                       ) : null}
                     </div>
-                    {task.photos?.length ? (
-                      <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5">
-                        {task.photos.map((photo: any) => (
-                          <a href={photo.signed_url} key={photo.id} target="_blank" rel="noreferrer">
-                            <img
-                              alt={photo.photo_role}
-                              className="aspect-square w-full rounded-md object-cover"
-                              src={photo.signed_url}
-                            />
-                          </a>
-                        ))}
-                      </div>
-                    ) : null}
+                    <AdminPurchasePhotos
+                      endpoint={`/api/admin/live/purchase-tasks/${encodeURIComponent(task.id)}?tripId=${encodeURIComponent(selectedTrip.id)}`}
+                      photoCount={Number(task.photo_count || task.photos?.length || 0)}
+                    />
                   </article>
                 ))}
               </div>
@@ -1013,8 +839,13 @@ function AdminLiveReturn({
           {selectedSection === "staging" ? (
           <section className="grid gap-3">
             <SectionTitle title="暫存訂單預覽" />
+            <InsightBanner
+              body={`目前 ${visibleStagingPreviews.length} 筆可預覽。只有 completed 採買會出現在這裡；挑臉待審、待小幫手確認、取消、缺貨與找不到都會被排除。行程結束後仍需進入審核合併，才會寫入主訂單。`}
+              title="這裡仍是暫存資料"
+              tone={visibleStagingPreviews.length ? "neutral" : "amber"}
+            />
             {visibleStagingPreviews.length === 0 ? (
-              <EmptyPanel title="尚無完成採買" body="只有 completed 採買任務會出現在此預覽；review、取消、缺貨與找不到都不會進入。" />
+              <EmptyPanel title="尚無完成採買" body="若有挑臉任務，需管理員通過並由小幫手最終確認後才會出現在此預覽。" />
             ) : (
               <div className="grid gap-2">
                 {visibleStagingPreviews.map((preview: any) => (
@@ -1591,15 +1422,6 @@ function EmptyPanel({ body, title }: { body: string; title: string }) {
   return <EmptyState body={body} title={title} />;
 }
 
-function groupSitePhotosByTripId(batches: any[]) {
-  const groups: Record<string, any[]> = {};
-  for (const batch of batches) {
-    if (!groups[batch.trip_id]) groups[batch.trip_id] = [];
-    groups[batch.trip_id].push(...(batch.photos || []));
-  }
-  return groups;
-}
-
 function adminTripNextAction(status: string) {
   if (status === "arrived") return "小幫手已抵達，確認現場可連線後請啟用。";
   if (status === "departed") return "小幫手前往中，等待抵達回報。";
@@ -1676,6 +1498,23 @@ function purchaseStatusLabel(status: string) {
   if (status === "not_found") return "找不到";
   if (status === "canceled") return "已取消";
   return status;
+}
+
+function purchaseStatusTone(status: string): "amber" | "blue" | "green" | "neutral" | "red" {
+  if (status === "completed") return "green";
+  if (status === "review_pending" || status === "approved_pending_helper_confirmation") return "amber";
+  if (status === "unavailable" || status === "not_found" || status === "canceled") return "red";
+  if (status === "open") return "blue";
+  return "neutral";
+}
+
+function AdminPurchaseFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md bg-muted/45 px-3 py-2">
+      <dt className="text-xs text-muted-foreground">{label}</dt>
+      <dd className="mt-0.5 font-semibold">{value}</dd>
+    </div>
+  );
 }
 
 function rebuyStatusLabel(status: string) {
@@ -1773,8 +1612,8 @@ function adminDashboardSections(
 ) {
   const liveSectionMap: Record<LiveSection, string[]> = {
     photos: [],
-    purchase: ["trips", "purchaseTasks"],
-    quote: ["trips", "quoteTasks"],
+    purchase: [],
+    quote: [],
     staging: ["trips", "stagingOrderPreviews"],
   };
   const sectionsByView: Record<string, string[]> = {
@@ -1789,7 +1628,7 @@ function adminDashboardSections(
           : ["summary"],
     merge: ["trips", "stagingOrderPreviews", "stagingMergeJobs"],
     rebuy: ["helpers", "purchaseTasks", "rebuyTasks"],
-    tasks: ["trips", "sitePhotoBatches"],
+    tasks: ["trips"],
   };
   return sectionsByView[view] || sectionsByView.home;
 }

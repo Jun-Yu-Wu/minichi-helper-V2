@@ -14,12 +14,16 @@ async function authorizeAdminByAllowlist(authClient) {
   if (error || !data?.user) {
     throw new AdminAuthorizationError("unauthenticated", 401, "Authentication is required.");
   }
+  return authorizeAdminUserByAllowlist(data.user);
+}
+
+function authorizeAdminUserByAllowlist(user) {
   const allowed = adminEmails();
-  const email = String(data.user.email || "").trim().toLowerCase();
+  const email = String(user.email || "").trim().toLowerCase();
   if (!email || !allowed.has(email)) {
     throw new AdminAuthorizationError("admin_access_required", 403, "Admin access is required.");
   }
-  return { email, user: data.user };
+  return { email, user };
 }
 
 function isAdminAuthorizationError(error) {
@@ -29,5 +33,6 @@ function isAdminAuthorizationError(error) {
 module.exports = {
   AdminAuthorizationError,
   authorizeAdminByAllowlist,
+  authorizeAdminUserByAllowlist,
   isAdminAuthorizationError,
 };

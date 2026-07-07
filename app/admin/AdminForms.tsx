@@ -17,6 +17,7 @@ import {
 import { Button } from "../components/ui/button";
 
 const initialState: AdminActionResult = {};
+const customerNicknameCache = new Map<string, string[]>();
 
 export function CreateHelperForm() {
   const [state, action, pending] = useActionState(createHelperAction, initialState);
@@ -209,30 +210,141 @@ export function RepairTripForm({
 }
 
 type QuoteTaskFormProps = {
-  availablePhotos: Array<{
-    id: string;
-    original_filename?: string | null;
-    saved_by_admin?: boolean;
-    signed_url?: string;
-    sort_order: number;
-  }>;
   taskType: "detail" | "quote" | "quote_and_detail";
-  trip: { id: string; status: string; trip_name: string };
+  trip: {
+    helper_display_name?: string | null;
+    id: string;
+    status: string;
+    trip_name: string;
+  };
 };
 
 export function CreateQuoteTaskForm(props: QuoteTaskFormProps) {
-  if (props.taskType === "detail") {
-    return <CreateUploadedDetailTaskForm trip={props.trip} />;
-  }
-  return <CreateSitePhotoQuoteTaskForm {...props} />;
+  return <CreateUploadedQuoteTaskForm taskType={props.taskType} trip={props.trip} />;
+}
+
+type TaskCategory = "purchase" | "quote";
+type TaskSubType = "detail" | "face_check" | "quote" | "quote_and_detail" | "standard";
+
+const quoteTaskTypes = [
+  { id: "quote", label: "報價", body: "請小幫手回傳商品價格。" },
+  { id: "detail", label: "細圖", body: "請小幫手補拍商品細節。" },
+  { id: "quote_and_detail", label: "報價＋細圖", body: "同時回傳價格與商品細節照。" },
+] as const;
+
+const purchaseTaskTypes = [
+  { id: "standard", label: "一般採買", body: "發布一般數量的採買指示。" },
+  { id: "face_check", label: "挑臉採買", body: "採買後需由管理員審核商品狀態。" },
+] as const;
+
+export function TaskSubtypePublisher({
+  category,
+  initialSubType,
+  trip,
+}: {
+  category: TaskCategory;
+  initialSubType?: string;
+  trip: QuoteTaskFormProps["trip"];
+}) {
+  const options = category === "quote" ? quoteTaskTypes : purchaseTaskTypes;
+  const [subType, setSubType] = useState<TaskSubType | undefined>(() =>
+    options.some((option) => option.id === initialSubType)
+      ? initialSubType as TaskSubType
+      : undefined,
+  );
+
+  useEffect(() => {
+    setSubType(
+      options.some((option) => option.id === initialSubType)
+        ? initialSubType as TaskSubType
+        : undefined,
+    );
+  }, [category, initialSubType, trip.id]);
+
+  const selectedOption = options.find((option) => option.id === subType);
+
+  return (
+    <>
+      <ClientTaskStep number="3" title="選擇細任務">
+        <div className="grid gap-3 sm:grid-cols-3">
+          {options.map((option) => (
+            <button
+              aria-pressed={subType === option.id}
+              className={`rounded-xl border p-4 text-left shadow-sm transition ${
+                subType === option.id
+                  ? "border-primary bg-primary/5 ring-1 ring-primary"
+                  : "bg-card hover:border-primary/30 hover:bg-accent/40"
+              }`}
+              key={option.id}
+              type="button"
+              onClick={() => setSubType(option.id)}
+            >
+              <p className="font-semibold">{option.label}</p>
+              <p className="mt-2 text-sm text-muted-foreground">{option.body}</p>
+            </button>
+          ))}
+        </div>
+      </ClientTaskStep>
+
+      {selectedOption ? (
+        <ClientTaskStep
+          number="4"
+          title={category === "quote" ? `發布${selectedOption.label}任務` : "建立採買內容"}
+        >
+          <article className="rounded-xl border bg-card p-4 shadow-sm">
+            <div>
+              <h3 className="font-semibold">{trip.trip_name}</h3>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {trip.helper_display_name || "未指派"} · {selectedOption.label}
+              </p>
+            </div>
+            {category === "quote" && isQuoteTaskSubType(subType) ? (
+              <CreateQuoteTaskForm taskType={subType} trip={trip} />
+            ) : category === "purchase" ? (
+              <CreatePurchaseTaskForm
+                requiresFaceCheck={subType === "face_check"}
+                trip={trip}
+              />
+            ) : null}
+          </article>
+        </ClientTaskStep>
+      ) : null}
+    </>
+  );
+}
+
+function ClientTaskStep({
+  children,
+  number,
+  title,
+}: {
+  children: React.ReactNode;
+  number: string;
+  title: string;
+}) {
+  return (
+    <section className="grid gap-3 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
+      <div className="flex items-center gap-2">
+        <span className="flex size-7 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+          {number}
+        </span>
+        <h3 className="font-semibold">{title}</h3>
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function isQuoteTaskSubType(
+  value?: TaskSubType,
+): value is QuoteTaskFormProps["taskType"] {
+  return value === "quote" || value === "detail" || value === "quote_and_detail";
 }
 
 export function CreateRebuyTaskForm({
-  customerNicknames,
   helpers,
   purchaseTasks,
 }: {
-  customerNicknames: string[];
   helpers: Array<{ display_name: string; id: string; is_active: boolean }>;
   purchaseTasks: Array<{
     id: string;
@@ -373,7 +485,6 @@ export function CreateRebuyTaskForm({
       <div className="grid gap-3 sm:grid-cols-2">
         <input name="productName" placeholder="商品名稱（手動建立必填）" disabled={pending} />
         <CustomerNicknameInput
-          customerNicknames={customerNicknames}
           disabled={pending}
           placeholder="客人 LINE 名稱（從客戶主檔建議）"
           required={false}
@@ -442,11 +553,9 @@ export function CreateRebuyTaskForm({
 }
 
 export function CreatePurchaseTaskForm({
-  customerNicknames,
   requiresFaceCheck,
   trip,
 }: {
-  customerNicknames: string[];
   requiresFaceCheck: boolean;
   trip: { id: string; status: string; trip_name: string };
 }) {
@@ -490,6 +599,17 @@ export function CreatePurchaseTaskForm({
       ...current,
       ...selected.map((photo, index) => ({ ...photo, sortOrder: current.length + index })),
     ]);
+    for (const photo of selected.filter((item) => !item.error)) {
+      updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" });
+      void uploadAdminTaskPhoto(photo, trip.id)
+        .then((uploaded) => updatePhoto(photo.clientPhotoId, uploaded))
+        .catch((error) => {
+          updatePhoto(photo.clientPhotoId, {
+            error: error instanceof Error ? error.message : "照片上傳失敗。",
+            status: "failed",
+          });
+        });
+    }
   }
 
   function removePhoto(clientPhotoId: string) {
@@ -569,17 +689,31 @@ export function CreatePurchaseTaskForm({
       <input name="tripId" type="hidden" value={trip.id} />
       {requiresFaceCheck ? <input name="requiresFaceCheck" type="hidden" value="on" /> : null}
       <div className="grid gap-3 sm:grid-cols-2">
-        <CustomerNicknameInput
-          customerNicknames={customerNicknames}
-          disabled={!canCreate || pending}
-          key={formResetKey}
-        />
-        <input name="productName" placeholder="商品名稱" required disabled={!canCreate || pending} />
-        <input name="quantity" inputMode="numeric" min="1" placeholder="數量" required disabled={!canCreate || pending} />
-        <input name="originalPriceJpy" inputMode="numeric" min="0" placeholder="原價 JPY" required disabled={!canCreate || pending} />
-        <input name="salePriceTwd" inputMode="numeric" min="0" placeholder="售價 TWD" required disabled={!canCreate || pending} />
+        <label className="grid gap-1 text-sm">
+          <span className="font-medium">LINE 社群暱稱</span>
+          <CustomerNicknameInput disabled={!canCreate || pending} key={formResetKey} />
+        </label>
+        <label className="grid gap-1 text-sm">
+          <span className="font-medium">商品名稱</span>
+          <input name="productName" placeholder="例如：限定色側背包" required disabled={!canCreate || pending} />
+        </label>
+        <label className="grid gap-1 text-sm">
+          <span className="font-medium">採買數量</span>
+          <input name="quantity" inputMode="numeric" min="1" placeholder="1" required disabled={!canCreate || pending} />
+        </label>
+        <label className="grid gap-1 text-sm">
+          <span className="font-medium">商品原價（JPY）</span>
+          <input name="originalPriceJpy" inputMode="numeric" min="0" placeholder="1200" required disabled={!canCreate || pending} />
+        </label>
+        <label className="grid gap-1 text-sm">
+          <span className="font-medium">客人售價（TWD）</span>
+          <input name="salePriceTwd" inputMode="numeric" min="0" placeholder="380" required disabled={!canCreate || pending} />
+        </label>
       </div>
-      <textarea name="note" placeholder="採買備註，可留空" disabled={!canCreate || pending} />
+      <label className="grid gap-1 text-sm">
+        <span className="font-medium">給小幫手的備註（選填）</span>
+        <textarea name="note" placeholder="尺寸、顏色、版本或現場確認重點" disabled={!canCreate || pending} />
+      </label>
       <div className="grid gap-2">
         <p className="text-sm font-medium">採買參考照（必填）</p>
         <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-3 text-center">
@@ -630,7 +764,16 @@ export function CreatePurchaseTaskForm({
         ) : null}
       </div>
       <ActionMessage state={state} />
-      <Button disabled={!canCreate || pending || !photos.length || photos.some((photo) => Boolean(photo.error))} size="sm" type="submit">
+      <Button
+        disabled={
+          !canCreate ||
+          pending ||
+          !photos.length ||
+          photos.some((photo) => Boolean(photo.error) || photo.status !== "uploaded")
+        }
+        size="sm"
+        type="submit"
+      >
         {pending ? "發布中..." : requiresFaceCheck ? "發布挑臉採買" : "發布一般採買"}
       </Button>
     </form>
@@ -638,27 +781,49 @@ export function CreatePurchaseTaskForm({
 }
 
 export function QuickPublishPurchaseForm({
-  customerNicknames,
   photo,
   task,
 }: {
-  customerNicknames: string[];
   photo: any;
   task: any;
 }) {
   const [state, action, pending] = useActionState(quickPublishPurchaseTaskAction, initialState);
+  const [expanded, setExpanded] = useState(false);
   const latestReply = photo.latest_reply || {};
   const defaultProductName = photo.product_name || task.product_name || "";
   const canPublish = photo.reply_status === "replied";
+  if (photo.reply_status === "converted_to_purchase") {
+    return <p className="mt-2 text-sm font-medium text-primary">這張回覆已轉為採買任務。</p>;
+  }
+  if (!canPublish) return null;
+  if (!expanded) {
+    return (
+      <Button
+        className="mt-2 w-full sm:w-fit"
+        size="sm"
+        type="button"
+        variant="outline"
+        onClick={() => setExpanded(true)}
+      >
+        轉為採買
+      </Button>
+    );
+  }
   return (
-    <form action={action} className="mt-3 grid gap-2 rounded-md border bg-card p-3">
+    <form action={action} className="mt-3 grid gap-3 rounded-lg border bg-card p-3">
       <input name="tripId" type="hidden" value={task.trip_id} />
       <input name="quoteTaskPhotoId" type="hidden" value={photo.id} />
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="font-semibold">建立採買任務</p>
+          <p className="text-xs text-muted-foreground">只轉換目前這一張回覆，來源照片與報價會一併保留。</p>
+        </div>
+        <Button size="sm" type="button" variant="ghost" onClick={() => setExpanded(false)}>
+          收合
+        </Button>
+      </div>
       <div className="grid gap-2 sm:grid-cols-2">
-        <CustomerNicknameInput
-          customerNicknames={customerNicknames}
-          disabled={!canPublish || pending}
-        />
+        <CustomerNicknameInput disabled={!canPublish || pending} />
         <input name="productName" placeholder="商品名稱" defaultValue={defaultProductName} required disabled={!canPublish || pending} />
         <input name="quantity" inputMode="numeric" min="1" placeholder="數量" defaultValue="1" required disabled={!canPublish || pending} />
         <input
@@ -678,33 +843,75 @@ export function QuickPublishPurchaseForm({
       <textarea name="note" placeholder="採買備註，可留空" disabled={!canPublish || pending} />
       <ActionMessage state={state} />
       <Button disabled={!canPublish || pending} size="sm" type="submit" variant="outline">
-        {pending ? "發布中..." : photo.reply_status === "converted_to_purchase" ? "已轉採買" : "快速發布採買"}
+        {pending ? "發布中..." : "確認發布採買"}
       </Button>
     </form>
   );
 }
 
 function CustomerNicknameInput({
-  customerNicknames,
   disabled,
   placeholder = "LINE 社群暱稱",
   required = true,
 }: {
-  customerNicknames: string[];
   disabled: boolean;
   placeholder?: string;
   required?: boolean;
 }) {
   const [focused, setFocused] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
   const [value, setValue] = useState("");
-  const normalizedValue = value.trim().toLocaleLowerCase("zh-TW");
-  const suggestions = normalizedValue
-    ? customerNicknames
-        .filter((nickname) =>
-          nickname.toLocaleLowerCase("zh-TW").includes(normalizedValue),
-        )
-        .slice(0, 8)
-    : customerNicknames.slice(0, 8);
+  const normalizedValue = value.trim();
+
+  useEffect(() => {
+    if (!focused || !normalizedValue) {
+      setSuggestions([]);
+      setLoading(false);
+      return;
+    }
+    const cached = customerNicknameCache.get(normalizedValue);
+    if (cached) {
+      setSuggestions(cached);
+      setLoading(false);
+      return;
+    }
+    const cachedPrefix = Array.from(customerNicknameCache.entries())
+      .filter(([query]) => normalizedValue.startsWith(query))
+      .sort((a, b) => b[0].length - a[0].length)[0];
+    if (cachedPrefix) {
+      setSuggestions(
+        cachedPrefix[1].filter((nickname) =>
+          nickname.toLowerCase().includes(normalizedValue.toLowerCase()),
+        ),
+      );
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setLoading(true);
+      try {
+        const response = await fetch(
+          `/api/admin/customers/search?q=${encodeURIComponent(normalizedValue)}`,
+          { signal: controller.signal },
+        );
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || "搜尋失敗。");
+        const nextSuggestions = Array.isArray(body.nicknames) ? body.nicknames : [];
+        customerNicknameCache.set(normalizedValue, nextSuggestions);
+        setSuggestions(nextSuggestions);
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setSuggestions([]);
+        }
+      } finally {
+        if (!controller.signal.aborted) setLoading(false);
+      }
+    }, cachedPrefix ? 60 : 80);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [focused, normalizedValue]);
 
   return (
     <div className="relative">
@@ -723,12 +930,14 @@ function CustomerNicknameInput({
         onChange={(event) => setValue(event.currentTarget.value)}
         onFocus={() => setFocused(true)}
       />
-      {focused && suggestions.length ? (
+      {focused && normalizedValue && (loading || suggestions.length > 0) ? (
         <div
           className="absolute z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-md border bg-popover p-1 text-popover-foreground shadow-md"
           role="listbox"
         >
-          {suggestions.map((nickname) => (
+          {loading ? (
+            <p className="px-3 py-2 text-sm text-muted-foreground">搜尋中...</p>
+          ) : suggestions.map((nickname) => (
             <button
               className="block w-full rounded-sm px-3 py-2 text-left text-sm hover:bg-accent hover:text-accent-foreground"
               key={nickname}
@@ -749,54 +958,6 @@ function CustomerNicknameInput({
   );
 }
 
-function CreateSitePhotoQuoteTaskForm({
-  availablePhotos,
-  taskType,
-  trip,
-}: QuoteTaskFormProps) {
-  const [state, action, pending] = useActionState(createQuoteTaskAction, initialState);
-  const canCreate = availablePhotos.length > 0 && !["ended", "canceled"].includes(trip.status);
-  return (
-    <form action={action} className="mt-3 grid gap-3 border-t pt-3">
-      <input name="tripId" type="hidden" value={trip.id} />
-      <input name="taskType" type="hidden" value={taskType} />
-      <div className="grid gap-2">
-        <input name="productName" placeholder="商品名稱，可留空" disabled={!canCreate} />
-      </div>
-      <textarea name="instruction" placeholder="任務說明，可留空" disabled={!canCreate} />
-      {availablePhotos.length ? (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {availablePhotos.map((photo) => (
-            <label key={photo.id} className="grid cursor-pointer gap-2 rounded-md border bg-background p-2">
-              {photo.signed_url ? (
-                <img
-                  alt={photo.original_filename || "site photo"}
-                  className="aspect-square w-full rounded-md object-cover"
-                  src={photo.signed_url}
-                />
-              ) : null}
-              <span className="flex items-center gap-2 text-sm">
-                <input name="photoIds" type="checkbox" value={photo.id} />
-                <span className="min-w-0 truncate">
-                  {photo.sort_order + 1}. {photo.saved_by_admin ? "已保存" : "現場照"}
-                </span>
-              </span>
-            </label>
-          ))}
-        </div>
-      ) : (
-        <p className="rounded-md border bg-muted/40 p-3 text-sm text-muted-foreground">
-          這個行程還沒有可建立任務的現場照片。
-        </p>
-      )}
-      <ActionMessage state={state} />
-      <Button disabled={!canCreate || pending} size="sm" type="submit" variant="outline">
-        {pending ? "發布中..." : "發布詢價/細節任務"}
-      </Button>
-    </form>
-  );
-}
-
 type AdminTaskUploadPhoto = {
   byteSize: number;
   clientPhotoId: string;
@@ -812,9 +973,11 @@ type AdminTaskUploadPhoto = {
 
 const MAX_ADMIN_TASK_PHOTO_BYTES = 8 * 1024 * 1024;
 
-function CreateUploadedDetailTaskForm({
+function CreateUploadedQuoteTaskForm({
+  taskType,
   trip,
 }: {
+  taskType: QuoteTaskFormProps["taskType"];
   trip: QuoteTaskFormProps["trip"];
 }) {
   const [photos, setPhotos] = useState<AdminTaskUploadPhoto[]>([]);
@@ -855,6 +1018,17 @@ function CreateUploadedDetailTaskForm({
       ...current,
       ...selected.map((photo, index) => ({ ...photo, sortOrder: current.length + index })),
     ]);
+    for (const photo of selected.filter((item) => !item.error)) {
+      updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" });
+      void uploadAdminTaskPhoto(photo, trip.id)
+        .then((uploaded) => updatePhoto(photo.clientPhotoId, uploaded))
+        .catch((error) => {
+          updatePhoto(photo.clientPhotoId, {
+            error: error instanceof Error ? error.message : "照片上傳失敗。",
+            status: "failed",
+          });
+        });
+    }
   }
 
   function removePhoto(clientPhotoId: string) {
@@ -867,7 +1041,7 @@ function CreateUploadedDetailTaskForm({
     });
   }
 
-  async function submitDetailTask(event: React.FormEvent<HTMLFormElement>) {
+  async function submitQuoteTask(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const form = event.currentTarget;
     if (!photos.length || photos.some((photo) => photo.error)) {
@@ -930,16 +1104,16 @@ function CreateUploadedDetailTaskForm({
   }
 
   return (
-    <form className="mt-3 grid gap-3 border-t pt-3" onSubmit={submitDetailTask}>
+    <form className="mt-3 grid gap-3 border-t pt-3" onSubmit={submitQuoteTask}>
       <input name="tripId" type="hidden" value={trip.id} />
-      <input name="taskType" type="hidden" value="detail" />
+      <input name="taskType" type="hidden" value={taskType} />
       <input name="productName" placeholder="商品名稱，可留空" disabled={pending} />
       <textarea name="instruction" placeholder="任務說明，可留空" disabled={pending} />
       <div className="grid gap-2">
         <p className="text-sm font-medium">上傳照片（必填）</p>
         <label className="flex min-h-24 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-4 text-center">
           <ImageUp className="size-5" aria-hidden="true" />
-          <span className="text-sm">選擇要請小幫手補拍細節的照片</span>
+          <span className="text-sm">選擇要發布{adminQuoteTaskTypeLabel(taskType)}任務的照片</span>
           <input
             accept="image/*"
             className="sr-only"
@@ -955,14 +1129,19 @@ function CreateUploadedDetailTaskForm({
         </label>
       </div>
       {photos.length ? (
-        <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {photos.map((photo) => (
-            <div className="rounded-md border bg-background p-2" key={photo.clientPhotoId}>
-              <img
-                alt={photo.originalFilename}
-                className="aspect-square w-full rounded-md object-cover"
-                src={photo.objectUrl}
-              />
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
+          {photos.map((photo, index) => (
+            <div className="rounded-lg border bg-background p-2" key={photo.clientPhotoId}>
+              <div className="relative">
+                <img
+                  alt={photo.originalFilename}
+                  className="aspect-square w-full rounded-md object-cover"
+                  src={photo.objectUrl}
+                />
+                <span className="absolute left-2 top-2 flex size-7 items-center justify-center rounded-full bg-black/70 text-xs font-semibold text-white">
+                  {index + 1}
+                </span>
+              </div>
               <div className="mt-2 flex items-start justify-between gap-2">
                 <div className="min-w-0">
                   <p className="truncate text-sm font-medium">{photo.originalFilename}</p>
@@ -986,14 +1165,24 @@ function CreateUploadedDetailTaskForm({
       ) : null}
       <ActionMessage state={state} />
       <Button
-        disabled={pending || !photos.length || photos.some((photo) => Boolean(photo.error))}
+        disabled={
+          pending ||
+          !photos.length ||
+          photos.some((photo) => Boolean(photo.error) || photo.status !== "uploaded")
+        }
         size="sm"
         type="submit"
       >
-        {pending ? "上傳並發布中..." : "上傳照片並發布細節照任務"}
+        送出
       </Button>
     </form>
   );
+}
+
+function adminQuoteTaskTypeLabel(taskType: QuoteTaskFormProps["taskType"]) {
+  if (taskType === "quote") return "報價";
+  if (taskType === "detail") return "細圖";
+  return "報價＋細圖";
 }
 
 async function uploadAdminTaskPhoto(photo: AdminTaskUploadPhoto, tripId: string) {

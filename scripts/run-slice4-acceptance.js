@@ -271,6 +271,7 @@ async function main() {
       helperNote: "Bought two, one unavailable.",
       idempotencyKey: `codex-slice4-manual-response-${Date.now()}`,
       purchaseTaskId: manualTask.id,
+      remainingResolution: "unavailable",
       unavailableQuantity: "1",
     };
     const completedManual = await service.respondPurchaseTask(pool, manualResponse);

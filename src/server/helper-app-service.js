@@ -80,7 +80,7 @@ async function listAdminDashboard(
       ? listQuoteTasks(database, { tripIds: workflowTripIds })
       : Promise.resolve([]),
     included.has("purchaseTasks")
-      ? listPurchaseTasks(database, { tripIds: workflowTripIds })
+      ? listPurchaseTasks(database, { includePhotos: false, tripIds: workflowTripIds })
       : Promise.resolve([]),
     included.has("rebuyTasks")
       ? listRebuyTasks(database, { includePrivateCustomerData: true })
@@ -158,6 +158,24 @@ async function listCustomerNicknames(database) {
      from main.customers
      where nullif(btrim(line_community_name), '') is not null
      order by line_community_name asc`,
+  );
+  return result.rows.map((row) => row.line_community_name);
+}
+
+async function searchCustomerNicknames(database, input, limit = 8) {
+  const query = optionalText(input);
+  if (!query) return [];
+  const normalizedLimit = Math.min(Math.max(Number(limit) || 8, 1), 20);
+  const result = await database.query(
+    `select line_community_name
+     from main.customers
+     where nullif(btrim(line_community_name), '') is not null
+       and position(lower($1) in lower(line_community_name)) > 0
+     order by
+       case when lower(line_community_name) like lower($1) || '%' then 0 else 1 end,
+       line_community_name asc
+     limit $2`,
+    [query, normalizedLimit],
   );
   return result.rows.map((row) => row.line_community_name);
 }
@@ -258,6 +276,7 @@ async function getHelperWorkspace(database, authUserId, now = new Date(), option
     included.has("purchaseTasks")
       ? listPurchaseTasks(database, {
           helperId: profile.id,
+          includePhotos: false,
           tripIds: workflowTripIds,
         })
       : Promise.resolve([]),
@@ -392,10 +411,25 @@ async function listSettlements(database, { helperId = null } = {}) {
   return result.rows;
 }
 
-async function listPurchaseTasks(database, { helperId = null, tripIds = null } = {}) {
+async function listPurchaseTasks(
+  database,
+  {
+    activeOnly = false,
+    authUserId = null,
+    helperId = null,
+    includePhotos = true,
+    taskIds = null,
+    tripIds = null,
+  } = {},
+) {
   if (tripIds && tripIds.length === 0) return [];
+  if (taskIds && taskIds.length === 0) return [];
   const conditions = [];
   const params = [];
+  if (authUserId) {
+    params.push(authUserId);
+    conditions.push(`hp.auth_user_id = $${params.length}`);
+  }
   if (helperId) {
     params.push(helperId);
     conditions.push(`pt.helper_id = $${params.length}`);
@@ -404,7 +438,39 @@ async function listPurchaseTasks(database, { helperId = null, tripIds = null } =
     params.push(tripIds);
     conditions.push(`pt.trip_id = any($${params.length}::uuid[])`);
   }
+  if (taskIds) {
+    params.push(taskIds);
+    conditions.push(`pt.id = any($${params.length}::uuid[])`);
+  }
+  if (activeOnly) {
+    conditions.push("hp.is_active = true");
+    conditions.push("t.status = 'active'");
+  }
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+  if (!includePhotos) {
+    const result = await database.query(
+      `select pt.id, pt.trip_id, pt.helper_id, pt.source_quote_task_id,
+              pt.source_quote_task_photo_id, pt.source_quote_reply_id,
+              pt.line_community_name, pt.product_name, pt.quantity,
+              pt.original_price_jpy, pt.sale_price_twd, pt.note,
+              pt.requires_face_check, pt.status, pt.completed_quantity,
+              pt.unavailable_quantity, pt.helper_note, pt.face_check_note,
+              pt.admin_review_note, pt.created_at, pt.updated_at, pt.completed_at,
+              t.trip_name, t.business_date, t.timezone, t.status as trip_status,
+              hp.display_name as helper_display_name,
+              count(ptp.id)::int as photo_count,
+              '[]'::jsonb as photos
+       from helper_app.purchase_tasks pt
+       join helper_app.trips t on t.id = pt.trip_id
+       join helper_app.helper_profiles hp on hp.id = pt.helper_id
+       left join helper_app.purchase_task_photos ptp on ptp.purchase_task_id = pt.id
+       ${where}
+       group by pt.id, t.id, hp.id
+       order by pt.created_at desc`,
+      params,
+    );
+    return result.rows;
+  }
   const result = await database.query(
     `select pt.id, pt.trip_id, pt.helper_id, pt.source_quote_task_id,
             pt.source_quote_task_photo_id, pt.source_quote_reply_id,
@@ -415,6 +481,7 @@ async function listPurchaseTasks(database, { helperId = null, tripIds = null } =
             pt.admin_review_note, pt.created_at, pt.updated_at, pt.completed_at,
             t.trip_name, t.business_date, t.timezone, t.status as trip_status,
             hp.display_name as helper_display_name,
+            count(ptp.id)::int as photo_count,
             coalesce(
               jsonb_agg(
                 jsonb_build_object(
@@ -574,10 +641,37 @@ async function listStagingMergeJobs(database) {
   return result.rows;
 }
 
-async function listQuoteTasks(database, { helperId = null, tripIds = null } = {}) {
-  if (tripIds && tripIds.length === 0) return [];
+/**
+ * @param {object} database
+ * @param {{
+ *   activeOnly?: boolean,
+ *   authUserId?: string | null,
+ *   helperId?: string | null,
+ *   taskIds?: string[] | null,
+ *   tripIds?: string[] | null
+ * }} [options]
+ */
+async function listQuoteTasks(
+  database,
+  options = {},
+) {
+  const {
+    activeOnly = false,
+    authUserId = null,
+    helperId = null,
+    taskIds = null,
+    tripIds = null,
+  } = options;
+  if (
+    (tripIds && tripIds.length === 0) ||
+    (taskIds && taskIds.length === 0)
+  ) return [];
   const conditions = [];
   const params = [];
+  if (authUserId) {
+    params.push(authUserId);
+    conditions.push(`hp.auth_user_id = $${params.length}`);
+  }
   if (helperId) {
     params.push(helperId);
     conditions.push(`qt.helper_id = $${params.length}`);
@@ -585,6 +679,14 @@ async function listQuoteTasks(database, { helperId = null, tripIds = null } = {}
   if (tripIds) {
     params.push(tripIds);
     conditions.push(`qt.trip_id = any($${params.length}::uuid[])`);
+  }
+  if (taskIds) {
+    params.push(taskIds);
+    conditions.push(`qt.id = any($${params.length}::uuid[])`);
+  }
+  if (activeOnly) {
+    conditions.push("hp.is_active = true");
+    conditions.push("t.status = 'active'");
   }
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
   const result = await database.query(
@@ -632,6 +734,62 @@ async function listQuoteTasks(database, { helperId = null, tripIds = null } = {}
      group by qt.id, t.id, hp.id
      order by qt.created_at desc`,
     params,
+  );
+  return result.rows;
+}
+
+async function listAuthorizedHelperQuoteTaskSummaries(
+  database,
+  { authUserId, tripId },
+) {
+  const result = await database.query(
+    `select qt.id, qt.task_type, qt.product_name, qt.instruction, qt.status,
+            qt.created_at,
+            count(qtp.id)::int as photo_count,
+            count(qtp.id) filter (
+              where qtp.reply_status in ('replied', 'converted_to_purchase')
+            )::int as replied_photo_count
+     from helper_app.quote_tasks qt
+     join helper_app.trips t on t.id = qt.trip_id
+     join helper_app.helper_profiles hp on hp.id = qt.helper_id
+     left join helper_app.quote_task_photos qtp on qtp.quote_task_id = qt.id
+     where qt.trip_id = $1
+       and hp.auth_user_id = $2
+       and hp.is_active = true
+       and t.status = 'active'
+     group by qt.id
+     order by qt.created_at desc`,
+    [
+      requiredText(tripId, "tripId"),
+      requiredText(authUserId, "authUserId"),
+    ],
+  );
+  return result.rows;
+}
+
+async function listAdminQuoteTaskSummaries(
+  database,
+  { tripId },
+) {
+  const result = await database.query(
+    `select qt.id, qt.trip_id, qt.helper_id, qt.task_type, qt.product_name,
+            qt.instruction, qt.status, qt.created_at, qt.updated_at,
+            t.trip_name, t.status as trip_status,
+            hp.display_name as helper_display_name,
+            count(qtp.id)::int as photo_count,
+            count(qtp.id) filter (
+              where qtp.reply_status in ('replied', 'converted_to_purchase')
+            )::int as replied_photo_count,
+            count(qtp.id) filter (where qtp.needs_review = true)::int as needs_review_count,
+            count(qtp.id) filter (where qtp.reply_status = 'converted_to_purchase')::int as converted_photo_count
+     from helper_app.quote_tasks qt
+     join helper_app.trips t on t.id = qt.trip_id
+     join helper_app.helper_profiles hp on hp.id = qt.helper_id
+     left join helper_app.quote_task_photos qtp on qtp.quote_task_id = qt.id
+     where qt.trip_id = $1
+     group by qt.id, t.id, hp.id
+     order by qt.created_at desc`,
+    [requiredText(tripId, "tripId")],
   );
   return result.rows;
 }
@@ -1214,7 +1372,7 @@ async function createQuoteTask(
     }
 
     let taskPhotos;
-    if (normalized.taskType === "detail") {
+    if (normalized.uploadedPhotos.length > 0) {
       const requiredPrefix = `helper-app/${trip.id}/admin-task-photos/`;
       for (const photo of normalized.uploadedPhotos) {
         if (!photo.storageKey.startsWith(requiredPrefix)) {
@@ -1264,7 +1422,7 @@ async function createQuoteTask(
     const task = taskResult.rows[0];
 
     for (const [index, photo] of taskPhotos.entries()) {
-      if (normalized.taskType === "detail") {
+      if (normalized.uploadedPhotos.length > 0) {
         await client.query(
           `insert into helper_app.media_objects
              (storage_key, media_kind, retention_status, original_filename, content_type, byte_size)
@@ -1875,6 +2033,12 @@ async function respondPurchaseTask(database, input) {
     if (completedQuantity < task.quantity && normalized.unavailableQuantity == null) {
       throw new HelperAppServiceError("invalid_input", "Partial purchases must explicitly resolve the remaining quantity.");
     }
+    if (completedQuantity < task.quantity && !normalized.remainingResolution) {
+      throw new HelperAppServiceError("invalid_input", "Partial purchases must state how the remaining quantity was resolved.");
+    }
+    if (completedQuantity < task.quantity && !normalized.helperNote) {
+      throw new HelperAppServiceError("invalid_input", "Partial purchases require a reason for the remaining quantity.");
+    }
     if (task.requires_face_check && task.status === "open") {
       if (!normalized.faceCheckPhoto) {
         throw new HelperAppServiceError("invalid_input", "Face-check photo is required.");
@@ -1957,7 +2121,13 @@ async function respondPurchaseTask(database, input) {
         task.id,
         completedQuantity,
         task.quantity - completedQuantity,
-        normalized.helperNote,
+        completedQuantity < task.quantity
+          ? formatPartialPurchaseNote(
+              normalized.helperNote,
+              task.quantity - completedQuantity,
+              normalized.remainingResolution,
+            )
+          : normalized.helperNote,
         normalized.idempotencyKey,
       ],
     );
@@ -1967,12 +2137,26 @@ async function respondPurchaseTask(database, input) {
       actor_helper_id: helper.id,
       actor_role: "helper",
       actor_user_id: normalized.authUserId,
-      after_state: { completedQuantity, purchaseTaskId: task.id },
+      after_state: {
+        completedQuantity,
+        purchaseTaskId: task.id,
+        remainingQuantity: task.quantity - completedQuantity,
+        remainingResolution: normalized.remainingResolution,
+      },
       before_state: { status: task.status },
       trip_id: task.trip_id,
     });
     return result.rows[0];
   });
+}
+
+function formatPartialPurchaseNote(note, remainingQuantity, remainingResolution) {
+  const labels = {
+    canceled: "取消",
+    not_found: "未找到",
+    unavailable: "缺貨",
+  };
+  return `未購買 ${remainingQuantity} 件：${labels[remainingResolution] || remainingResolution}。${note}`;
 }
 
 async function reviewFaceCheckPurchaseTask(database, input) {
@@ -2099,41 +2283,70 @@ async function submitQuotePhotoReply(
     quoteTaskPhotoId,
   });
   return withTransaction(database, async (client) => {
-    const helper = await findActiveHelperForUser(client, authUserId);
     const photoResult = await client.query(
-      `select qtp.*, qt.task_type
+      `select qtp.*, qt.task_type, hp.id as authorized_helper_id,
+              t.status as trip_status,
+              latest.detail_photos as previous_detail_photos
        from helper_app.quote_task_photos qtp
        join helper_app.quote_tasks qt on qt.id = qtp.quote_task_id
+       join helper_app.trips t on t.id = qtp.trip_id
+       join helper_app.helper_profiles hp
+         on hp.id = qtp.helper_id
+        and hp.auth_user_id = $2
+        and hp.is_active = true
+       left join lateral (
+         select qpr.detail_photos
+         from helper_app.quote_photo_replies qpr
+         where qpr.quote_task_photo_id = qtp.id
+           and qpr.helper_id = hp.id
+         order by qpr.updated_at desc
+         limit 1
+       ) latest on true
        where qtp.id = $1
-       for update of qtp`,
-      [normalized.quoteTaskPhotoId],
+       for update of qtp, t`,
+      [normalized.quoteTaskPhotoId, authUserId],
     );
     const taskPhoto = photoResult.rows[0];
     if (!taskPhoto) throw new HelperAppServiceError("photo_not_found", "Quote task photo was not found.");
-    if (taskPhoto.helper_id !== helper.id) {
-      throw new HelperAppServiceError("forbidden", "Quote task photo is not assigned to this helper.");
-    }
-    const trip = await lockTrip(client, taskPhoto.trip_id);
-    assertTripCanReplyQuote(trip);
+    assertTripCanReplyQuote({ status: taskPhoto.trip_status });
     if (taskPhoto.reply_status === "converted_to_purchase") {
       throw new HelperAppServiceError("already_converted", "Converted quote photos can no longer be edited.");
     }
-    assertReplyMatchesTaskType(taskPhoto.task_type, normalized);
+    let replyToSave = normalized;
+    if (
+      ["detail", "quote_and_detail"].includes(taskPhoto.task_type) &&
+      normalized.detailPhotos.length === 0
+    ) {
+      const previousDetailPhotos = Array.isArray(taskPhoto.previous_detail_photos)
+        ? taskPhoto.previous_detail_photos
+        : [];
+      if (previousDetailPhotos.length) {
+        replyToSave = {
+          ...normalized,
+          detailPhotos: previousDetailPhotos,
+        };
+      }
+    }
+    assertReplyMatchesTaskType(taskPhoto.task_type, replyToSave);
 
-    const existing = await client.query(
-      `select *
-       from helper_app.quote_photo_replies
-       where quote_task_photo_id = $1 and helper_id = $2 and idempotency_key = $3`,
-      [taskPhoto.id, helper.id, normalized.idempotencyKey],
-    );
-    if (existing.rows[0]) return existing.rows[0];
-
-    for (const detailPhoto of normalized.detailPhotos) {
+    if (normalized.detailPhotos.length) {
       await client.query(
         `insert into helper_app.media_objects
            (storage_key, media_kind, retention_status, original_filename,
             content_type, byte_size, uploaded_by_helper_id)
-         values ($1, 'quote_detail_reply_photo', 'task_evidence', $2, $3, $4, $5)
+         select photo.storage_key,
+                'quote_detail_reply_photo',
+                'task_evidence',
+                photo.original_filename,
+                photo.content_type,
+                photo.byte_size,
+                $2
+         from jsonb_to_recordset($1::jsonb) as photo(
+           storage_key text,
+           original_filename text,
+           content_type text,
+           byte_size bigint
+         )
          on conflict (storage_key) do update
          set media_kind = 'quote_detail_reply_photo',
              retention_status = 'task_evidence',
@@ -2141,51 +2354,80 @@ async function submitQuotePhotoReply(
              content_type = coalesce(excluded.content_type, helper_app.media_objects.content_type),
              byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)`,
         [
-          detailPhoto.storage_key,
-          detailPhoto.original_filename,
-          detailPhoto.content_type,
-          detailPhoto.byte_size,
-          helper.id,
+          JSON.stringify(normalized.detailPhotos),
+          taskPhoto.authorized_helper_id,
         ],
       );
     }
 
     const replyResult = await client.query(
-      `insert into helper_app.quote_photo_replies
-         (quote_task_photo_id, quote_task_id, trip_id, helper_id, idempotency_key,
-          price_jpy, note, detail_photos)
-       values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
-       returning *`,
+      `with inserted as (
+         insert into helper_app.quote_photo_replies
+           (quote_task_photo_id, quote_task_id, trip_id, helper_id, idempotency_key,
+            price_jpy, note, detail_photos)
+         values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+         on conflict (quote_task_photo_id, helper_id, idempotency_key) do nothing
+         returning *
+       )
+       select * from inserted
+       union all
+       select *
+       from helper_app.quote_photo_replies
+       where quote_task_photo_id = $1
+         and helper_id = $4
+         and idempotency_key = $5
+         and not exists (select 1 from inserted)
+       limit 1`,
       [
         taskPhoto.id,
         taskPhoto.quote_task_id,
         taskPhoto.trip_id,
-        helper.id,
+        taskPhoto.authorized_helper_id,
         normalized.idempotencyKey,
-        normalized.priceJpy,
-        normalized.note,
-        JSON.stringify(normalized.detailPhotos),
+        replyToSave.priceJpy,
+        replyToSave.note,
+        JSON.stringify(replyToSave.detailPhotos),
       ],
     );
     const reply = replyResult.rows[0];
 
     await client.query(
-      `update helper_app.quote_task_photos
-       set reply_status = 'replied',
-           needs_review = false,
+      `with updated_photo as (
+         update helper_app.quote_task_photos
+         set reply_status = 'replied',
+             needs_review = false,
+             updated_at = now()
+         where id = $1
+         returning quote_task_id
+       ),
+       summary as (
+         select u.quote_task_id,
+                count(qtp.id)::int as total,
+                count(qtp.id) filter (where qtp.reply_status = 'replied')::int as replied,
+                bool_or(qtp.needs_review)::boolean as has_review
+         from updated_photo u
+         join helper_app.quote_task_photos qtp on qtp.quote_task_id = u.quote_task_id
+         group by u.quote_task_id
+       )
+       update helper_app.quote_tasks qt
+       set status = case
+             when summary.has_review then 'needs_review'
+             when summary.total > 0 and summary.total = summary.replied then 'completed'
+             else 'open'
+           end,
            updated_at = now()
-       where id = $1`,
+       from summary
+       where qt.id = summary.quote_task_id`,
       [taskPhoto.id],
     );
-    await refreshQuoteTaskStatus(client, taskPhoto.quote_task_id);
     await insertAuditEvent(client, {
       action: "helper_quote_photo_replied",
-      actor_helper_id: helper.id,
+      actor_helper_id: taskPhoto.authorized_helper_id,
       actor_role: "helper",
       actor_user_id: authUserId,
       after_state: {
-        detailPhotoCount: normalized.detailPhotos.length,
-        priceJpy: normalized.priceJpy,
+        detailPhotoCount: replyToSave.detailPhotos.length,
+        priceJpy: replyToSave.priceJpy,
         quoteTaskId: taskPhoto.quote_task_id,
         quoteTaskPhotoId: taskPhoto.id,
         replyId: reply.id,
@@ -3575,17 +3817,14 @@ function normalizeQuoteTaskInput(input) {
         };
       })
     : [];
-  if (taskType === "detail" && uploadedPhotos.length === 0) {
-    throw new HelperAppServiceError("invalid_input", "At least one uploaded task photo is required.");
-  }
-  if (taskType !== "detail" && photoIds.length === 0) {
+  if (photoIds.length === 0 && uploadedPhotos.length === 0) {
     throw new HelperAppServiceError("invalid_input", "At least one task photo is required.");
   }
   if (taskType === "detail" && photoIds.length > 0) {
     throw new HelperAppServiceError("invalid_input", "Detail tasks must use uploaded task photos.");
   }
-  if (taskType !== "detail" && uploadedPhotos.length > 0) {
-    throw new HelperAppServiceError("invalid_input", "Only detail tasks may use uploaded task photos.");
+  if (photoIds.length > 0 && uploadedPhotos.length > 0) {
+    throw new HelperAppServiceError("invalid_input", "Use either selected site photos or uploaded task photos, not both.");
   }
   if (new Set(uploadedPhotos.map((photo) => photo.storageKey)).size !== uploadedPhotos.length) {
     throw new HelperAppServiceError("invalid_input", "Uploaded task photos must be unique.");
@@ -3712,11 +3951,24 @@ function normalizePurchaseResponseInput(input) {
   const unavailableText = optionalText(input.unavailableQuantity);
   const completedQuantity = completedText == null ? null : Number(completedText);
   const unavailableQuantity = unavailableText == null ? null : Number(unavailableText);
+  const remainingResolution = optionalText(input.remainingResolution);
   if (completedQuantity != null && (!Number.isInteger(completedQuantity) || completedQuantity <= 0)) {
     throw new HelperAppServiceError("invalid_input", "Completed quantity must be a positive integer.");
   }
   if (unavailableQuantity != null && (!Number.isInteger(unavailableQuantity) || unavailableQuantity < 0)) {
     throw new HelperAppServiceError("invalid_input", "Unavailable quantity must be a non-negative integer.");
+  }
+  if (
+    remainingResolution != null &&
+    !["canceled", "not_found", "unavailable"].includes(remainingResolution)
+  ) {
+    throw new HelperAppServiceError("invalid_input", "Invalid remaining quantity resolution.");
+  }
+  if (action === "complete" && unavailableQuantity > 0 && !remainingResolution) {
+    throw new HelperAppServiceError("invalid_input", "Partial purchases must state how the remaining quantity was resolved.");
+  }
+  if (action === "complete" && unavailableQuantity > 0 && !optionalText(input.helperNote)) {
+    throw new HelperAppServiceError("invalid_input", "Partial purchases require a reason for the remaining quantity.");
   }
   return {
     action,
@@ -3727,6 +3979,7 @@ function normalizePurchaseResponseInput(input) {
     helperNote: optionalText(input.helperNote),
     idempotencyKey: requiredText(input.idempotencyKey, "idempotencyKey"),
     purchaseTaskId: requiredText(input.purchaseTaskId, "purchaseTaskId"),
+    remainingResolution,
     unavailableQuantity,
   };
 }
@@ -4260,6 +4513,8 @@ module.exports = {
   groupTripsByLocalDate,
   isHelperAppServiceError,
   listPurchaseTasks,
+  listAuthorizedHelperQuoteTaskSummaries,
+  listAdminQuoteTaskSummaries,
   listQuoteTasks,
   listRebuyTasks,
   listSettlements,
@@ -4279,6 +4534,7 @@ module.exports = {
   repairTrip,
   recordSettlementPayment,
   respondPurchaseTask,
+  searchCustomerNicknames,
   reviewSettlement,
   rejectStagingMergeJob,
   setSettlementExchangeRate,

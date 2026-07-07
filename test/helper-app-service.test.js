@@ -82,6 +82,25 @@ test("lists customer nickname suggestions from the Supabase main customer master
   assert.match(queries[0].sql, /order by line_community_name asc/);
 });
 
+test("customer nickname typeahead searches a bounded subset instead of hydrating the full master", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return { rows: [{ line_community_name: "小明東京" }] };
+    },
+  };
+
+  const nicknames = await service.searchCustomerNicknames(database, "小明", 8);
+
+  assert.deepEqual(nicknames, ["小明東京"]);
+  assert.match(queries[0].sql, /position\(lower\(\$1\)/);
+  assert.match(queries[0].sql, /limit \$2/);
+  assert.deepEqual(queries[0].params, ["小明", 8]);
+  assert.deepEqual(await service.searchCustomerNicknames(database, ""), []);
+  assert.equal(queries.length, 1);
+});
+
 test("admin dashboard reads only the sections requested by the current view", async () => {
   const queries = [];
   const database = {
@@ -171,6 +190,28 @@ test("admin live dashboard scopes active trips and workflow reads to the selecte
   );
 });
 
+test("admin live purchase list reads task summaries without signed-photo payloads", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return { rows: [] };
+    },
+  };
+
+  await service.listAdminDashboard(database, {
+    sections: ["trips", "purchaseTasks"],
+    tripStatuses: ["active"],
+    workflowTripIds: ["00000000-0000-0000-0000-000000000001"],
+  });
+
+  const purchaseQuery = queries.find(({ sql }) => sql.includes("helper_app.purchase_tasks pt"));
+  assert.ok(purchaseQuery);
+  assert.match(purchaseQuery.sql, /count\(ptp\.id\)::int as photo_count/);
+  assert.doesNotMatch(purchaseQuery.sql, /jsonb_agg/);
+  assert.doesNotMatch(purchaseQuery.sql, /storage_key/);
+});
+
 test("admin live photo section skips quote purchase and staging reads", async () => {
   const queries = [];
   const database = {
@@ -199,7 +240,7 @@ test("admin live photo section skips quote purchase and staging reads", async ()
   );
 });
 
-test("admin live quote section skips photo purchase and staging reads", async () => {
+test("admin live quote section skips server workflow reads", async () => {
   const queries = [];
   const database = {
     async query(sql, params) {
@@ -209,22 +250,79 @@ test("admin live quote section skips photo purchase and staging reads", async ()
   };
 
   await service.listAdminDashboard(database, {
-    sections: ["trips", "quoteTasks"],
+    sections: [],
     tripStatuses: ["active"],
     workflowTripIds: ["00000000-0000-0000-0000-000000000001"],
   });
 
-  assert.equal(queries.length, 2);
-  assert.equal(
-    queries.some(({ sql }) => sql.includes("helper_app.quote_tasks qt")),
-    true,
-  );
+  assert.equal(queries.length, 0);
   assert.equal(
     queries.some(({ sql }) =>
-      /site_photo_batches|purchase_tasks pt|staging_order_previews/.test(sql),
+      /site_photo_batches|quote_tasks qt|purchase_tasks pt|staging_order_previews/.test(sql),
     ),
     false,
   );
+});
+
+test("admin quote task list uses one lightweight selected-trip summary query", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return {
+        rows: [{
+          id: "quote-task-1",
+          needs_review_count: 0,
+          photo_count: 2,
+          replied_photo_count: 1,
+          status: "open",
+          task_type: "quote_and_detail",
+        }],
+      };
+    },
+  };
+
+  const tasks = await service.listAdminQuoteTaskSummaries(database, {
+    tripId: "trip-1",
+  });
+
+  assert.equal(tasks.length, 1);
+  assert.equal(queries.length, 1);
+  assert.deepEqual(queries[0].params, ["trip-1"]);
+  assert.match(queries[0].sql, /count\(qtp\.id\)::int as photo_count/);
+  assert.match(queries[0].sql, /needs_review_count/);
+  assert.doesNotMatch(queries[0].sql, /storage_key|quote_photo_replies|jsonb_agg/);
+});
+
+test("helper quote task list uses one lightweight active-trip summary query", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return {
+        rows: [{
+          id: "quote-task-1",
+          photo_count: 3,
+          replied_photo_count: 1,
+          status: "open",
+          task_type: "quote",
+        }],
+      };
+    },
+  };
+
+  const tasks = await service.listAuthorizedHelperQuoteTaskSummaries(database, {
+    authUserId: "helper-user-1",
+    tripId: "trip-1",
+  });
+
+  assert.equal(tasks.length, 1);
+  assert.equal(queries.length, 1);
+  assert.deepEqual(queries[0].params, ["trip-1", "helper-user-1"]);
+  assert.match(queries[0].sql, /hp\.auth_user_id = \$2/);
+  assert.match(queries[0].sql, /hp\.is_active = true/);
+  assert.match(queries[0].sql, /t\.status = 'active'/);
+  assert.doesNotMatch(queries[0].sql, /storage_key|quote_photo_replies|jsonb_agg/);
 });
 
 test("helper workspace skips workflow reads that are not needed by the current view", async () => {
@@ -879,100 +977,94 @@ test("admin quote task creation uses selected trip photos as task evidence", asy
   assert.equal(auditQuery.params[4], "admin_quote_task_created");
 });
 
-test("admin detail task creation requires uploaded photos and stores them as task evidence", async () => {
-  const queries = [];
-  const database = fakeDatabase(
-    [
-      {
-        rows: [
-          {
-            assigned_helper_id: "helper-1",
-            id: "trip-1",
-            status: "active",
-            ...todayTripFields(),
-          },
-        ],
-      },
-      { rows: [{ id: "quote-task-detail-1", task_type: "detail" }] },
-      { rows: [] },
-      { rows: [] },
-      { rows: [] },
-      {
-        rows: [
-          {
-            id: "quote-task-detail-1",
-            photos: [
-              {
-                id: "quote-photo-detail-1",
-                source_site_photo_id: null,
-                storage_key: "helper-app/trip-1/admin-task-photos/upload-1.jpg",
-              },
-            ],
-          },
-        ],
-      },
-    ],
-    queries,
-  );
+test("all admin quote task types accept uploaded photos as task evidence", async () => {
+  for (const taskType of ["quote", "detail", "quote_and_detail"]) {
+    const queries = [];
+    const taskId = `quote-task-${taskType}`;
+    const storageKey = `helper-app/trip-1/admin-task-photos/${taskType}.jpg`;
+    const database = fakeDatabase(
+      [
+        {
+          rows: [
+            {
+              assigned_helper_id: "helper-1",
+              id: "trip-1",
+              status: "active",
+              ...todayTripFields(),
+            },
+          ],
+        },
+        { rows: [{ id: taskId, task_type: taskType }] },
+        { rows: [] },
+        { rows: [] },
+        { rows: [] },
+        {
+          rows: [
+            {
+              id: taskId,
+              photos: [
+                {
+                  id: `quote-photo-${taskType}`,
+                  source_site_photo_id: null,
+                  storage_key: storageKey,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+      queries,
+    );
 
-  const task = await service.createQuoteTask(database, {
-    actorUserId: "admin-user-1",
-    photoIds: [],
-    taskType: "detail",
-    tripId: "trip-1",
-    uploadedPhotos: [
-      {
-        byteSize: 1024,
-        contentType: "image/jpeg",
-        originalFilename: "detail-source.jpg",
-        sortOrder: 0,
-        storageKey: "helper-app/trip-1/admin-task-photos/upload-1.jpg",
-      },
-    ],
-  });
+    const task = await service.createQuoteTask(database, {
+      actorUserId: "admin-user-1",
+      photoIds: [],
+      taskType,
+      tripId: "trip-1",
+      uploadedPhotos: [
+        {
+          byteSize: 1024,
+          contentType: "image/jpeg",
+          originalFilename: `${taskType}.jpg`,
+          sortOrder: 0,
+          storageKey,
+        },
+      ],
+    });
 
-  assert.equal(task.id, "quote-task-detail-1");
-  const mediaQuery = queries.find((query) =>
-    String(query.sql).includes("insert into helper_app.media_objects"),
-  );
-  assert.ok(mediaQuery);
-  assert.equal(mediaQuery.params[0], "helper-app/trip-1/admin-task-photos/upload-1.jpg");
-  const taskPhotoQuery = queries.find((query) =>
-    String(query.sql).includes("insert into helper_app.quote_task_photos"),
-  );
-  assert.ok(taskPhotoQuery);
-  assert.equal(taskPhotoQuery.params[3], null);
+    assert.equal(task.id, taskId);
+    const mediaQuery = queries.find((query) =>
+      String(query.sql).includes("insert into helper_app.media_objects"),
+    );
+    assert.ok(mediaQuery);
+    assert.equal(mediaQuery.params[0], storageKey);
+    const taskPhotoQuery = queries.find((query) =>
+      String(query.sql).includes("insert into helper_app.quote_task_photos"),
+    );
+    assert.ok(taskPhotoQuery);
+    assert.equal(taskPhotoQuery.params[3], null);
+  }
 });
 
 test("quote and detail reply validates active ownership and writes durable detail media", async () => {
   const queries = [];
   const database = fakeDatabase(
     [
-      { rows: [{ id: "helper-1", is_active: true }] },
       {
         rows: [
           {
+            authorized_helper_id: "helper-1",
             helper_id: "helper-1",
             id: "quote-photo-1",
+            previous_detail_photos: null,
             quote_task_id: "quote-task-1",
             reply_status: "open",
             task_type: "quote_and_detail",
+            trip_status: "active",
             trip_id: "trip-1",
           },
         ],
       },
-      {
-        rows: [
-          {
-            assigned_helper_id: "helper-1",
-            id: "trip-1",
-            status: "active",
-            version: 3,
-            ...todayTripFields(),
-          },
-        ],
-      },
-      { rows: [] },
       { rows: [] },
       {
         rows: [
@@ -983,8 +1075,6 @@ test("quote and detail reply validates active ownership and writes durable detai
           },
         ],
       },
-      { rows: [] },
-      { rows: [{ total: 1, replied: 1, has_review: false }] },
       { rows: [] },
       { rows: [] },
     ],
@@ -1012,14 +1102,88 @@ test("quote and detail reply validates active ownership and writes durable detai
     true,
   );
   assert.equal(
+    queries.some((query) => String(query.sql).includes("jsonb_to_recordset")),
+    true,
+  );
+  assert.equal(
     queries.some((query) => String(query.sql).includes("insert into helper_app.quote_photo_replies")),
     true,
+  );
+  assert.equal(
+    queries.some((query) =>
+      String(query.sql).includes("from helper_app.helper_profiles") &&
+      !String(query.sql).includes("join helper_app.helper_profiles"),
+    ),
+    false,
   );
   const auditQuery = queries.find((query) =>
     String(query.sql).includes("insert into helper_app.trip_audit_events"),
   );
   assert.ok(auditQuery);
   assert.equal(auditQuery.params[4], "helper_quote_photo_replied");
+});
+
+test("editing a quote detail reply can keep the previous detail photo", async () => {
+  const queries = [];
+  const previousDetailPhoto = {
+    byte_size: 100,
+    content_type: "image/jpeg",
+    original_filename: "old-detail.jpg",
+    sort_order: 0,
+    storage_key: "helper-app/trip-1/quote-detail-replies/quote-photo-1/old-detail.jpg",
+  };
+  const database = fakeDatabase(
+    [
+      {
+        rows: [
+          {
+            authorized_helper_id: "helper-1",
+            helper_id: "helper-1",
+            id: "quote-photo-1",
+            previous_detail_photos: [previousDetailPhoto],
+            quote_task_id: "quote-task-1",
+            reply_status: "replied",
+            task_type: "quote_and_detail",
+            trip_status: "active",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            detail_photos: [previousDetailPhoto],
+            id: "reply-2",
+            price_jpy: 1300,
+            quote_task_photo_id: "quote-photo-1",
+          },
+        ],
+      },
+      { rows: [] },
+      { rows: [] },
+    ],
+    queries,
+    false,
+  );
+
+  const reply = await service.submitQuotePhotoReply(database, {
+    authUserId: "user-1",
+    detailPhotos: [],
+    idempotencyKey: "reply-key-2",
+    priceJpy: "1300",
+    quoteTaskPhotoId: "quote-photo-1",
+  });
+
+  assert.equal(reply.id, "reply-2");
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("insert into helper_app.media_objects")),
+    false,
+  );
+  const insertReplyQuery = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.quote_photo_replies"),
+  );
+  assert.ok(insertReplyQuery);
+  assert.deepEqual(JSON.parse(insertReplyQuery.params[7]), [previousDetailPhoto]);
 });
 
 test("admin manual purchase task creation writes an open staging workflow task", async () => {
@@ -1161,8 +1325,10 @@ test("helper completes a purchase task and creates completed-only staging previe
     action: "complete",
     authUserId: "user-1",
     completedQuantity: "2",
+    helperNote: "剩餘一件缺貨",
     idempotencyKey: "purchase-response-1",
     purchaseTaskId: "purchase-task-1",
+    remainingResolution: "unavailable",
     unavailableQuantity: "1",
   });
 
@@ -1176,6 +1342,27 @@ test("helper completes a purchase task and creates completed-only staging previe
   );
   assert.ok(auditQuery);
   assert.equal(auditQuery.params[4], "helper_purchase_completed");
+  assert.deepEqual(JSON.parse(auditQuery.params[6]), {
+    completedQuantity: 2,
+    purchaseTaskId: "purchase-task-1",
+    remainingQuantity: 1,
+    remainingResolution: "unavailable",
+  });
+});
+
+test("partial purchase requires an explicit remaining resolution and reason", async () => {
+  await assert.rejects(
+    () =>
+      service.respondPurchaseTask({}, {
+        action: "complete",
+        authUserId: "user-1",
+        completedQuantity: "1",
+        idempotencyKey: "purchase-response-2",
+        purchaseTaskId: "purchase-task-1",
+        unavailableQuantity: "1",
+      }),
+    (error) => error.code === "invalid_input",
+  );
 });
 
 test("admin face-check approval waits for helper final confirmation", async () => {
@@ -1222,6 +1409,84 @@ test("admin face-check approval waits for helper final confirmation", async () =
   );
   assert.ok(auditQuery);
   assert.equal(auditQuery.params[4], "admin_face_check_approved");
+});
+
+test("helper final confirmation completes an approved face-check purchase and creates staging preview", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      { rows: [{ id: "helper-1", is_active: true }] },
+      {
+        rows: [
+          {
+            completed_quantity: 1,
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            line_community_name: "客人A",
+            product_name: "挑臉商品",
+            quantity: 1,
+            original_price_jpy: 1800,
+            requires_face_check: true,
+            sale_price_twd: 560,
+            status: "approved_pending_helper_confirmation",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            assigned_helper_id: "helper-1",
+            id: "trip-1",
+            status: "active",
+            version: 3,
+            ...todayTripFields(),
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            completed_quantity: 1,
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            line_community_name: "客人A",
+            product_name: "挑臉商品",
+            original_price_jpy: 1800,
+            sale_price_twd: 560,
+            source_quote_reply_id: null,
+            source_quote_task_id: null,
+            source_quote_task_photo_id: null,
+            source_rebuy_task_id: null,
+            status: "completed",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      { rows: [{ id: "preview-1" }] },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const task = await service.respondPurchaseTask(database, {
+    action: "complete",
+    authUserId: "user-1",
+    completedQuantity: "1",
+    idempotencyKey: "face-check-final-1",
+    purchaseTaskId: "purchase-task-1",
+  });
+
+  assert.equal(task.status, "completed");
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("insert into helper_app.staging_order_previews")),
+    true,
+  );
+  const auditQuery = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.trip_audit_events"),
+  );
+  assert.ok(auditQuery);
+  assert.equal(auditQuery.params[4], "helper_purchase_face_check_confirmed");
 });
 
 test("helper cannot end a trip while a purchase task is unfinished", async () => {

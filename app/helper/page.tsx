@@ -4,8 +4,6 @@ import {
   AlertCircle,
   ArrowLeft,
   CalendarDays,
-  Camera,
-  CheckCircle2,
   CreditCard,
   MapPin,
   PackageSearch,
@@ -37,7 +35,7 @@ import { EndTripForm } from "./EndTripForm";
 import { ElapsedTripTimer } from "./ElapsedTripTimer";
 import { ConnectionPanel } from "./ConnectionPanel";
 import { OptimisticTripGroup } from "./OptimisticTripGroup";
-import { QuoteTaskReplies } from "./QuoteTaskReplies";
+import { QuoteTaskWorkspace } from "./QuoteTaskReplies";
 import { RebuyTasks } from "./RebuyTasks";
 import { SitePhotoWorkspace } from "./SitePhotoWorkspace";
 import { SettlementPrecheckForm, WarehouseProofForm } from "./Settlements";
@@ -101,8 +99,6 @@ export default async function HelperPage({
 
   const unsignedBatchesByTripId: Record<string, any[]> =
     (workspace.sitePhotoBatchesByTripId || {}) as Record<string, any[]>;
-  const unsignedQuoteTasksByTripId: Record<string, any[]> =
-    (workspace.quoteTasksByTripId || {}) as Record<string, any[]>;
   const unsignedPurchaseTasksByTripId: Record<string, any[]> =
     (workspace.purchaseTasksByTripId || {}) as Record<string, any[]>;
   const tripSummariesByTripId: Record<string, any> =
@@ -116,14 +112,7 @@ export default async function HelperPage({
     shouldSignTripMedia && panel === "site" && Boolean(params.batchId)
       ? await signBatchesByTripId(unsignedBatchesByTripId)
       : unsignedBatchesByTripId;
-  const signedQuoteTasksByTripId =
-    shouldSignTripMedia && panel === "quote"
-      ? await signQuoteTasksByTripId(unsignedQuoteTasksByTripId)
-      : unsignedQuoteTasksByTripId;
-  const signedPurchaseTasksByTripId =
-    shouldSignTripMedia && panel === "purchase"
-      ? await signPurchaseTasksByTripId(unsignedPurchaseTasksByTripId)
-      : unsignedPurchaseTasksByTripId;
+  const signedPurchaseTasksByTripId = unsignedPurchaseTasksByTripId;
   const signedSettlements = ["settlement", "warehouse"].includes(view)
     ? await service.attachSignedSettlementUrls(
         workspace.settlements || [],
@@ -144,7 +133,6 @@ export default async function HelperPage({
       canOperate={selectedTripCanBeOpened}
       panel={panel}
       purchaseTasks={signedPurchaseTasksByTripId[selectedTrip.id] || []}
-      quoteTasks={signedQuoteTasksByTripId[selectedTrip.id] || []}
       summary={tripSummariesByTripId[selectedTrip.id] || {}}
       trip={selectedTrip}
     />
@@ -469,7 +457,6 @@ function TripDetail({
   canOperate,
   panel,
   purchaseTasks,
-  quoteTasks,
   selectedBatchId,
   summary,
   trip,
@@ -478,7 +465,6 @@ function TripDetail({
   canOperate: boolean;
   panel: TripPanel;
   purchaseTasks: any[];
-  quoteTasks: any[];
   selectedBatchId?: string;
   summary: any;
   trip: any;
@@ -529,7 +515,6 @@ function TripDetail({
         batches={batches}
         panel={panel}
         purchaseTasks={purchaseTasks}
-        quoteTasks={quoteTasks}
         selectedBatchId={selectedBatchId}
         summary={summary}
         trip={trip}
@@ -620,7 +605,6 @@ function TripWorkspace({
   batches,
   panel,
   purchaseTasks,
-  quoteTasks,
   selectedBatchId,
   summary,
   trip,
@@ -628,7 +612,6 @@ function TripWorkspace({
   batches: any[];
   panel: TripPanel;
   purchaseTasks: any[];
-  quoteTasks: any[];
   selectedBatchId?: string;
   summary: any;
   trip: any;
@@ -641,8 +624,19 @@ function TripWorkspace({
       trip={trip}
     />
   );
-  const connectionPanel = <ConnectionPanel tripId={trip.id} />;
+  const connectionPanel = (
+    <ConnectionPanel
+      tripId={trip.id}
+      unfinishedCounts={{
+        purchase: Number(summary.unfinished_purchase_count || 0),
+        quote: Number(summary.unfinished_quote_photo_count || 0),
+        site: 0,
+      }}
+    />
+  );
   const chrome = <ActiveTripChrome trip={trip} />;
+  const workChrome = <ReturnToTripsButton />;
+  const quotePanel = <QuoteTaskWorkspace tripId={trip.id} />;
   const sitePanel = <SitePhotoWorkspace tripId={trip.id} />;
 
   if (panel === "overview") {
@@ -653,18 +647,25 @@ function TripWorkspace({
         initialSection="overview"
         key={panel}
         overview={overviewPanel}
+        quote={quotePanel}
         site={sitePanel}
+        workChrome={workChrome}
       />
     );
   }
 
   if (panel === "work") {
     return (
-      <div className="grid gap-5 pb-24">
-        {chrome}
-        {connectionPanel}
-        <TripBottomBar activeSection="work" tripId={trip.id} />
-      </div>
+      <TripSectionSwitcher
+        chrome={chrome}
+        connection={connectionPanel}
+        initialSection="work"
+        key={panel}
+        overview={overviewPanel}
+        quote={quotePanel}
+        site={sitePanel}
+        workChrome={workChrome}
+      />
     );
   }
 
@@ -680,14 +681,8 @@ function TripWorkspace({
       ) : (
         sitePanel
       )
-    ) : panel === "quote" ? (
-      <WorkspaceBlock eyebrow="區塊二" title="細圖 / 報價任務">
-        <QuoteTaskReplies tasks={quoteTasks} />
-      </WorkspaceBlock>
     ) : (
-      <WorkspaceBlock eyebrow="區塊三" title="採買任務">
-        <PurchaseTasks tasks={purchaseTasks} />
-      </WorkspaceBlock>
+      <PurchaseTasks tasks={purchaseTasks} />
     );
 
   return (
@@ -695,11 +690,13 @@ function TripWorkspace({
       chrome={chrome}
       connection={connectionPanel}
       detail={detailPanel}
-      hideChromeInDetail={panel === "site"}
-      initialSection="detail"
+      hideChromeInDetail={panel === "site" || panel === "quote" || panel === "purchase"}
+      initialSection={panel === "quote" ? "quote" : "detail"}
       key={panel}
       overview={overviewPanel}
+      quote={quotePanel}
       site={sitePanel}
+      workChrome={workChrome}
     />
   );
 }
@@ -722,54 +719,6 @@ function ActiveTripChrome({ trip }: { trip: any }) {
         </div>
       </Surface>
     </>
-  );
-}
-
-function TripBottomBar({
-  activeSection,
-  tripId,
-}: {
-  activeSection: "overview" | "work";
-  tripId: string;
-}) {
-  const items = [
-    {
-      href: `/helper?tripId=${tripId}`,
-      icon: <CheckCircle2 className="size-5" />,
-      label: "總覽",
-      section: "overview",
-    },
-    {
-      href: `/helper?tripId=${tripId}&panel=work`,
-      icon: <Camera className="size-5" />,
-      label: "連線",
-      section: "work",
-    },
-  ] as const;
-  return (
-    <nav
-      aria-label="行程主要操作"
-      className="fixed inset-x-0 bottom-0 z-30 border-t bg-background/95 px-4 py-3 shadow-[0_-12px_30px_rgba(15,23,42,0.12)] backdrop-blur sm:sticky sm:bottom-4 sm:rounded-xl sm:border sm:p-2"
-    >
-      <div className="mx-auto grid max-w-2xl grid-cols-2 gap-2">
-        {items.map((item) => (
-          <Button
-            asChild
-            key={item.section}
-            size="lg"
-            variant={activeSection === item.section ? "default" : "outline"}
-          >
-            <Link
-              aria-current={activeSection === item.section ? "page" : undefined}
-              href={item.href}
-            >
-              {item.icon}
-              {item.label}
-            </Link>
-          </Button>
-        ))}
-      </div>
-    </nav>
   );
 }
 
@@ -829,9 +778,22 @@ function TripEndGate({
 }) {
   if (!canEnd) {
     return (
-      <Button className="w-full" disabled variant="destructive">
-        採買未結案 {unfinishedPurchases}
-      </Button>
+      <Surface className="grid gap-3 border-amber-200 bg-amber-50/70">
+        <div className="flex items-start gap-2 text-amber-950">
+          <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+          <div>
+            <p className="text-sm font-semibold">還不能結束行程</p>
+            <p className="mt-1 text-xs leading-5">
+              尚有 {unfinishedPurchases} 筆採買未結案。待採買、挑臉待審、挑臉待小幫手確認都必須先完成、取消、標記缺貨或找不到。
+            </p>
+          </div>
+        </div>
+        <Button asChild className="w-full">
+          <Link href={`/helper?tripId=${encodeURIComponent(tripId)}&panel=purchase`}>
+            前往採買任務
+          </Link>
+        </Button>
+      </Surface>
     );
   }
   return (
@@ -1055,17 +1017,6 @@ async function signBatchesByTripId(batchesByTripId: Record<string, any[]>) {
   }, {});
 }
 
-async function signQuoteTasksByTripId(quoteTasksByTripId: Record<string, any[]>) {
-  const tasks = Object.values(quoteTasksByTripId).flat();
-  if (!tasks.length) return {};
-  const signed = await service.attachSignedQuoteTaskUrls(tasks, createR2ObjectStore());
-  return signed.reduce((groups: Record<string, any[]>, task: any) => {
-    if (!groups[task.trip_id]) groups[task.trip_id] = [];
-    groups[task.trip_id].push(task);
-    return groups;
-  }, {});
-}
-
 async function signPurchaseTasksByTripId(purchaseTasksByTripId: Record<string, any[]>) {
   const tasks = Object.values(purchaseTasksByTripId).flat();
   if (!tasks.length) return {};
@@ -1151,10 +1102,9 @@ function helperWorkspaceSections(
 ) {
   if (hasSelectedTrip) {
     return [
-      ...(["overview", "site", "quote", "purchase"].includes(panel)
+      ...(["overview", "work", "site", "quote", "purchase"].includes(panel)
         ? ["tripSummaries"]
         : []),
-      ...(panel === "quote" ? ["quoteTasks"] : []),
       ...(panel === "purchase" ? ["purchaseTasks"] : []),
       ...(panel === "site" && hasSelectedBatch ? ["sitePhotoBatches"] : []),
     ];
