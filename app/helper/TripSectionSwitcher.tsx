@@ -9,8 +9,10 @@ import { Button } from "../components/ui/button";
 type TripSection = "detail" | "overview" | "quote" | "site" | "work";
 
 const TripSectionNavigationContext = createContext<{
+  openPurchase: () => void;
   openQuote: () => void;
   openSite: () => void;
+  openWork: () => void;
 } | null>(null);
 
 export function useTripSectionNavigation() {
@@ -21,6 +23,7 @@ export function TripSectionSwitcher({
   chrome,
   connection,
   detail,
+  hideBackInDetail = false,
   hideChromeInDetail = false,
   initialSection,
   overview,
@@ -31,6 +34,7 @@ export function TripSectionSwitcher({
   chrome: ReactNode;
   connection: ReactNode;
   detail?: ReactNode;
+  hideBackInDetail?: boolean;
   hideChromeInDetail?: boolean;
   initialSection: TripSection;
   overview: ReactNode;
@@ -55,8 +59,10 @@ export function TripSectionSwitcher({
   return (
     <TripSectionNavigationContext.Provider
       value={{
+        openPurchase: () => setActiveSection("detail"),
         openQuote: () => setActiveSection("quote"),
         openSite: () => setActiveSection("site"),
+        openWork: () => setActiveSection("work"),
       }}
     >
       <div className="grid gap-5 pb-28">
@@ -69,16 +75,18 @@ export function TripSectionSwitcher({
             : chrome}
         {["detail", "quote", "site"].includes(activeSection) ? (
           <div className="grid gap-4">
-            <Button
-              className="w-fit justify-start px-2.5 text-xs"
-              onClick={() => setActiveSection("work")}
-              size="sm"
-              type="button"
-              variant="outline"
-            >
-              <ArrowLeft className="size-4" />
-              返回連線
-            </Button>
+            {hideBackInDetail && activeSection === "detail" ? null : (
+              <Button
+                className="w-fit justify-start px-2.5 text-xs"
+                onClick={() => setActiveSection("work")}
+                size="sm"
+                type="button"
+                variant="outline"
+              >
+                <ArrowLeft className="size-4" />
+                返回連線
+              </Button>
+            )}
             {activeSection === "site"
               ? site
               : activeSection === "quote"

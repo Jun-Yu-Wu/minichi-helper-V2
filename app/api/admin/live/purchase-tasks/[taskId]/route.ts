@@ -17,26 +17,35 @@ export async function GET(
 
   const { searchParams } = new URL(request.url);
   const tripId = String(searchParams.get("tripId") || "").trim();
+  const photoMode = String(searchParams.get("photoMode") || "report").trim();
   if (!tripId) {
     return NextResponse.json({ error: "缺少行程資訊。" }, { status: 400 });
   }
 
   const { taskId } = await params;
-  const tasks = await (service.listPurchaseTasks as any)(database.getDatabasePool(), {
-    taskIds: [taskId],
-    tripIds: [tripId],
+  const task = await (service.getPurchaseTaskDetail as any)(database.getDatabasePool(), {
+    purchaseTaskId: taskId,
+    tripId,
   });
-  if (!tasks[0]) {
+  if (!task) {
     return NextResponse.json({ error: "找不到這個採買任務。" }, { status: 404 });
   }
+  const scopedTask = photoMode === "all"
+    ? task
+    : {
+        ...task,
+        photos: (task.photos || []).filter((photo: any) =>
+          ["detail_reply", "face_check_report"].includes(String(photo.photo_role || "")),
+        ),
+      };
 
-  const [task] = await service.attachSignedPurchaseTaskUrls(
-    tasks,
+  const [signedTask] = await service.attachSignedPurchaseTaskUrls(
+    [scopedTask],
     createR2ObjectStore(),
   );
 
   return NextResponse.json(
-    { task },
+    { task: signedTask },
     {
       headers: {
         "Cache-Control": "private, no-store",

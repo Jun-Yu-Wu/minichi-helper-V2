@@ -58,8 +58,8 @@ export function AdminLiveQuoteWorkspace({
   const [refreshNonce, setRefreshNonce] = useState(0);
 
   const selectedTrip = trips.find((trip) => trip.id === selectedTripId);
-  const pendingTasks = tasks.filter((task) => task.status !== "completed");
-  const completedTasks = tasks.filter((task) => task.status === "completed");
+  const pendingTasks = tasks.filter((task) => !isQuoteTaskComplete(task));
+  const completedTasks = tasks.filter(isQuoteTaskComplete);
   const allDetailPhotos = useMemo(() => collectShareablePhotos(activeTask), [activeTask]);
   const selectedPhotos = useMemo(
     () => allDetailPhotos.filter((photo) => selectedPhotoIds.has(photo.id)),
@@ -464,7 +464,7 @@ function QuoteTaskLane({
               {task.needs_review_count ? ` · ${task.needs_review_count} 確認` : ""}
             </span>
           </span>
-          <StatusBadge tone={task.status === "completed" ? "green" : "blue"}>
+          <StatusBadge tone={isQuoteTaskComplete(task) ? "green" : "blue"}>
             {task.replied_photo_count}/{task.photo_count}
           </StatusBadge>
         </button>
@@ -726,6 +726,11 @@ function taskTypeLabel(taskType: string) {
   if (taskType === "quote") return "報價";
   if (taskType === "detail") return "細圖";
   return "報價＋細圖";
+}
+
+function isQuoteTaskComplete(task: QuoteTaskSummary) {
+  const total = Number(task.photo_count || 0);
+  return task.status === "completed" || (total > 0 && Number(task.replied_photo_count || 0) >= total);
 }
 
 function wait(ms: number) {

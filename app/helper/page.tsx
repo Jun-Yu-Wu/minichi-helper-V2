@@ -99,8 +99,6 @@ export default async function HelperPage({
 
   const unsignedBatchesByTripId: Record<string, any[]> =
     (workspace.sitePhotoBatchesByTripId || {}) as Record<string, any[]>;
-  const unsignedPurchaseTasksByTripId: Record<string, any[]> =
-    (workspace.purchaseTasksByTripId || {}) as Record<string, any[]>;
   const tripSummariesByTripId: Record<string, any> =
     (workspace.tripSummariesByTripId || {}) as Record<string, any>;
   const selectedTrip = helperAssignedTrips(workspace).find((trip: any) => trip.id === params.tripId);
@@ -112,7 +110,6 @@ export default async function HelperPage({
     shouldSignTripMedia && panel === "site" && Boolean(params.batchId)
       ? await signBatchesByTripId(unsignedBatchesByTripId)
       : unsignedBatchesByTripId;
-  const signedPurchaseTasksByTripId = unsignedPurchaseTasksByTripId;
   const signedSettlements = ["settlement", "warehouse"].includes(view)
     ? await service.attachSignedSettlementUrls(
         workspace.settlements || [],
@@ -132,7 +129,6 @@ export default async function HelperPage({
       selectedBatchId={params.batchId}
       canOperate={selectedTripCanBeOpened}
       panel={panel}
-      purchaseTasks={signedPurchaseTasksByTripId[selectedTrip.id] || []}
       summary={tripSummariesByTripId[selectedTrip.id] || {}}
       trip={selectedTrip}
     />
@@ -456,7 +452,6 @@ function TripDetail({
   batches,
   canOperate,
   panel,
-  purchaseTasks,
   selectedBatchId,
   summary,
   trip,
@@ -464,7 +459,6 @@ function TripDetail({
   batches: any[];
   canOperate: boolean;
   panel: TripPanel;
-  purchaseTasks: any[];
   selectedBatchId?: string;
   summary: any;
   trip: any;
@@ -514,7 +508,6 @@ function TripDetail({
       <TripWorkspace
         batches={batches}
         panel={panel}
-        purchaseTasks={purchaseTasks}
         selectedBatchId={selectedBatchId}
         summary={summary}
         trip={trip}
@@ -604,14 +597,12 @@ function TripPreActiveState({
 function TripWorkspace({
   batches,
   panel,
-  purchaseTasks,
   selectedBatchId,
   summary,
   trip,
 }: {
   batches: any[];
   panel: TripPanel;
-  purchaseTasks: any[];
   selectedBatchId?: string;
   summary: any;
   trip: any;
@@ -682,7 +673,7 @@ function TripWorkspace({
         sitePanel
       )
     ) : (
-      <PurchaseTasks tasks={purchaseTasks} />
+      <PurchaseTasks tripId={trip.id} />
     );
 
   return (
@@ -690,6 +681,7 @@ function TripWorkspace({
       chrome={chrome}
       connection={connectionPanel}
       detail={detailPanel}
+      hideBackInDetail={panel === "purchase"}
       hideChromeInDetail={panel === "site" || panel === "quote" || panel === "purchase"}
       initialSection={panel === "quote" ? "quote" : "detail"}
       key={panel}
@@ -1105,7 +1097,6 @@ function helperWorkspaceSections(
       ...(["overview", "work", "site", "quote", "purchase"].includes(panel)
         ? ["tripSummaries"]
         : []),
-      ...(panel === "purchase" ? ["purchaseTasks"] : []),
       ...(panel === "site" && hasSelectedBatch ? ["sitePhotoBatches"] : []),
     ];
   }

@@ -6,7 +6,7 @@ import service from "../../../../../../../src/server/helper-app-service";
 import { createR2ObjectStore } from "../../../../../../../src/server/r2-object-store";
 
 export async function GET(
-  _request: Request,
+  request: Request,
   { params }: { params: Promise<{ taskId: string; tripId: string }> },
 ) {
   const user = await getCurrentUser();
@@ -15,23 +15,33 @@ export async function GET(
   }
 
   const { taskId, tripId } = await params;
-  const tasks = await (service.listPurchaseTasks as any)(database.getDatabasePool(), {
+  const { searchParams } = new URL(request.url);
+  const photoMode = String(searchParams.get("photoMode") || "product").trim();
+  const task = await (service.getPurchaseTaskDetail as any)(database.getDatabasePool(), {
     activeOnly: true,
     authUserId: user.id,
-    taskIds: [taskId],
-    tripIds: [tripId],
+    purchaseTaskId: taskId,
+    tripId,
   });
-  if (!tasks[0]) {
+  if (!task) {
     return NextResponse.json({ error: "找不到這個採買任務。" }, { status: 404 });
   }
+  const scopedTask = photoMode === "all"
+    ? task
+    : {
+        ...task,
+        photos: (task.photos || []).filter((photo: any) =>
+          ["manual_reference", "source"].includes(String(photo.photo_role || "")),
+        ),
+      };
 
-  const [task] = await service.attachSignedPurchaseTaskUrls(
-    tasks,
+  const [signedTask] = await service.attachSignedPurchaseTaskUrls(
+    [scopedTask],
     createR2ObjectStore(),
   );
 
   return NextResponse.json(
-    { task },
+    { task: signedTask },
     {
       headers: {
         "Cache-Control": "private, no-store",

@@ -11,6 +11,7 @@ export type HelperActionResult = {
   error?: string;
   ok?: true;
   submissionId?: string;
+  task?: any;
 };
 
 async function requireUserId() {
@@ -126,7 +127,7 @@ export async function respondPurchaseTaskAction(
   try {
     const authUserId = await requireUserId();
     const faceCheckPhotoJson = formText(formData, "faceCheckPhotoJson");
-    await service.respondPurchaseTask(database.getDatabasePool(), {
+    const task = await service.respondPurchaseTask(database.getDatabasePool(), {
       action: formText(formData, "purchaseAction") || "complete",
       authUserId,
       completedQuantity: formText(formData, "completedQuantity"),
@@ -138,8 +139,7 @@ export async function respondPurchaseTaskAction(
       remainingResolution: formText(formData, "remainingResolution"),
       unavailableQuantity: formText(formData, "unavailableQuantity"),
     });
-    revalidatePath("/helper");
-    return { ok: true, submissionId: formText(formData, "idempotencyKey") };
+    return { ok: true, submissionId: formText(formData, "idempotencyKey"), task };
   } catch (error) {
     return actionError(error);
   }

@@ -507,6 +507,64 @@ async function listPurchaseTasks(
   return result.rows;
 }
 
+async function getPurchaseTaskDetail(
+  database,
+  {
+    activeOnly = false,
+    authUserId = null,
+    purchaseTaskId,
+    tripId,
+  } = {},
+) {
+  const conditions = [];
+  const params = [];
+  params.push(requiredText(purchaseTaskId, "purchaseTaskId"));
+  conditions.push(`pt.id = $${params.length}`);
+  params.push(requiredText(tripId, "tripId"));
+  conditions.push(`pt.trip_id = $${params.length}`);
+  if (authUserId) {
+    params.push(authUserId);
+    conditions.push(`hp.auth_user_id = $${params.length}`);
+  }
+  if (activeOnly) {
+    conditions.push("hp.is_active = true");
+    conditions.push("t.status = 'active'");
+  }
+  const result = await database.query(
+    `select pt.id, pt.trip_id, pt.helper_id, pt.source_quote_task_id,
+            pt.source_quote_task_photo_id, pt.source_quote_reply_id,
+            pt.line_community_name, pt.product_name, pt.quantity,
+            pt.original_price_jpy, pt.sale_price_twd, pt.note,
+            pt.requires_face_check, pt.status, pt.completed_quantity,
+            pt.unavailable_quantity, pt.helper_note, pt.face_check_note,
+            pt.admin_review_note, pt.created_at, pt.updated_at, pt.completed_at,
+            t.trip_name, t.business_date, t.timezone, t.status as trip_status,
+            hp.display_name as helper_display_name,
+            coalesce(photos.items, '[]'::jsonb) as photos
+     from helper_app.purchase_tasks pt
+     join helper_app.trips t on t.id = pt.trip_id
+     join helper_app.helper_profiles hp on hp.id = pt.helper_id
+     left join lateral (
+       select jsonb_agg(
+                jsonb_build_object(
+                  'id', ptp.id,
+                  'storage_key', ptp.storage_key,
+                  'photo_role', ptp.photo_role,
+                  'sort_order', ptp.sort_order,
+                  'created_at', ptp.created_at
+                )
+                order by ptp.photo_role asc, ptp.sort_order asc
+              ) as items
+       from helper_app.purchase_task_photos ptp
+       where ptp.purchase_task_id = pt.id
+     ) photos on true
+     where ${conditions.join(" and ")}
+     limit 1`,
+    params,
+  );
+  return result.rows[0] || null;
+}
+
 async function listRebuyTasks(
   database,
   { helperId = null, includePrivateCustomerData = false } = {},
@@ -1524,7 +1582,7 @@ async function createPurchaseTask(database, input) {
         tripId: trip.id,
       });
     }
-    return getPurchaseTaskById(client, task.id);
+    return task;
   });
 }
 
@@ -1609,7 +1667,7 @@ async function quickPublishPurchaseTask(database, input) {
       before_state: {},
       trip_id: quotePhoto.trip_id,
     });
-    return getPurchaseTaskById(client, task.id);
+    return task;
   });
 }
 
@@ -1984,7 +2042,8 @@ async function respondPurchaseTask(database, input) {
     }
     const trip = await lockTrip(client, task.trip_id);
     assertTripCanUseLiveWorkspace(trip, "Purchase tasks can be updated only while the trip is active.");
-    if (["completed", "canceled", "unavailable", "not_found"].includes(task.status)) {
+    const cancelingCompletedPurchase = task.status === "completed" && normalized.action === "cancel";
+    if (["completed", "canceled", "unavailable", "not_found"].includes(task.status) && !cancelingCompletedPurchase) {
       if (task.idempotency_key && task.idempotency_key === normalized.idempotencyKey) {
         return task;
       }
@@ -1999,10 +2058,12 @@ async function respondPurchaseTask(database, input) {
       const result = await client.query(
         `update helper_app.purchase_tasks
          set status = $2,
+             completed_quantity = null,
              unavailable_quantity = $3,
              helper_note = $4,
-             idempotency_key = coalesce(idempotency_key, $5),
+             idempotency_key = $5,
              canceled_at = now(),
+             completed_at = null,
              updated_at = now()
          where id = $1
          returning *`,
@@ -2014,6 +2075,9 @@ async function respondPurchaseTask(database, input) {
           normalized.idempotencyKey,
         ],
       );
+      if (task.status === "completed") {
+        await removeStagingOrderPreviewForPurchaseTask(client, task.id);
+      }
       await insertAuditEvent(client, {
         action: `helper_purchase_${status}`,
         actor_helper_id: helper.id,
@@ -4253,31 +4317,6 @@ async function insertPurchasePhoto(client, input) {
   );
 }
 
-async function getPurchaseTaskById(client, purchaseTaskId) {
-  const result = await client.query(
-    `select pt.*,
-            coalesce(
-              jsonb_agg(
-                jsonb_build_object(
-                  'id', ptp.id,
-                  'storage_key', ptp.storage_key,
-                  'photo_role', ptp.photo_role,
-                  'sort_order', ptp.sort_order
-                )
-                order by ptp.photo_role asc, ptp.sort_order asc
-              ) filter (where ptp.id is not null),
-              '[]'::jsonb
-            ) as photos
-     from helper_app.purchase_tasks pt
-     left join helper_app.purchase_task_photos ptp on ptp.purchase_task_id = pt.id
-     where pt.id = $1
-     group by pt.id`,
-    [purchaseTaskId],
-  );
-  if (!result.rows[0]) throw new HelperAppServiceError("purchase_task_not_found", "Purchase task was not found.");
-  return result.rows[0];
-}
-
 async function lockPurchaseTask(client, purchaseTaskId) {
   const result = await client.query(
     `select *
@@ -4326,6 +4365,14 @@ async function syncStagingOrderPreview(client, task) {
     ],
   );
   return result.rows[0];
+}
+
+async function removeStagingOrderPreviewForPurchaseTask(client, purchaseTaskId) {
+  await client.query(
+    `delete from helper_app.staging_order_previews
+     where purchase_task_id = $1`,
+    [purchaseTaskId],
+  );
 }
 
 async function lockRebuyTask(client, rebuyTaskId) {
@@ -4509,6 +4556,7 @@ module.exports = {
   editReviewedStagingOrder,
   editReviewedStagingOrderPhotos,
   updateHelperProfile,
+  getPurchaseTaskDetail,
   getHelperWorkspace,
   groupTripsByLocalDate,
   isHelperAppServiceError,

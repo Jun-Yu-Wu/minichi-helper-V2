@@ -47,6 +47,8 @@ export function AdminLivePurchaseWorkspace({
   const [loadingTrips, setLoadingTrips] = useState(true);
   const [loadingTasks, setLoadingTasks] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  const [allPhotosLoading, setAllPhotosLoading] = useState(false);
+  const [allPhotosLoaded, setAllPhotosLoaded] = useState(false);
   const [message, setMessage] = useState("");
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [reviewPending, startReviewTransition] = useTransition();
@@ -161,11 +163,35 @@ export function AdminLivePurchaseWorkspace({
   function openTask(taskId: string) {
     setActiveTaskId(taskId);
     setActiveTask(null);
+    setAllPhotosLoaded(false);
+    setAllPhotosLoading(false);
   }
 
   function closeTask() {
     setActiveTaskId("");
     setActiveTask(null);
+    setAllPhotosLoaded(false);
+    setAllPhotosLoading(false);
+  }
+
+  async function loadAllTaskPhotos() {
+    if (!activeTaskId || !selectedTripId || allPhotosLoaded) return;
+    setAllPhotosLoading(true);
+    setMessage("");
+    try {
+      const response = await fetch(
+        `/api/admin/live/purchase-tasks/${encodeURIComponent(activeTaskId)}?tripId=${encodeURIComponent(selectedTripId)}&photoMode=all`,
+        { cache: "no-store" },
+      );
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || "載入失敗");
+      setActiveTask(data.task || null);
+      setAllPhotosLoaded(true);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "載入失敗");
+    } finally {
+      setAllPhotosLoading(false);
+    }
   }
 
   function reviewFaceCheck(action: "approve" | "reject") {
@@ -290,8 +316,11 @@ export function AdminLivePurchaseWorkspace({
             </div>
           ) : activeTask ? (
             <PurchaseTaskDetail
+              allPhotosLoaded={allPhotosLoaded}
+              allPhotosLoading={allPhotosLoading}
               reviewPending={reviewPending}
               task={activeTask}
+              onLoadAllPhotos={loadAllTaskPhotos}
               onReview={reviewFaceCheck}
             />
           ) : null}
@@ -399,15 +428,22 @@ function PurchaseTaskLane({
 }
 
 function PurchaseTaskDetail({
+  allPhotosLoaded,
+  allPhotosLoading,
+  onLoadAllPhotos,
   onReview,
   reviewPending,
   task,
 }: {
+  allPhotosLoaded: boolean;
+  allPhotosLoading: boolean;
+  onLoadAllPhotos: () => void;
   onReview: (action: "approve" | "reject") => void;
   reviewPending: boolean;
   task: any;
 }) {
-  const photos = task.photos || [];
+  const primaryPhotos = adminPrimaryPurchasePhotos(task.photos || []);
+  const hiddenPhotos = adminHiddenPurchasePhotos(task.photos || []);
   return (
     <section className="grid gap-4">
       <div className="rounded-2xl border bg-card p-4 shadow-sm">
@@ -464,11 +500,11 @@ function PurchaseTaskDetail({
         </div>
       ) : null}
 
-      {photos.length ? (
+      {primaryPhotos.length ? (
         <div className="grid gap-2 rounded-2xl border bg-card p-3 shadow-sm">
-          <p className="text-sm font-semibold">任務照片</p>
+          <p className="text-sm font-semibold">挑臉／回傳照片</p>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
-            {photos.map((photo: any, index: number) => (
+            {primaryPhotos.map((photo: any, index: number) => (
               <a href={photo.signed_url} key={photo.id} target="_blank" rel="noreferrer">
                 <div className="relative">
                   <img
@@ -487,10 +523,60 @@ function PurchaseTaskDetail({
         </div>
       ) : (
         <div className="rounded-lg border border-dashed bg-card p-4 text-sm text-muted-foreground">
-          這筆任務沒有照片。
+          目前沒有挑臉或回傳照片。
         </div>
       )}
+      <HiddenPurchasePhotos
+        allPhotosLoaded={allPhotosLoaded}
+        loading={allPhotosLoading}
+        photos={hiddenPhotos}
+        onLoad={onLoadAllPhotos}
+      />
     </section>
+  );
+}
+
+function HiddenPurchasePhotos({
+  allPhotosLoaded,
+  loading,
+  onLoad,
+  photos,
+}: {
+  allPhotosLoaded: boolean;
+  loading: boolean;
+  onLoad: () => void;
+  photos: any[];
+}) {
+  if (!allPhotosLoaded) {
+    return (
+      <Button className="w-fit" disabled={loading} size="sm" type="button" variant="outline" onClick={onLoad}>
+        <RefreshCw className={`size-4 ${loading ? "animate-spin" : ""}`} />
+        {loading ? "載入中..." : "查看商品圖"}
+      </Button>
+    );
+  }
+  if (!photos.length) return null;
+  return (
+    <div className="grid gap-2 rounded-2xl border bg-card p-3 shadow-sm">
+      <p className="text-sm font-semibold">商品圖</p>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
+        {photos.map((photo: any, index: number) => (
+          <a href={photo.signed_url} key={photo.id} target="_blank" rel="noreferrer">
+            <div className="relative">
+              <img
+                alt={photo.photo_role}
+                className="aspect-square w-full rounded-lg border object-cover"
+                loading="lazy"
+                src={photo.signed_url}
+              />
+              <span className="absolute left-2 top-2 flex size-7 items-center justify-center rounded-full bg-black/70 text-xs font-semibold text-white">
+                {index + 1}
+              </span>
+            </div>
+          </a>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -561,4 +647,16 @@ function purchaseStatusTone(status: string): "amber" | "blue" | "green" | "neutr
   if (status === "unavailable" || status === "not_found" || status === "canceled") return "red";
   if (status === "open") return "blue";
   return "neutral";
+}
+
+function adminPrimaryPurchasePhotos(photos: any[]) {
+  return photos.filter((photo) =>
+    ["detail_reply", "face_check_report"].includes(String(photo.photo_role || "")),
+  );
+}
+
+function adminHiddenPurchasePhotos(photos: any[]) {
+  return photos.filter((photo) =>
+    !["detail_reply", "face_check_report"].includes(String(photo.photo_role || "")),
+  );
 }

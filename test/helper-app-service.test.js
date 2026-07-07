@@ -212,6 +212,36 @@ test("admin live purchase list reads task summaries without signed-photo payload
   assert.doesNotMatch(purchaseQuery.sql, /storage_key/);
 });
 
+test("purchase task detail reads one selected task before signing photos", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return {
+        rows: [{
+          id: "purchase-task-1",
+          photos: [{ id: "photo-1", storage_key: "purchase-reference-1" }],
+          trip_id: "trip-1",
+        }],
+      };
+    },
+  };
+
+  const task = await service.getPurchaseTaskDetail(database, {
+    activeOnly: true,
+    authUserId: "user-1",
+    purchaseTaskId: "purchase-task-1",
+    tripId: "trip-1",
+  });
+
+  assert.equal(task.id, "purchase-task-1");
+  assert.equal(queries.length, 1);
+  assert.deepEqual(queries[0].params, ["purchase-task-1", "trip-1", "user-1"]);
+  assert.match(queries[0].sql, /where pt\.id = \$1 and pt\.trip_id = \$2 and hp\.auth_user_id = \$3/);
+  assert.match(queries[0].sql, /where ptp\.purchase_task_id = pt\.id/);
+  assert.match(queries[0].sql, /limit 1/);
+});
+
 test("admin live photo section skips quote purchase and staging reads", async () => {
   const queries = [];
   const database = {
@@ -1258,6 +1288,10 @@ test("admin manual purchase task creation writes an open staging workflow task",
     queries.some((query) => String(query.sql).includes("insert into helper_app.purchase_tasks")),
     true,
   );
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("left join helper_app.purchase_task_photos")),
+    false,
+  );
   const auditQuery = queries.find((query) =>
     String(query.sql).includes("insert into helper_app.trip_audit_events"),
   );
@@ -1347,6 +1381,80 @@ test("helper completes a purchase task and creates completed-only staging previe
     purchaseTaskId: "purchase-task-1",
     remainingQuantity: 1,
     remainingResolution: "unavailable",
+  });
+});
+
+test("helper can cancel a completed purchase task and remove staging preview", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      { rows: [{ id: "helper-1", is_active: true }] },
+      {
+        rows: [
+          {
+            completed_quantity: 1,
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            line_community_name: "客人A",
+            product_name: "測試商品",
+            quantity: 1,
+            original_price_jpy: 1200,
+            requires_face_check: false,
+            sale_price_twd: 380,
+            status: "completed",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            assigned_helper_id: "helper-1",
+            id: "trip-1",
+            status: "active",
+            version: 3,
+            ...todayTripFields(),
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            completed_quantity: null,
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            status: "canceled",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      { rows: [] },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const task = await service.respondPurchaseTask(database, {
+    action: "cancel",
+    authUserId: "user-1",
+    helperNote: "現場確認拿錯商品，取消這筆",
+    idempotencyKey: "purchase-cancel-1",
+    purchaseTaskId: "purchase-task-1",
+  });
+
+  assert.equal(task.status, "canceled");
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("delete from helper_app.staging_order_previews")),
+    true,
+  );
+  const auditQuery = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.trip_audit_events"),
+  );
+  assert.ok(auditQuery);
+  assert.equal(auditQuery.params[4], "helper_purchase_canceled");
+  assert.deepEqual(JSON.parse(auditQuery.params[6]), {
+    purchaseTaskId: "purchase-task-1",
+    status: "canceled",
   });
 });
 

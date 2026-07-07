@@ -1,14 +1,11 @@
 "use client";
 
-import { useActionState, useMemo, useState } from "react";
-import { AlertTriangle, ArrowLeft, Camera, Check, PackageCheck, RefreshCw, Send, X } from "lucide-react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { AlertTriangle, ArrowLeft, Camera, Check, ChevronLeft, ChevronRight, PackageCheck, RefreshCw, Send, X } from "lucide-react";
 
-import {
-  respondPurchaseTaskAction,
-  type HelperActionResult,
-} from "../actions/helper";
 import { EmptyState, InsightBanner, StatusBadge, Surface } from "../components/OperationsUi";
 import { Button } from "../components/ui/button";
+import { useTripSectionNavigation } from "./TripSectionSwitcher";
 
 type FaceCheckPhoto = {
   byteSize: number;
@@ -22,19 +19,67 @@ type FaceCheckPhoto = {
   storageKey?: string;
 };
 
-const initialState: HelperActionResult = {};
+type PurchaseResponseState = {
+  error?: string;
+  ok?: true;
+  submissionId?: string;
+  task?: any;
+};
 
-export function PurchaseTasks({ tasks }: { tasks: any[] }) {
+export function PurchaseTasks({ tripId }: { tripId: string }) {
+  const navigation = useTripSectionNavigation();
+  const [tasks, setTasks] = useState<any[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeTask, setActiveTask] = useState<any | null>(null);
+  const [listLoading, setListLoading] = useState(true);
+  const [listError, setListError] = useState("");
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
+  const [allPhotosLoading, setAllPhotosLoading] = useState(false);
+  const [allPhotosLoaded, setAllPhotosLoaded] = useState(false);
+  const updateActiveTask = useCallback((task: any) => {
+    setActiveTask((current: any | null) => ({
+      ...(current || {}),
+      ...task,
+      photos: current?.photos || task.photos || [],
+    }));
+    setTasks((current) =>
+      current.map((item) => (item.id === task.id ? { ...item, ...task, photos: [] } : item)),
+    );
+  }, []);
+
+  const loadTasks = useCallback(async (signal?: AbortSignal) => {
+    setListError("");
+    setListLoading(true);
+    try {
+      const response = await fetch(
+        `/api/helper/trips/${encodeURIComponent(tripId)}/purchase-tasks`,
+        { cache: "no-store", signal },
+      );
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "無法載入採買任務。");
+      setTasks(body.tasks || []);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setListError(error instanceof Error ? error.message : "無法載入採買任務。");
+    } finally {
+      if (!signal?.aborted) setListLoading(false);
+    }
+  }, [tripId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadTasks(controller.signal);
+    return () => controller.abort();
+  }, [loadTasks]);
 
   async function openTask(taskId: string) {
     setActiveTaskId(taskId);
     setActiveTask(null);
     setDetailError("");
     setDetailLoading(true);
+    setAllPhotosLoaded(false);
+    setAllPhotosLoading(false);
     const summaryTask = tasks.find((task) => task.id === taskId);
     try {
       const response = await fetch(
@@ -56,6 +101,32 @@ export function PurchaseTasks({ tasks }: { tasks: any[] }) {
     setActiveTask(null);
     setDetailError("");
     setDetailLoading(false);
+    setAllPhotosLoaded(false);
+    setAllPhotosLoading(false);
+  }
+
+  async function loadAllTaskPhotos() {
+    if (!activeTaskId || allPhotosLoaded) return;
+    const summaryTask = tasks.find((task) => task.id === activeTaskId);
+    setAllPhotosLoading(true);
+    setDetailError("");
+    try {
+      const response = await fetch(
+        `/api/helper/trips/${encodeURIComponent(summaryTask?.trip_id || activeTask?.trip_id || "")}/purchase-tasks/${encodeURIComponent(activeTaskId)}?photoMode=all`,
+        { cache: "no-store" },
+      );
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "無法載入採買任務照片。");
+      setActiveTask((current: any | null) => ({
+        ...(current || {}),
+        ...(body.task || {}),
+      }));
+      setAllPhotosLoaded(true);
+    } catch (error) {
+      setDetailError(error instanceof Error ? error.message : "無法載入採買任務照片。");
+    } finally {
+      setAllPhotosLoading(false);
+    }
   }
 
   if (activeTaskId) {
@@ -65,17 +136,42 @@ export function PurchaseTasks({ tasks }: { tasks: any[] }) {
         error={detailError}
         loading={detailLoading}
         task={activeTask || summaryTask}
+        allPhotosLoaded={allPhotosLoaded}
+        allPhotosLoading={allPhotosLoading}
         onBack={closeTask}
+        onLoadAllPhotos={loadAllTaskPhotos}
         onRefresh={() => openTask(activeTaskId)}
+        onTaskUpdated={updateActiveTask}
       />
     );
   }
 
   if (!tasks.length) {
     return (
-      <div className="rounded-xl border border-dashed bg-card p-5 text-sm shadow-sm">
-        <p className="font-semibold text-foreground">目前沒有採買任務</p>
-      </div>
+      <Surface className="grid gap-4">
+        <Button className="w-fit justify-start px-2.5 text-xs" size="sm" type="button" variant="outline" onClick={() => navigation?.openWork()}>
+          <ArrowLeft className="size-4" />
+          返回連線
+        </Button>
+        {listLoading ? (
+          <div className="grid gap-2" aria-label="正在載入採買任務" role="status">
+            <div className="h-20 animate-pulse rounded-xl bg-muted" />
+            <div className="h-20 animate-pulse rounded-xl bg-muted" />
+          </div>
+        ) : listError ? (
+          <div className="grid gap-2">
+            <p className="text-sm text-destructive">{listError}</p>
+            <Button className="w-fit" size="sm" type="button" variant="outline" onClick={() => loadTasks()}>
+              <RefreshCw className="size-4" />
+              重新載入
+            </Button>
+          </div>
+        ) : (
+          <div className="rounded-xl border border-dashed bg-card p-5 text-sm shadow-sm">
+            <p className="font-semibold text-foreground">目前沒有採買任務</p>
+          </div>
+        )}
+      </Surface>
     );
   }
   const lanes = [
@@ -100,6 +196,19 @@ export function PurchaseTasks({ tasks }: { tasks: any[] }) {
   ];
   return (
     <Surface className="grid gap-4">
+      <Button className="w-fit justify-start px-2.5 text-xs" size="sm" type="button" variant="outline" onClick={() => navigation?.openWork()}>
+        <ArrowLeft className="size-4" />
+        返回連線
+      </Button>
+      {listError ? (
+        <div className="grid gap-2">
+          <p className="text-sm text-destructive">{listError}</p>
+          <Button className="w-fit" size="sm" type="button" variant="outline" onClick={() => loadTasks()}>
+            <RefreshCw className="size-4" />
+            重新載入
+          </Button>
+        </div>
+      ) : null}
       {lanes.map((lane) =>
         lane.tasks.length || lane.emptyText ? (
           <PurchaseTaskLane
@@ -165,18 +274,29 @@ function PurchaseTaskLane({
 }
 
 function PurchaseTaskDetail({
+  allPhotosLoaded,
+  allPhotosLoading,
   error,
   loading,
   onBack,
+  onLoadAllPhotos,
   onRefresh,
   task,
+  onTaskUpdated,
 }: {
+  allPhotosLoaded: boolean;
+  allPhotosLoading: boolean;
   error: string;
   loading: boolean;
   onBack: () => void;
+  onLoadAllPhotos: () => void;
   onRefresh: () => void;
+  onTaskUpdated: (task: any) => void;
   task: any | null;
 }) {
+  const completed = task ? isCompletedTask(task) : false;
+  const productPhotos = task ? productPurchasePhotos(task.photos || []) : [];
+  const hiddenPhotos = task ? secondaryPurchasePhotos(task.photos || []) : [];
   return (
     <Surface className="grid gap-4">
       <Button className="w-fit" size="sm" type="button" variant="ghost" onClick={onBack}>
@@ -209,20 +329,30 @@ function PurchaseTaskDetail({
               {purchaseProgress(task)}
             </StatusBadge>
           </div>
-          <PurchaseTaskPhotos photos={task.photos || []} />
+          <PurchaseTaskPhotos photos={productPhotos} />
+          {completed ? (
+            <SecondaryPurchasePhotos
+              allPhotosLoaded={allPhotosLoaded}
+              loading={allPhotosLoading}
+              photos={hiddenPhotos}
+              onLoad={onLoadAllPhotos}
+            />
+          ) : null}
           <dl className="grid gap-2 text-sm sm:grid-cols-2">
             <Meta label="需採買數量" value={`${task.quantity} 件`} />
             <Meta label="商品原價" value={`JPY ${task.original_price_jpy ?? "-"}`} />
           </dl>
-          <InsightBanner
-            body="請確認現場商品與原價是否正確，再送出採買回覆。"
-            title="核對採買資訊"
-            tone="amber"
-          />
+          {!completed ? (
+            <InsightBanner
+              body="確認現場商品與原價是否正確，有誤請取消訂單"
+              title="核對採買資訊"
+              tone="amber"
+            />
+          ) : null}
           {task.note ? (
             <InsightBanner body={task.note} title="管理員備註" tone="neutral" />
           ) : null}
-          <PurchaseResponseForm task={task} />
+          <PurchaseResponseForm task={task} onTaskUpdated={onTaskUpdated} />
         </>
       ) : (
         <EmptyState title="找不到這個採買任務" body="請返回任務列表重新選擇。" />
@@ -232,6 +362,7 @@ function PurchaseTaskDetail({
 }
 
 function PurchaseTaskPhotos({ photos }: { photos: any[] }) {
+  const [activeIndex, setActiveIndex] = useState(0);
   if (!photos.length) {
     return (
       <p className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
@@ -239,35 +370,132 @@ function PurchaseTaskPhotos({ photos }: { photos: any[] }) {
       </p>
     );
   }
-  return (
-    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-      {photos.map((photo, index) => (
-        <a href={photo.signed_url} key={photo.id} target="_blank" rel="noreferrer">
-          <div className="relative">
-            <img
-              alt={photo.photo_role}
-              className="aspect-square w-full rounded-lg border object-cover"
-              loading="lazy"
-              src={photo.signed_url}
-            />
-            <span className="absolute left-2 top-2 flex size-7 items-center justify-center rounded-full bg-black/70 text-xs font-semibold text-white">
-              {index + 1}
-            </span>
-          </div>
+  const activePhoto = photos[Math.min(activeIndex, photos.length - 1)] || photos[0];
+  if (photos.length === 1) {
+    return (
+      <div className="flex justify-center">
+        <a className="block w-full max-w-sm" href={activePhoto.signed_url} target="_blank" rel="noreferrer">
+          <img
+            alt={activePhoto.photo_role}
+            className="aspect-square w-full rounded-xl border object-cover shadow-sm"
+            loading="lazy"
+            src={activePhoto.signed_url}
+          />
         </a>
-      ))}
+      </div>
+    );
+  }
+  return (
+    <div className="mx-auto grid w-full max-w-sm gap-2">
+      <div className="relative">
+        <a href={activePhoto.signed_url} target="_blank" rel="noreferrer">
+          <img
+            alt={activePhoto.photo_role}
+            className="aspect-square w-full rounded-xl border object-cover shadow-sm"
+            loading="lazy"
+            src={activePhoto.signed_url}
+          />
+        </a>
+        <Button
+          aria-label="上一張照片"
+          className="absolute left-2 top-1/2 size-9 -translate-y-1/2 rounded-full bg-background/90 p-0 shadow"
+          disabled={activeIndex === 0}
+          size="sm"
+          type="button"
+          variant="outline"
+          onClick={() => setActiveIndex((index) => Math.max(index - 1, 0))}
+        >
+          <ChevronLeft className="size-4" />
+        </Button>
+        <Button
+          aria-label="下一張照片"
+          className="absolute right-2 top-1/2 size-9 -translate-y-1/2 rounded-full bg-background/90 p-0 shadow"
+          disabled={activeIndex >= photos.length - 1}
+          size="sm"
+          type="button"
+          variant="outline"
+          onClick={() => setActiveIndex((index) => Math.min(index + 1, photos.length - 1))}
+        >
+          <ChevronRight className="size-4" />
+        </Button>
+        <span className="absolute bottom-2 left-1/2 -translate-x-1/2 rounded-full bg-black/70 px-2 py-1 text-xs font-semibold text-white">
+          {activeIndex + 1}/{photos.length}
+        </span>
+      </div>
+      <div className="flex justify-center gap-1.5">
+        {photos.map((photo, index) => (
+          <button
+            aria-label={`查看第 ${index + 1} 張照片`}
+            className={`size-2 rounded-full ${index === activeIndex ? "bg-foreground" : "bg-muted-foreground/35"}`}
+            key={photo.id}
+            type="button"
+            onClick={() => setActiveIndex(index)}
+          />
+        ))}
+      </div>
     </div>
   );
 }
 
-function PurchaseResponseForm({ task }: { task: any }) {
-  const [state, action, pending] = useActionState(respondPurchaseTaskAction, initialState);
+function SecondaryPurchasePhotos({
+  allPhotosLoaded,
+  loading,
+  onLoad,
+  photos,
+}: {
+  allPhotosLoaded: boolean;
+  loading: boolean;
+  onLoad: () => void;
+  photos: any[];
+}) {
+  if (!allPhotosLoaded) {
+    return (
+      <Button className="w-fit" disabled={loading} size="sm" type="button" variant="outline" onClick={onLoad}>
+        {loading ? "載入中..." : "查看細圖／回報照片"}
+      </Button>
+    );
+  }
+  if (!photos.length) return null;
+  return (
+    <div className="grid gap-2 rounded-xl border bg-muted/20 p-3">
+      <p className="text-sm font-semibold">細圖／回報照片</p>
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        {photos.map((photo, index) => (
+          <a href={photo.signed_url} key={photo.id} target="_blank" rel="noreferrer">
+            <div className="relative">
+              <img
+                alt={photo.photo_role}
+                className="aspect-square w-full rounded-lg border object-cover"
+                loading="lazy"
+                src={photo.signed_url}
+              />
+              <span className="absolute left-2 top-2 rounded-full bg-black/70 px-2 py-1 text-xs font-semibold text-white">
+                {secondaryPhotoLabel(photo.photo_role, index)}
+              </span>
+            </div>
+          </a>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdated: (task: any) => void }) {
+  const [state, setState] = useState<PurchaseResponseState>({});
+  const [pending, setPending] = useState(false);
   const [purchaseAction, setPurchaseAction] = useState("complete");
   const [completedQuantity, setCompletedQuantity] = useState(String(task.completed_quantity || task.quantity || 1));
   const [helperNote, setHelperNote] = useState("");
   const [remainingResolution, setRemainingResolution] = useState("");
   const [faceCheckPhoto, setFaceCheckPhoto] = useState<FaceCheckPhoto | null>(null);
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientId("purchase-response"));
+  const [cancelingCompleted, setCancelingCompleted] = useState(false);
+
+  useEffect(() => {
+    if (state.ok && state.task && state.submissionId === idempotencyKey) {
+      onTaskUpdated(state.task);
+    }
+  }, [idempotencyKey, onTaskUpdated, state]);
 
   const faceCheckPhotoJson = useMemo(
     () =>
@@ -282,21 +510,26 @@ function PurchaseResponseForm({ task }: { task: any }) {
     [faceCheckPhoto],
   );
 
-  const closed = ["completed", "canceled", "unavailable", "not_found", "review_pending"].includes(task.status);
+  const completed = task.status === "completed";
+  const closed = ["canceled", "unavailable", "not_found", "review_pending"].includes(task.status);
   const needsFinalConfirmation = task.status === "approved_pending_helper_confirmation";
-  const needsFaceCheckUpload = task.requires_face_check && task.status === "open" && purchaseAction === "complete";
+  const submitted = Boolean(state.ok && state.submissionId === idempotencyKey);
+  const effectivePurchaseAction = completed && cancelingCompleted ? "cancel" : purchaseAction;
+  const needsFaceCheckUpload = task.requires_face_check && task.status === "open" && effectivePurchaseAction === "complete";
   const requestedQuantity = Number(task.quantity || 0);
   const completedQuantityNumber = Number(completedQuantity || 0);
   const isPartial =
-    purchaseAction === "complete" &&
+    effectivePurchaseAction === "complete" &&
     completedQuantityNumber > 0 &&
     completedQuantityNumber < requestedQuantity;
-  const needsReason = purchaseAction !== "complete" || isPartial;
+  const needsReason = effectivePurchaseAction !== "complete" || isPartial;
   const canSubmit =
     !pending &&
-    !closed &&
+    !submitted &&
+    (!closed || needsFinalConfirmation) &&
+    (!completed || cancelingCompleted) &&
     (!needsFaceCheckUpload || faceCheckPhoto?.status === "uploaded") &&
-    (purchaseAction !== "complete" || completedQuantityNumber > 0) &&
+    (effectivePurchaseAction !== "complete" || completedQuantityNumber > 0) &&
     completedQuantityNumber <= requestedQuantity &&
     (!isPartial || Boolean(remainingResolution)) &&
     (!needsReason || Boolean(helperNote.trim()));
@@ -305,7 +538,7 @@ function PurchaseResponseForm({ task }: { task: any }) {
     const file = fileList?.[0];
     if (!file || !file.type.startsWith("image/")) return;
     if (faceCheckPhoto) URL.revokeObjectURL(faceCheckPhoto.objectUrl);
-    setFaceCheckPhoto({
+    const nextPhoto: FaceCheckPhoto = {
       byteSize: file.size,
       clientPhotoId: createClientId("face-check"),
       contentType: file.type || "image/jpeg",
@@ -313,18 +546,24 @@ function PurchaseResponseForm({ task }: { task: any }) {
       objectUrl: URL.createObjectURL(file),
       originalFilename: file.name || "face-check.jpg",
       status: "selected",
-    });
+    };
+    setFaceCheckPhoto(nextPhoto);
+    void uploadFaceCheckPhoto(nextPhoto);
   }
 
-  async function uploadFaceCheckPhoto() {
-    if (!faceCheckPhoto) return;
-    setFaceCheckPhoto((current) => current ? { ...current, error: undefined, status: "uploading" } : current);
+  async function uploadFaceCheckPhoto(photo = faceCheckPhoto) {
+    if (!photo) return;
+    setFaceCheckPhoto((current) =>
+      current?.clientPhotoId === photo.clientPhotoId
+        ? { ...current, error: undefined, status: "uploading" }
+        : current,
+    );
     try {
       const presign = await fetch("/api/uploads/presign", {
         body: JSON.stringify({
-          clientPhotoId: faceCheckPhoto.clientPhotoId,
-          contentType: faceCheckPhoto.contentType,
-          fileName: faceCheckPhoto.originalFilename,
+          clientPhotoId: photo.clientPhotoId,
+          contentType: photo.contentType,
+          fileName: photo.originalFilename,
           purchaseTaskId: task.id,
           uploadPurpose: "purchase_face_check",
         }),
@@ -334,15 +573,19 @@ function PurchaseResponseForm({ task }: { task: any }) {
       const presignBody = await presign.json();
       if (!presign.ok) throw new Error(presignBody.error || "無法建立上傳網址。");
       const upload = await fetch(presignBody.uploadUrl, {
-        body: faceCheckPhoto.file,
-        headers: { "content-type": faceCheckPhoto.contentType },
+        body: photo.file,
+        headers: { "content-type": photo.contentType },
         method: "PUT",
       });
       if (!upload.ok) throw new Error(`R2 上傳失敗 (${upload.status})。`);
-      setFaceCheckPhoto((current) => current ? { ...current, status: "uploaded", storageKey: presignBody.storageKey } : current);
+      setFaceCheckPhoto((current) =>
+        current?.clientPhotoId === photo.clientPhotoId
+          ? { ...current, status: "uploaded", storageKey: presignBody.storageKey }
+          : current,
+      );
     } catch (error) {
       setFaceCheckPhoto((current) =>
-        current
+        current?.clientPhotoId === photo.clientPhotoId
           ? {
               ...current,
               error: error instanceof Error ? error.message : "上傳失敗。",
@@ -356,6 +599,39 @@ function PurchaseResponseForm({ task }: { task: any }) {
   function removeFaceCheckPhoto() {
     if (faceCheckPhoto) URL.revokeObjectURL(faceCheckPhoto.objectUrl);
     setFaceCheckPhoto(null);
+  }
+
+  async function submitPurchaseResponse(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!canSubmit) return;
+    setPending(true);
+    setState({});
+    try {
+      const response = await fetch("/api/helper/purchase-task-responses", {
+        body: JSON.stringify({
+          completedQuantity,
+          faceCheckPhoto: faceCheckPhotoJson ? JSON.parse(faceCheckPhotoJson) : null,
+          helperNote,
+          idempotencyKey,
+          purchaseAction: needsFinalConfirmation ? "complete" : effectivePurchaseAction,
+          purchaseTaskId: task.id,
+          remainingResolution,
+          unavailableQuantity: effectivePurchaseAction === "complete"
+            ? Math.max(0, Number(task.quantity) - Number(completedQuantity || 0))
+            : task.quantity,
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "操作失敗，請稍後再試。");
+      setState({ ok: true, submissionId: idempotencyKey, task: body.task });
+      if (body.task) onTaskUpdated(body.task);
+    } catch (error) {
+      setState({ error: error instanceof Error ? error.message : "操作失敗，請稍後再試。" });
+    } finally {
+      setPending(false);
+    }
   }
 
   return (
@@ -379,21 +655,36 @@ function PurchaseResponseForm({ task }: { task: any }) {
       ) : null}
       {task.status === "completed" ? (
         <InsightBanner
-          body="這筆已可進入暫存訂單預覽，後續仍需管理員審核與明確合併才會寫入主訂單。"
-          title="已建立完成採買結果"
+          title="已完成採買"
           tone="green"
         />
       ) : null}
-      {!closed || needsFinalConfirmation ? (
+      {completed && !cancelingCompleted ? (
+        <Button className="mx-auto w-fit" type="button" variant="outline" onClick={() => {
+          setCancelingCompleted(true);
+          setPurchaseAction("cancel");
+          setHelperNote("");
+          setIdempotencyKey(createClientId("purchase-cancel"));
+        }}>
+          取消這筆採買
+        </Button>
+      ) : null}
+      {(!closed && !completed) || needsFinalConfirmation || cancelingCompleted ? (
         <>
           <div className="grid gap-2 sm:grid-cols-2">
-            {!needsFinalConfirmation ? (
-              <select value={purchaseAction} onChange={(event) => setPurchaseAction(event.target.value)}>
+            {!needsFinalConfirmation && !cancelingCompleted ? (
+              <select value={effectivePurchaseAction} onChange={(event) => setPurchaseAction(event.target.value)}>
                 <option value="complete">完成採買</option>
                 <option value="unavailable">缺貨</option>
                 <option value="not_found">找不到</option>
                 <option value="cancel">取消</option>
               </select>
+            ) : cancelingCompleted ? (
+              <InsightBanner
+                body="取消後這筆會退出暫存訂單預覽；請填寫原因方便管理員確認。"
+                title="取消已完成採買"
+                tone="amber"
+              />
             ) : (
               <InsightBanner
                 body="確認後才會建立 completed 採買結果與暫存訂單預覽。"
@@ -401,7 +692,7 @@ function PurchaseResponseForm({ task }: { task: any }) {
                 tone="green"
               />
             )}
-            {purchaseAction === "complete" || needsFinalConfirmation ? (
+            {effectivePurchaseAction === "complete" || needsFinalConfirmation ? (
               <label className="grid gap-1 text-sm">
                 <span className="font-medium">實際買到數量</span>
                 <input
@@ -458,9 +749,13 @@ function PurchaseResponseForm({ task }: { task: any }) {
                 <div className="rounded-md border bg-background p-2">
                   <img alt={faceCheckPhoto.originalFilename} className="aspect-square w-full max-w-48 rounded-md object-cover" src={faceCheckPhoto.objectUrl} />
                   <div className="mt-2 flex flex-wrap gap-2">
-                    <Button disabled={faceCheckPhoto.status === "uploading" || faceCheckPhoto.status === "uploaded"} size="sm" type="button" variant="outline" onClick={uploadFaceCheckPhoto}>
+                    <Button disabled={faceCheckPhoto.status === "uploading" || faceCheckPhoto.status === "uploaded"} size="sm" type="button" variant="outline" onClick={() => uploadFaceCheckPhoto()}>
                       <RefreshCw className="mr-2 size-4" />
-                      {faceCheckPhoto.status === "uploaded" ? "已上傳" : "上傳照片"}
+                      {faceCheckPhoto.status === "uploading"
+                        ? "上傳中..."
+                        : faceCheckPhoto.status === "uploaded"
+                          ? "已上傳"
+                          : "重新上傳"}
                     </Button>
                     <Button size="sm" type="button" variant="ghost" onClick={removeFaceCheckPhoto}>
                       <X className="mr-2 size-4" />
@@ -473,11 +768,11 @@ function PurchaseResponseForm({ task }: { task: any }) {
             </div>
           ) : null}
 
-          <form action={action} className="grid gap-3 border-t pt-3">
+          <form className="grid gap-3 border-t pt-3" onSubmit={submitPurchaseResponse}>
             <input name="purchaseTaskId" type="hidden" value={task.id} />
-            <input name="purchaseAction" type="hidden" value={needsFinalConfirmation ? "complete" : purchaseAction} />
+            <input name="purchaseAction" type="hidden" value={needsFinalConfirmation ? "complete" : effectivePurchaseAction} />
             <input name="completedQuantity" type="hidden" value={completedQuantity} />
-            <input name="unavailableQuantity" type="hidden" value={purchaseAction === "complete" ? Math.max(0, Number(task.quantity) - Number(completedQuantity || 0)) : task.quantity} />
+            <input name="unavailableQuantity" type="hidden" value={effectivePurchaseAction === "complete" ? Math.max(0, Number(task.quantity) - Number(completedQuantity || 0)) : task.quantity} />
             <input name="faceCheckPhotoJson" type="hidden" value={faceCheckPhotoJson} />
             <input name="idempotencyKey" type="hidden" value={idempotencyKey} />
             <input name="remainingResolution" type="hidden" value={remainingResolution} />
@@ -490,7 +785,7 @@ function PurchaseResponseForm({ task }: { task: any }) {
                 placeholder={
                   isPartial
                     ? "例如：剩餘尺寸缺貨，現場已確認無庫存"
-                    : purchaseAction === "complete"
+                    : effectivePurchaseAction === "complete"
                       ? "可補充商品狀態或現場資訊"
                       : "請說明無法完成採買的原因"
                 }
@@ -500,8 +795,14 @@ function PurchaseResponseForm({ task }: { task: any }) {
               />
             </label>
             {state.error ? <p className="text-sm text-destructive">{state.error}</p> : null}
-            {state.ok && state.submissionId === idempotencyKey ? (
-              <p className="text-sm text-primary">已送出。</p>
+            {submitted ? (
+              <InsightBanner
+                body={task.requires_face_check && task.status === "open"
+                  ? "挑臉確認已送出，等待管理員審核。"
+                  : "系統已收到採買回報。"}
+                title="已送出"
+                tone="green"
+              />
             ) : null}
             <Button disabled={!canSubmit} type="submit">
               {needsFinalConfirmation ? <Check className="mr-2 size-4" /> : purchaseAction === "complete" ? <PackageCheck className="mr-2 size-4" /> : <Send className="mr-2 size-4" />}
@@ -509,7 +810,7 @@ function PurchaseResponseForm({ task }: { task: any }) {
                 ? "送出中..."
                 : needsFinalConfirmation
                   ? "確認完成"
-                  : purchaseAction === "complete"
+                  : effectivePurchaseAction === "complete"
                     ? isPartial
                       ? `完成 ${completedQuantityNumber} 件並結案`
                       : "確認完成採買"
@@ -555,6 +856,24 @@ function purchaseProgress(task: any) {
     ? Math.max(Number(task.completed_quantity || 0), 0)
     : 0;
   return `${completed}/${quantity}`;
+}
+
+function productPurchasePhotos(photos: any[]) {
+  return photos.filter((photo) =>
+    ["manual_reference", "source"].includes(String(photo.photo_role || "")),
+  );
+}
+
+function secondaryPurchasePhotos(photos: any[]) {
+  return photos.filter((photo) =>
+    !["manual_reference", "source"].includes(String(photo.photo_role || "")),
+  );
+}
+
+function secondaryPhotoLabel(role: string, index: number) {
+  if (role === "face_check_report") return "挑臉";
+  if (role === "detail_reply") return "細圖";
+  return String(index + 1);
 }
 
 function createClientId(prefix: string) {

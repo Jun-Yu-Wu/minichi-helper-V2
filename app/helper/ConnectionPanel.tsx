@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { Camera, ClipboardList, ShoppingBag } from "lucide-react";
 
@@ -20,6 +19,7 @@ export function ConnectionPanel({
 }) {
   const router = useRouter();
   const navigation = useTripSectionNavigation();
+  const purchaseHref = `/helper?tripId=${tripId}&panel=purchase`;
   const quoteHref = `/helper?tripId=${tripId}&panel=quote`;
   const siteHref = `/helper?tripId=${tripId}&panel=site`;
 
@@ -61,35 +61,25 @@ export function ConnectionPanel({
             title="細圖 / 報價"
           />
         </button>
-        <WorkEntry
-          count={unfinishedCounts.purchase}
-          href={`/helper?tripId=${tripId}&panel=purchase`}
-          icon={<ShoppingBag className="size-5" />}
-          title="採買任務"
-        />
+        <button
+          className="grid gap-3 rounded-xl border bg-card p-4 text-left shadow-sm transition hover:border-primary/30 hover:bg-accent/40"
+          onClick={() => {
+            if (navigation) {
+              navigation.openPurchase();
+            } else {
+              router.push(purchaseHref);
+            }
+          }}
+          type="button"
+        >
+          <WorkEntryContent
+            count={unfinishedCounts.purchase}
+            icon={<ShoppingBag className="size-5" />}
+            title="採買任務"
+          />
+        </button>
       </div>
     </section>
-  );
-}
-
-function WorkEntry({
-  count,
-  href,
-  icon,
-  title,
-}: {
-  count: number;
-  href: string;
-  icon: React.ReactNode;
-  title: string;
-}) {
-  return (
-    <Link
-      className="grid gap-3 rounded-xl border bg-card p-4 shadow-sm transition hover:border-primary/30 hover:bg-accent/40"
-      href={href}
-    >
-      <WorkEntryContent count={count} icon={icon} title={title} />
-    </Link>
   );
 }
 
