@@ -176,8 +176,8 @@ function QuoteTaskList({
   onRefresh: () => void;
   tasks: any[];
 }) {
-  const unfinishedTasks = tasks.filter((task) => task.status !== "completed");
-  const completedTasks = tasks.filter((task) => task.status === "completed");
+  const unfinishedTasks = tasks.filter((task) => !isQuoteTaskCompleted(task));
+  const completedTasks = tasks.filter(isQuoteTaskCompleted);
   const taskNames = buildTaskNames(tasks);
 
   return (
@@ -320,6 +320,7 @@ function QuoteTaskDetail({
           <p className="text-xs font-semibold uppercase text-muted-foreground">
             {task ? taskTypeLabel(task.task_type) : "細圖／報價"}
           </p>
+          <p className="mt-2 text-xs font-semibold text-muted-foreground">商品名稱</p>
           <h5 className="mt-1 truncate text-xl font-semibold tracking-tight">{name}</h5>
           {task?.instruction ? (
             <p className="mt-1 text-sm text-muted-foreground">{task.instruction}</p>
@@ -407,6 +408,12 @@ function completedPhotoCount(photos: any[]) {
   return photos.filter((photo) =>
     ["converted_to_purchase", "replied"].includes(photo.reply_status),
   ).length;
+}
+
+function isQuoteTaskCompleted(task: any) {
+  const photoCount = Number(task.photo_count || task.photos?.length || 0);
+  const repliedPhotoCount = Number(task.replied_photo_count || 0);
+  return task.status === "completed" || (photoCount > 0 && repliedPhotoCount >= photoCount);
 }
 
 function firstUnrepliedPhotoIndex(photos: any[]) {

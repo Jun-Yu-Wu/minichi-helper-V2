@@ -1,11 +1,13 @@
 "use client";
 
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ArrowLeft, Camera, Check, ChevronLeft, ChevronRight, PackageCheck, RefreshCw, Send, X } from "lucide-react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, Camera, Check, ChevronLeft, ChevronRight, PackageCheck, RefreshCw, ShoppingBag, X } from "lucide-react";
 
 import { EmptyState, InsightBanner, StatusBadge, Surface } from "../components/OperationsUi";
 import { Button } from "../components/ui/button";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
+
+const REFRESH_MS = 8000;
 
 type FaceCheckPhoto = {
   byteSize: number;
@@ -48,9 +50,9 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
     );
   }, []);
 
-  const loadTasks = useCallback(async (signal?: AbortSignal) => {
+  const loadTasks = useCallback(async (signal?: AbortSignal, showLoading = false) => {
     setListError("");
-    setListLoading(true);
+    if (showLoading) setListLoading(true);
     try {
       const response = await fetch(
         `/api/helper/trips/${encodeURIComponent(tripId)}/purchase-tasks`,
@@ -68,10 +70,17 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
   }, [tripId]);
 
   useEffect(() => {
+    if (activeTaskId) return undefined;
     const controller = new AbortController();
-    void loadTasks(controller.signal);
-    return () => controller.abort();
-  }, [loadTasks]);
+    const timer = window.setInterval(() => {
+      void loadTasks(undefined, false);
+    }, REFRESH_MS);
+    void loadTasks(controller.signal, true);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [activeTaskId, loadTasks]);
 
   async function openTask(taskId: string) {
     setActiveTaskId(taskId);
@@ -81,14 +90,17 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
     setAllPhotosLoaded(false);
     setAllPhotosLoading(false);
     const summaryTask = tasks.find((task) => task.id === taskId);
+    const loadsReturnedPhotos = shouldLoadReturnedPhotos(summaryTask);
+    const photoMode = loadsReturnedPhotos ? "?photoMode=all" : "";
     try {
       const response = await fetch(
-        `/api/helper/trips/${encodeURIComponent(summaryTask?.trip_id || "")}/purchase-tasks/${encodeURIComponent(taskId)}`,
+        `/api/helper/trips/${encodeURIComponent(summaryTask?.trip_id || "")}/purchase-tasks/${encodeURIComponent(taskId)}${photoMode}`,
         { cache: "no-store" },
       );
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "無法載入採買任務。");
       setActiveTask(body.task || null);
+      setAllPhotosLoaded(loadsReturnedPhotos);
     } catch (error) {
       setDetailError(error instanceof Error ? error.message : "無法載入採買任務。");
     } finally {
@@ -135,12 +147,11 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
       <PurchaseTaskDetail
         error={detailError}
         loading={detailLoading}
-        task={activeTask || summaryTask}
+        task={activeTask || (!detailLoading && !detailError ? summaryTask : null)}
         allPhotosLoaded={allPhotosLoaded}
         allPhotosLoading={allPhotosLoading}
         onBack={closeTask}
         onLoadAllPhotos={loadAllTaskPhotos}
-        onRefresh={() => openTask(activeTaskId)}
         onTaskUpdated={updateActiveTask}
       />
     );
@@ -159,13 +170,7 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
             <div className="h-20 animate-pulse rounded-xl bg-muted" />
           </div>
         ) : listError ? (
-          <div className="grid gap-2">
-            <p className="text-sm text-destructive">{listError}</p>
-            <Button className="w-fit" size="sm" type="button" variant="outline" onClick={() => loadTasks()}>
-              <RefreshCw className="size-4" />
-              重新載入
-            </Button>
-          </div>
+          <p className="text-sm text-destructive">{listError}</p>
         ) : (
           <div className="rounded-xl border border-dashed bg-card p-5 text-sm shadow-sm">
             <p className="font-semibold text-foreground">目前沒有採買任務</p>
@@ -174,24 +179,26 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
       </Surface>
     );
   }
-  const lanes = [
+  const taskGroups = [
     {
-      emptyText: "目前沒有待採買任務。",
-      tasks: tasks.filter((task) => !isCompletedTask(task) && !isCanceledTask(task)),
-      title: "待採買",
-      tone: "blue" as const,
+      emptyText: "目前沒有未完成採買任務。",
+      tasks: tasks.filter((task) => !isFaceCheckReviewTask(task) && !isCompletedTask(task) && !isCanceledTask(task)),
+      title: "未完成",
     },
     {
-      emptyText: "",
+      emptyText: "目前沒有挑臉審核中的任務。",
+      tasks: tasks.filter(isFaceCheckReviewTask),
+      title: "挑臉審核中",
+    },
+    {
+      emptyText: "目前沒有已完成採買任務。",
       tasks: tasks.filter(isCompletedTask),
       title: "已完成",
-      tone: "green" as const,
     },
     {
-      emptyText: "",
+      emptyText: "目前沒有取消採買任務。",
       tasks: tasks.filter(isCanceledTask),
       title: "取消",
-      tone: "red" as const,
     },
   ];
   return (
@@ -201,75 +208,87 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
         返回連線
       </Button>
       {listError ? (
-        <div className="grid gap-2">
-          <p className="text-sm text-destructive">{listError}</p>
-          <Button className="w-fit" size="sm" type="button" variant="outline" onClick={() => loadTasks()}>
-            <RefreshCw className="size-4" />
-            重新載入
-          </Button>
-        </div>
+        <p className="text-sm text-destructive">{listError}</p>
       ) : null}
-      {lanes.map((lane) =>
-        lane.tasks.length || lane.emptyText ? (
-          <PurchaseTaskLane
-            emptyText={lane.emptyText}
-            key={lane.title}
-            tasks={lane.tasks}
-            title={lane.title}
-            tone={lane.tone}
+      <div className="grid gap-4">
+        {taskGroups.map((group) => (
+          <PurchaseTaskGroup
+            emptyText={group.emptyText}
+            key={group.title}
+            tasks={group.tasks}
+            title={group.title}
             onOpenTask={openTask}
           />
-        ) : null,
-      )}
+        ))}
+      </div>
     </Surface>
   );
 }
 
-function PurchaseTaskLane({
+function PurchaseTaskGroup({
   emptyText,
   onOpenTask,
   tasks,
   title,
-  tone,
 }: {
   emptyText: string;
   onOpenTask: (taskId: string) => void;
   tasks: any[];
   title: string;
-  tone: "blue" | "green" | "red";
 }) {
   return (
     <section className="grid gap-2">
-      <p className={`text-sm font-semibold ${tone === "green" ? "text-emerald-700" : tone === "red" ? "text-red-700" : ""}`}>
-        {title}
-      </p>
-      {tasks.length ? tasks.map((task) => (
-        <button
-          className={`flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-foreground/20 hover:bg-accent/30 ${
-            tone === "green"
-              ? "border-emerald-200 bg-emerald-50/60"
-              : tone === "red"
-                ? "border-red-200 bg-red-50/60"
-                : "bg-background"
-          }`}
-          key={task.id}
-          type="button"
-          onClick={() => onOpenTask(task.id)}
-        >
-          <span className="min-w-0">
-            <strong className="block truncate text-base">{purchaseTaskName(task)}</strong>
-            <span className="mt-0.5 block text-xs text-muted-foreground">
-              {purchaseTypeLabel(task)}
-            </span>
-          </span>
-          <StatusBadge tone={tone}>
-            {purchaseProgress(task)}
-          </StatusBadge>
-        </button>
-      )) : (
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+        <span className="text-xs font-medium text-muted-foreground">{tasks.length} 筆</span>
+      </div>
+      {tasks.length ? (
+        <div className="grid gap-2">
+          {tasks.map((task) => (
+            <PurchaseTaskCard
+              key={task.id}
+              task={task}
+              onOpenTask={onOpenTask}
+            />
+          ))}
+        </div>
+      ) : (
         <p className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">{emptyText}</p>
       )}
     </section>
+  );
+}
+
+function PurchaseTaskCard({
+  onOpenTask,
+  task,
+}: {
+  onOpenTask: (taskId: string) => void;
+  task: any;
+}) {
+  const tone = purchaseTaskTone(task);
+  return (
+    <button
+      className={`flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-foreground/20 hover:bg-accent/30 ${
+        tone === "green"
+          ? "border-emerald-200 bg-emerald-50/60"
+          : tone === "red"
+            ? "border-red-200 bg-red-50/60"
+            : "bg-background"
+      }`}
+      type="button"
+      onClick={() => onOpenTask(task.id)}
+    >
+      <span className="min-w-0">
+        <strong className="block truncate text-base">{purchaseTaskDisplayTitle(task)}</strong>
+        <span className="mt-0.5 block text-xs text-muted-foreground">
+          {purchaseTaskListMeta(task)}
+        </span>
+      </span>
+      <StatusBadge tone={tone}>
+        {purchaseProgress(task)}
+      </StatusBadge>
+    </button>
   );
 }
 
@@ -280,7 +299,6 @@ function PurchaseTaskDetail({
   loading,
   onBack,
   onLoadAllPhotos,
-  onRefresh,
   task,
   onTaskUpdated,
 }: {
@@ -290,16 +308,24 @@ function PurchaseTaskDetail({
   loading: boolean;
   onBack: () => void;
   onLoadAllPhotos: () => void;
-  onRefresh: () => void;
   onTaskUpdated: (task: any) => void;
   task: any | null;
 }) {
   const completed = task ? isCompletedTask(task) : false;
   const productPhotos = task ? productPurchasePhotos(task.photos || []) : [];
-  const hiddenPhotos = task ? secondaryPurchasePhotos(task.photos || []) : [];
+  const returnedPhotos = task ? returnedPurchasePhotos(task.photos || []) : [];
+  const primaryPhotos = task && shouldPreferReturnedPhotos(task) && returnedPhotos.length
+    ? returnedPhotos
+    : productPhotos;
+  const primaryPhotoIds = new Set(primaryPhotos.map((photo: any) => photo.id));
+  const hiddenPhotos = task
+    ? secondaryPurchasePhotos(task.photos || []).filter((photo: any) => !primaryPhotoIds.has(photo.id))
+    : [];
+  const faceCheckPhoto = task ? latestFaceCheckPhoto(task.photos || []) : null;
+  const isCanceled = task ? isCanceledTask(task) : false;
   return (
-    <Surface className="grid gap-4">
-      <Button className="w-fit" size="sm" type="button" variant="ghost" onClick={onBack}>
+    <Surface className="grid gap-3">
+      <Button className="w-fit px-2.5 text-xs" size="sm" type="button" variant="ghost" onClick={onBack}>
         <ArrowLeft className="size-4" />
         回任務列表
       </Button>
@@ -309,50 +335,51 @@ function PurchaseTaskDetail({
           <div className="h-28 animate-pulse rounded-lg bg-muted" />
         </div>
       ) : error ? (
-        <div className="grid gap-2">
-          <p className="text-sm text-destructive">{error}</p>
-          <Button className="w-fit" size="sm" type="button" variant="outline" onClick={onRefresh}>
-            <RefreshCw className="size-4" />
-            重新載入
-          </Button>
-        </div>
+        <p className="text-sm text-destructive">{error}</p>
       ) : task ? (
         <>
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <p className="text-xs font-semibold uppercase text-muted-foreground">
-                {purchaseTypeLabel(task)}
-              </p>
-              <h5 className="mt-1 truncate text-xl font-semibold tracking-tight">{purchaseTaskName(task)}</h5>
-            </div>
-            <StatusBadge tone={isCompletedTask(task) ? "green" : isCanceledTask(task) ? "red" : "neutral"}>
-              {purchaseProgress(task)}
-            </StatusBadge>
-          </div>
-          <PurchaseTaskPhotos photos={productPhotos} />
-          {completed ? (
-            <SecondaryPurchasePhotos
-              allPhotosLoaded={allPhotosLoaded}
-              loading={allPhotosLoading}
-              photos={hiddenPhotos}
-              onLoad={onLoadAllPhotos}
-            />
-          ) : null}
-          <dl className="grid gap-2 text-sm sm:grid-cols-2">
-            <Meta label="需採買數量" value={`${task.quantity} 件`} />
-            <Meta label="商品原價" value={`JPY ${task.original_price_jpy ?? "-"}`} />
-          </dl>
-          {!completed ? (
-            <InsightBanner
-              body="確認現場商品與原價是否正確，有誤請取消訂單"
-              title="核對採買資訊"
-              tone="amber"
-            />
-          ) : null}
-          {task.note ? (
-            <InsightBanner body={task.note} title="管理員備註" tone="neutral" />
-          ) : null}
-          <PurchaseResponseForm task={task} onTaskUpdated={onTaskUpdated} />
+          {isCanceled ? (
+            <CanceledPurchaseTaskView task={task} photos={primaryPhotos} />
+          ) : (
+            <>
+              <TaskProductHeader task={task} />
+              <section className="grid gap-2">
+                <p className="text-sm font-semibold text-foreground">
+                  {task.status === "approved_pending_helper_confirmation" && faceCheckPhoto ? "挑臉確認照" : "商品圖片"}
+                </p>
+                {task.status === "approved_pending_helper_confirmation" && faceCheckPhoto ? (
+                  <LatestFaceCheckPhoto photo={faceCheckPhoto} />
+                ) : (
+                  <PurchaseTaskPhotos photos={primaryPhotos} />
+                )}
+              </section>
+              <section className="grid gap-3 rounded-xl border bg-background p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-sm font-semibold text-foreground">採買資訊</p>
+                  <StatusBadge tone={purchaseTaskTone(task)}>{purchaseStatusLabel(task)}</StatusBadge>
+                </div>
+                <dl className="grid grid-cols-2 gap-2 text-sm">
+                  <Meta label="需採買" value={`${task.quantity} 件`} />
+                  <Meta label="原價" value={`JPY ${task.original_price_jpy ?? "-"}`} />
+                </dl>
+                {task.note ? (
+                  <div className="rounded-lg bg-muted/45 px-3 py-2 text-sm">
+                    <p className="text-xs font-medium text-muted-foreground">管理員備註</p>
+                    <p className="mt-1 leading-6 text-foreground">{task.note}</p>
+                  </div>
+                ) : null}
+              </section>
+              {completed ? (
+                <SecondaryPurchasePhotos
+                  allPhotosLoaded={allPhotosLoaded}
+                  loading={allPhotosLoading}
+                  photos={hiddenPhotos}
+                  onLoad={onLoadAllPhotos}
+                />
+              ) : null}
+              <PurchaseResponseForm task={task} onTaskUpdated={onTaskUpdated} />
+            </>
+          )}
         </>
       ) : (
         <EmptyState title="找不到這個採買任務" body="請返回任務列表重新選擇。" />
@@ -361,12 +388,44 @@ function PurchaseTaskDetail({
   );
 }
 
+function TaskProductHeader({ task }: { task: any }) {
+  return (
+    <header className="rounded-xl border bg-background p-4">
+      <div className="flex items-start gap-3">
+        <div className="flex size-10 shrink-0 items-center justify-center rounded-full bg-muted">
+          <ShoppingBag className="size-5 text-muted-foreground" aria-hidden="true" />
+        </div>
+        <div className="min-w-0">
+          <p className="text-xs font-semibold text-muted-foreground">商品名稱</p>
+          <h3 className="mt-1 text-2xl font-semibold leading-tight tracking-tight">{purchaseTaskDisplayTitle(task)}</h3>
+          <p className="mt-2 text-sm text-muted-foreground">{purchaseTaskPrimaryInstruction(task)}</p>
+        </div>
+      </div>
+    </header>
+  );
+}
+
+function CanceledPurchaseTaskView({ photos, task }: { photos: any[]; task: any }) {
+  return (
+    <div className="grid gap-4">
+      <div className="rounded-xl border border-red-200 bg-red-50 p-5 text-center text-red-950">
+        <p className="text-xs font-semibold text-red-700">商品名稱</p>
+        <h3 className="mt-1 text-2xl font-semibold tracking-tight">{purchaseTaskDisplayTitle(task)}</h3>
+        <div className="mt-4 inline-flex min-h-10 items-center rounded-full border border-red-300 bg-background px-4 py-2 text-base font-semibold text-red-800">
+          已取消
+        </div>
+      </div>
+      <PurchaseTaskPhotos photos={photos} />
+    </div>
+  );
+}
+
 function PurchaseTaskPhotos({ photos }: { photos: any[] }) {
   const [activeIndex, setActiveIndex] = useState(0);
   if (!photos.length) {
     return (
       <p className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
-        這個採買任務沒有參考照片。
+        參考照片加載中...
       </p>
     );
   }
@@ -437,6 +496,28 @@ function PurchaseTaskPhotos({ photos }: { photos: any[] }) {
   );
 }
 
+function LatestFaceCheckPhoto({ photo }: { photo: any | null }) {
+  if (!photo) {
+    return (
+      <p className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+        目前沒有挑臉確認照。
+      </p>
+    );
+  }
+  return (
+    <div className="flex justify-center">
+      <a className="block w-full max-w-sm" href={photo.signed_url} target="_blank" rel="noreferrer">
+        <img
+          alt="挑臉確認照"
+          className="aspect-square w-full rounded-xl border object-cover shadow-sm"
+          loading="lazy"
+          src={photo.signed_url}
+        />
+      </a>
+    </div>
+  );
+}
+
 function SecondaryPurchasePhotos({
   allPhotosLoaded,
   loading,
@@ -483,13 +564,12 @@ function SecondaryPurchasePhotos({
 function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdated: (task: any) => void }) {
   const [state, setState] = useState<PurchaseResponseState>({});
   const [pending, setPending] = useState(false);
-  const [purchaseAction, setPurchaseAction] = useState("complete");
   const [completedQuantity, setCompletedQuantity] = useState(String(task.completed_quantity || task.quantity || 1));
   const [helperNote, setHelperNote] = useState("");
-  const [remainingResolution, setRemainingResolution] = useState("");
   const [faceCheckPhoto, setFaceCheckPhoto] = useState<FaceCheckPhoto | null>(null);
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientId("purchase-response"));
   const [cancelingCompleted, setCancelingCompleted] = useState(false);
+  const faceCheckUploadPromises = useRef(new Map<string, Promise<FaceCheckPhoto>>());
 
   useEffect(() => {
     if (state.ok && state.task && state.submissionId === idempotencyKey) {
@@ -514,25 +594,19 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
   const closed = ["canceled", "unavailable", "not_found", "review_pending"].includes(task.status);
   const needsFinalConfirmation = task.status === "approved_pending_helper_confirmation";
   const submitted = Boolean(state.ok && state.submissionId === idempotencyKey);
-  const effectivePurchaseAction = completed && cancelingCompleted ? "cancel" : purchaseAction;
+  const requestedQuantity = Math.max(1, Number(task.quantity || 1));
+  const completedQuantityNumber = Math.max(0, Math.min(Number(completedQuantity || 0), requestedQuantity));
+  const effectivePurchaseAction = (completed && cancelingCompleted) || completedQuantityNumber === 0 ? "cancel" : "complete";
+  const needsCancelReason = effectivePurchaseAction === "cancel";
   const needsFaceCheckUpload = task.requires_face_check && task.status === "open" && effectivePurchaseAction === "complete";
-  const requestedQuantity = Number(task.quantity || 0);
-  const completedQuantityNumber = Number(completedQuantity || 0);
-  const isPartial =
-    effectivePurchaseAction === "complete" &&
-    completedQuantityNumber > 0 &&
-    completedQuantityNumber < requestedQuantity;
-  const needsReason = effectivePurchaseAction !== "complete" || isPartial;
   const canSubmit =
     !pending &&
     !submitted &&
     (!closed || needsFinalConfirmation) &&
     (!completed || cancelingCompleted) &&
-    (!needsFaceCheckUpload || faceCheckPhoto?.status === "uploaded") &&
-    (effectivePurchaseAction !== "complete" || completedQuantityNumber > 0) &&
-    completedQuantityNumber <= requestedQuantity &&
-    (!isPartial || Boolean(remainingResolution)) &&
-    (!needsReason || Boolean(helperNote.trim()));
+    (!needsCancelReason || Boolean(helperNote.trim())) &&
+    (!needsFaceCheckUpload || ["selected", "uploading", "uploaded"].includes(String(faceCheckPhoto?.status || ""))) &&
+    completedQuantityNumber <= requestedQuantity;
 
   function addFaceCheckPhoto(fileList: FileList | null) {
     const file = fileList?.[0];
@@ -548,17 +622,20 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
       status: "selected",
     };
     setFaceCheckPhoto(nextPhoto);
-    void uploadFaceCheckPhoto(nextPhoto);
+    void uploadFaceCheckPhoto(nextPhoto).catch(() => undefined);
   }
 
-  async function uploadFaceCheckPhoto(photo = faceCheckPhoto) {
-    if (!photo) return;
+  async function uploadFaceCheckPhoto(photo = faceCheckPhoto): Promise<FaceCheckPhoto | null> {
+    if (!photo) return null;
+    if (photo.status === "uploaded" && photo.storageKey) return photo;
+    const existingUpload = faceCheckUploadPromises.current.get(photo.clientPhotoId);
+    if (existingUpload) return existingUpload;
     setFaceCheckPhoto((current) =>
       current?.clientPhotoId === photo.clientPhotoId
         ? { ...current, error: undefined, status: "uploading" }
         : current,
     );
-    try {
+    const uploadPromise = (async () => {
       const presign = await fetch("/api/uploads/presign", {
         body: JSON.stringify({
           clientPhotoId: photo.clientPhotoId,
@@ -578,11 +655,17 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
         method: "PUT",
       });
       if (!upload.ok) throw new Error(`R2 上傳失敗 (${upload.status})。`);
+      const uploadedPhoto = { ...photo, status: "uploaded" as const, storageKey: presignBody.storageKey };
       setFaceCheckPhoto((current) =>
         current?.clientPhotoId === photo.clientPhotoId
-          ? { ...current, status: "uploaded", storageKey: presignBody.storageKey }
+          ? uploadedPhoto
           : current,
       );
+      return uploadedPhoto;
+    })();
+    faceCheckUploadPromises.current.set(photo.clientPhotoId, uploadPromise);
+    try {
+      return await uploadPromise;
     } catch (error) {
       setFaceCheckPhoto((current) =>
         current?.clientPhotoId === photo.clientPhotoId
@@ -593,6 +676,9 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
             }
           : current,
       );
+      throw error;
+    } finally {
+      faceCheckUploadPromises.current.delete(photo.clientPhotoId);
     }
   }
 
@@ -607,17 +693,31 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
     setPending(true);
     setState({});
     try {
+      const uploadedFaceCheckPhoto = needsFaceCheckUpload
+        ? await uploadFaceCheckPhoto(faceCheckPhoto)
+        : faceCheckPhoto;
+      const faceCheckPhotoPayload =
+        uploadedFaceCheckPhoto?.status === "uploaded" && uploadedFaceCheckPhoto.storageKey
+          ? {
+              byteSize: uploadedFaceCheckPhoto.byteSize,
+              contentType: uploadedFaceCheckPhoto.contentType,
+              originalFilename: uploadedFaceCheckPhoto.originalFilename,
+              storageKey: uploadedFaceCheckPhoto.storageKey,
+            }
+          : null;
+      if (needsFaceCheckUpload && !faceCheckPhotoPayload) {
+        throw new Error("請先選擇挑臉確認照。");
+      }
       const response = await fetch("/api/helper/purchase-task-responses", {
         body: JSON.stringify({
           completedQuantity,
-          faceCheckPhoto: faceCheckPhotoJson ? JSON.parse(faceCheckPhotoJson) : null,
+          faceCheckPhoto: faceCheckPhotoPayload,
           helperNote,
           idempotencyKey,
           purchaseAction: needsFinalConfirmation ? "complete" : effectivePurchaseAction,
           purchaseTaskId: task.id,
-          remainingResolution,
           unavailableQuantity: effectivePurchaseAction === "complete"
-            ? Math.max(0, Number(task.quantity) - Number(completedQuantity || 0))
+            ? Math.max(0, requestedQuantity - completedQuantityNumber)
             : task.quantity,
         }),
         headers: { "content-type": "application/json" },
@@ -635,34 +735,24 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
   }
 
   return (
-    <div className="grid gap-4 rounded-lg border bg-background p-3 sm:p-4">
+    <section className="grid gap-4 rounded-xl border bg-background p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold text-foreground">回報結果</p>
+          <p className="mt-1 text-sm text-muted-foreground">{purchaseResponseHelpText(task, cancelingCompleted)}</p>
+        </div>
+        <StatusBadge tone={purchaseTaskTone(task)}>{purchaseStatusLabel(task)}</StatusBadge>
+      </div>
+      <PurchaseTaskStateNotice task={task} />
       {closed && task.helper_note ? (
-        <InsightBanner body={task.helper_note} title="小幫手回報" tone="neutral" />
-      ) : null}
-      {task.status === "review_pending" ? (
-        <InsightBanner
-          body="挑臉確認照已送出。管理員還沒審核前，這筆不會進入暫存訂單，也會擋住結束行程。"
-          title="等待管理員挑臉審核"
-          tone="amber"
-        />
-      ) : null}
-      {needsFinalConfirmation ? (
-        <InsightBanner
-          body="管理員已通過照片。請確認實際買到數量；送出後才會建立 completed 採買結果與暫存訂單預覽。"
-          title="最後確認後才算完成"
-          tone="green"
-        />
-      ) : null}
-      {task.status === "completed" ? (
-        <InsightBanner
-          title="已完成採買"
-          tone="green"
-        />
+        <div className="rounded-lg bg-muted/45 px-3 py-2 text-sm">
+          <p className="text-xs font-medium text-muted-foreground">小幫手備註</p>
+          <p className="mt-1 leading-6 text-foreground">{task.helper_note}</p>
+        </div>
       ) : null}
       {completed && !cancelingCompleted ? (
-        <Button className="mx-auto w-fit" type="button" variant="outline" onClick={() => {
+        <Button className="w-full" type="button" variant="outline" onClick={() => {
           setCancelingCompleted(true);
-          setPurchaseAction("cancel");
           setHelperNote("");
           setIdempotencyKey(createClientId("purchase-cancel"));
         }}>
@@ -671,71 +761,31 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
       ) : null}
       {(!closed && !completed) || needsFinalConfirmation || cancelingCompleted ? (
         <>
-          <div className="grid gap-2 sm:grid-cols-2">
-            {!needsFinalConfirmation && !cancelingCompleted ? (
-              <select value={effectivePurchaseAction} onChange={(event) => setPurchaseAction(event.target.value)}>
-                <option value="complete">完成採買</option>
-                <option value="unavailable">缺貨</option>
-                <option value="not_found">找不到</option>
-                <option value="cancel">取消</option>
-              </select>
-            ) : cancelingCompleted ? (
-              <InsightBanner
-                body="取消後這筆會退出暫存訂單預覽；請填寫原因方便管理員確認。"
-                title="取消已完成採買"
-                tone="amber"
-              />
-            ) : (
-              <InsightBanner
-                body="確認後才會建立 completed 採買結果與暫存訂單預覽。"
-                title="管理員已通過挑臉審核"
-                tone="green"
-              />
-            )}
-            {effectivePurchaseAction === "complete" || needsFinalConfirmation ? (
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium">實際買到數量</span>
-                <input
-                  inputMode="numeric"
-                  max={task.quantity}
-                  min="1"
+          {(!cancelingCompleted && !needsFinalConfirmation) || effectivePurchaseAction === "complete" || needsFinalConfirmation ? (
+            <label className="grid gap-1.5 text-sm">
+              <span className="font-medium">實際買到數量</span>
+                <select
                   name="completedQuantityVisible"
-                  placeholder="完成數量"
                   value={completedQuantity}
                   onChange={(event) => setCompletedQuantity(event.target.value)}
-                />
-              </label>
-            ) : null}
-          </div>
-
-          {isPartial ? (
-            <div className="grid gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
-              <div className="flex items-start gap-2 text-amber-950">
-                <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-                <div>
-                  <p className="text-sm font-semibold">還有 {requestedQuantity - completedQuantityNumber} 件未購得</p>
-                  <p className="mt-1 text-xs leading-5">完成部分數量前，請選擇剩餘商品的處理結果並留下原因。</p>
-                </div>
-              </div>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium">剩餘數量處理</span>
-                <select
-                  value={remainingResolution}
-                  onChange={(event) => setRemainingResolution(event.target.value)}
                 >
-                  <option value="">請選擇</option>
-                  <option value="unavailable">缺貨</option>
-                  <option value="not_found">未找到</option>
-                  <option value="canceled">取消購買</option>
+                  {Array.from({ length: requestedQuantity + 1 }, (_, quantity) => (
+                    <option key={quantity} value={quantity}>
+                      {quantity === 0 ? "0（取消）" : quantity}
+                    </option>
+                  ))}
                 </select>
-              </label>
-            </div>
+              <span className="text-xs text-muted-foreground">選 0 會取消這筆採買；請填寫取消理由。</span>
+            </label>
           ) : null}
 
           {needsFaceCheckUpload ? (
-          <div className="grid gap-2 rounded-lg border border-amber-200 bg-amber-50 p-3">
-            <p className="text-sm font-semibold text-amber-950">挑臉任務：先上傳確認照，等待管理員審核後再完成採買。</p>
-            <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-3 text-center">
+            <div className="grid gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3">
+              <div>
+                <p className="text-sm font-semibold text-amber-950">挑臉確認照</p>
+                <p className="mt-1 text-xs leading-5 text-amber-900/80">上傳後會送給管理員審核，審核通過後再回來確認完成。</p>
+              </div>
+              <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-background/70 p-3 text-center">
                 <Camera className="size-5" aria-hidden="true" />
                 <span className="text-sm">選擇挑臉確認照</span>
                 <input
@@ -746,7 +796,7 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
                 />
               </label>
               {faceCheckPhoto ? (
-                <div className="rounded-md border bg-background p-2">
+                <div className="grid gap-2 rounded-md border bg-background p-2">
                   <img alt={faceCheckPhoto.originalFilename} className="aspect-square w-full max-w-48 rounded-md object-cover" src={faceCheckPhoto.objectUrl} />
                   <div className="mt-2 flex flex-wrap gap-2">
                     <Button disabled={faceCheckPhoto.status === "uploading" || faceCheckPhoto.status === "uploaded"} size="sm" type="button" variant="outline" onClick={() => uploadFaceCheckPhoto()}>
@@ -772,28 +822,26 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
             <input name="purchaseTaskId" type="hidden" value={task.id} />
             <input name="purchaseAction" type="hidden" value={needsFinalConfirmation ? "complete" : effectivePurchaseAction} />
             <input name="completedQuantity" type="hidden" value={completedQuantity} />
-            <input name="unavailableQuantity" type="hidden" value={effectivePurchaseAction === "complete" ? Math.max(0, Number(task.quantity) - Number(completedQuantity || 0)) : task.quantity} />
+            <input name="unavailableQuantity" type="hidden" value={effectivePurchaseAction === "complete" ? Math.max(0, requestedQuantity - completedQuantityNumber) : task.quantity} />
             <input name="faceCheckPhotoJson" type="hidden" value={faceCheckPhotoJson} />
             <input name="idempotencyKey" type="hidden" value={idempotencyKey} />
-            <input name="remainingResolution" type="hidden" value={remainingResolution} />
-            <label className="grid gap-1 text-sm">
-              <span className="font-medium">
-                {needsReason ? "原因（必填）" : "採買備註（選填）"}
-              </span>
+            <label className="grid gap-1.5 text-sm">
+              <span className="font-medium">{effectivePurchaseAction === "complete" ? "採買備註（選填）" : "取消理由（必填）"}</span>
               <textarea
                 name="helperNote"
                 placeholder={
-                  isPartial
-                    ? "例如：剩餘尺寸缺貨，現場已確認無庫存"
-                    : effectivePurchaseAction === "complete"
-                      ? "可補充商品狀態或現場資訊"
-                      : "請說明無法完成採買的原因"
+                  effectivePurchaseAction === "complete"
+                    ? "可補充商品狀態或現場資訊"
+                    : "請填寫取消原因，例如缺貨、尺寸不對或現場無法確認"
                 }
-                required={needsReason}
+                required={needsCancelReason}
                 value={helperNote}
                 onChange={(event) => setHelperNote(event.target.value)}
               />
             </label>
+            {needsCancelReason && !helperNote.trim() ? (
+              <p className="text-xs text-destructive">取消採買前請先填寫理由。</p>
+            ) : null}
             {state.error ? <p className="text-sm text-destructive">{state.error}</p> : null}
             {submitted ? (
               <InsightBanner
@@ -805,22 +853,39 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
               />
             ) : null}
             <Button disabled={!canSubmit} type="submit">
-              {needsFinalConfirmation ? <Check className="mr-2 size-4" /> : purchaseAction === "complete" ? <PackageCheck className="mr-2 size-4" /> : <Send className="mr-2 size-4" />}
+              {needsFinalConfirmation ? <Check className="mr-2 size-4" /> : <PackageCheck className="mr-2 size-4" />}
               {pending
                 ? "送出中..."
                 : needsFinalConfirmation
                   ? "確認完成"
                   : effectivePurchaseAction === "complete"
-                    ? isPartial
-                      ? `完成 ${completedQuantityNumber} 件並結案`
-                      : "確認完成採買"
-                    : "確認回報未購得"}
+                    ? "確認完成採買"
+                    : "確認取消採買"}
             </Button>
           </form>
         </>
       ) : null}
-    </div>
+    </section>
   );
+}
+
+function PurchaseTaskStateNotice({ task }: { task: any }) {
+  if (task.status === "review_pending") {
+    return (
+      <InsightBanner
+        body="挑臉確認照已送出，等待管理員審核。"
+        title="審核中"
+        tone="amber"
+      />
+    );
+  }
+  if (task.status === "approved_pending_helper_confirmation") {
+    return <InsightBanner title="挑臉已通過，請確認完成" tone="green" />;
+  }
+  if (task.status === "completed") {
+    return <InsightBanner title="已完成採買" tone="green" />;
+  }
+  return null;
 }
 
 function Meta({ label, value }: { label: string; value: string }) {
@@ -840,14 +905,64 @@ function isCanceledTask(task: any) {
   return ["canceled", "unavailable", "not_found"].includes(task.status);
 }
 
+function isFaceCheckReviewTask(task: any) {
+  return Boolean(task.requires_face_check) && ["review_pending", "approved_pending_helper_confirmation"].includes(task.status);
+}
+
+function shouldLoadReturnedPhotos(task: any | undefined) {
+  return Boolean(task) && (isCompletedTask(task) || isFaceCheckReviewTask(task));
+}
+
+function shouldPreferReturnedPhotos(task: any) {
+  return isCompletedTask(task) || isFaceCheckReviewTask(task);
+}
+
 function purchaseTaskName(task: any) {
   return String(task.product_name || "").trim() || "未命名採買";
 }
 
-function purchaseTypeLabel(task: any) {
-  if (task.status === "review_pending") return "挑臉採買 · 等待審核";
-  if (task.status === "approved_pending_helper_confirmation") return "挑臉採買 · 待確認";
-  return task.requires_face_check ? "挑臉採買" : "一般採買";
+function purchaseTaskDisplayTitle(task: any) {
+  const productName = String(task.product_name || "").trim();
+  if (productName) return productName;
+  return "未填商品";
+}
+
+function purchaseTaskListMeta(task: any) {
+  const parts = [`${Number(task.quantity || 0)} 件`];
+  if (task.original_price_jpy != null) parts.push(`JPY ${task.original_price_jpy}`);
+  if (task.requires_face_check) parts.push("挑臉審核");
+  return parts.join(" · ");
+}
+
+function purchaseStatusLabel(task: any) {
+  if (task.status === "completed") return "已完成";
+  if (task.status === "review_pending") return "挑臉審核中";
+  if (task.status === "approved_pending_helper_confirmation") return "待確認完成";
+  if (isCanceledTask(task)) return "已取消";
+  return "待採買";
+}
+
+function purchaseTaskPrimaryInstruction(task: any) {
+  if (task.status === "completed") return "這筆已完成，可在需要時取消並退出暫存訂單預覽。";
+  if (task.status === "review_pending") return "挑臉照片已送審，等管理員回覆。";
+  if (task.status === "approved_pending_helper_confirmation") return "管理員已通過挑臉，請確認完成採買。";
+  if (isCanceledTask(task)) return "這筆已取消，不會進入暫存訂單。";
+  return "先核對商品圖片、數量與原價，再回報實際買到數量。";
+}
+
+function purchaseResponseHelpText(task: any, cancelingCompleted: boolean) {
+  if (cancelingCompleted) return "取消後這筆會退出暫存訂單預覽，請填寫取消理由。";
+  if (task.status === "completed") return "採買已完成。";
+  if (task.status === "review_pending") return "等待管理員審核挑臉照片。";
+  if (task.status === "approved_pending_helper_confirmation") return "確認後才會正式完成這筆採買。";
+  return "填實際買到數量；買不到就選 0。";
+}
+
+function purchaseTaskTone(task: any): "amber" | "blue" | "green" | "red" {
+  if (isCompletedTask(task)) return "green";
+  if (isCanceledTask(task)) return "red";
+  if (isFaceCheckReviewTask(task)) return "amber";
+  return "blue";
 }
 
 function purchaseProgress(task: any) {
@@ -868,6 +983,27 @@ function secondaryPurchasePhotos(photos: any[]) {
   return photos.filter((photo) =>
     !["manual_reference", "source"].includes(String(photo.photo_role || "")),
   );
+}
+
+function returnedPurchasePhotos(photos: any[]) {
+  const faceCheckPhoto = latestFaceCheckPhoto(photos);
+  if (faceCheckPhoto) return [faceCheckPhoto];
+  return photos.filter((photo) => String(photo.photo_role || "") === "detail_reply");
+}
+
+function latestFaceCheckPhoto(photos: any[]) {
+  return photos
+    .filter((photo) => String(photo.photo_role || "") === "face_check_report")
+    .sort(compareNewestPhotoFirst)[0] || null;
+}
+
+function compareNewestPhotoFirst(left: any, right: any) {
+  const leftTime = Date.parse(String(left.created_at || ""));
+  const rightTime = Date.parse(String(right.created_at || ""));
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  return String(right.id || "").localeCompare(String(left.id || ""));
 }
 
 function secondaryPhotoLabel(role: string, index: number) {

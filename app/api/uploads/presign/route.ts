@@ -2,16 +2,15 @@ import { NextResponse } from "next/server";
 
 import adminAuthorization from "../../../../src/server/admin-authorization";
 import database from "../../../../src/server/database";
+import { getCurrentUser } from "../../../../src/server/current-session";
 import { createR2ObjectStore } from "../../../../src/server/r2-object-store";
 import service from "../../../../src/server/helper-app-service";
-import { createServerSupabaseClient } from "../../../../src/server/supabase";
 
 export async function POST(request: Request) {
   const startedAt = performance.now();
   try {
-    const authClient = await createServerSupabaseClient();
-    const { data, error } = await authClient.auth.getUser();
-    if (error || !data?.user) {
+    const user = await getCurrentUser();
+    if (!user) {
       return NextResponse.json({ error: "請先登入。" }, { status: 401 });
     }
     const authenticatedAt = performance.now();
@@ -36,7 +35,7 @@ export async function POST(request: Request) {
 
     let storageKeyTripId = tripId;
     if (uploadPurpose === "admin_quote_task_photo") {
-      adminAuthorization.authorizeAdminUserByAllowlist(data.user);
+      adminAuthorization.authorizeAdminUserByAllowlist(user);
       if (!tripId) {
         return NextResponse.json({ error: "缺少行程資訊。" }, { status: 400 });
       }
@@ -48,7 +47,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "缺少任務照片資訊。" }, { status: 400 });
       }
       const authorization = await service.authorizeQuoteReplyUpload(database.getDatabasePool(), {
-        authUserId: data.user.id,
+        authUserId: user.id,
         quoteTaskPhotoId,
       });
       storageKeyTripId = authorization.trip_id;
@@ -57,7 +56,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "缺少採買任務資訊。" }, { status: 400 });
       }
       const authorization = await service.authorizePurchaseFaceCheckUpload(database.getDatabasePool(), {
-        authUserId: data.user.id,
+        authUserId: user.id,
         purchaseTaskId,
       });
       storageKeyTripId = authorization.trip_id;
@@ -68,21 +67,21 @@ export async function POST(request: Request) {
       const authorization = await service.authorizeSettlementEvidenceUpload(
         database.getDatabasePool(),
         {
-          authUserId: data.user.id,
+          authUserId: user.id,
           evidenceType,
           settlementId,
         },
       );
       storageKeyTripId = authorization.trip_id;
     } else if (uploadPurpose === "admin_rebuy_reference") {
-      await adminAuthorization.authorizeAdminByAllowlist(authClient);
+      adminAuthorization.authorizeAdminUserByAllowlist(user);
       storageKeyTripId = "rebuy";
     } else if (uploadPurpose === "rebuy_report") {
       if (!rebuyTaskId) {
         return NextResponse.json({ error: "缺少補買任務資訊。" }, { status: 400 });
       }
       await service.authorizeRebuyReportUpload(database.getDatabasePool(), {
-        authUserId: data.user.id,
+        authUserId: user.id,
         rebuyTaskId,
       });
       storageKeyTripId = "rebuy";
@@ -91,7 +90,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "缺少行程資訊。" }, { status: 400 });
       }
       await service.authorizeSitePhotoUpload(database.getDatabasePool(), {
-        authUserId: data.user.id,
+        authUserId: user.id,
         tripId,
       });
     }

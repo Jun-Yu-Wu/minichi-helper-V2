@@ -80,6 +80,18 @@ export default async function HelperPage({
         Boolean(params.tripId),
         Boolean(params.batchId),
       ),
+      settlementIds:
+        view === "settlement" && params.settlementId
+          ? [params.settlementId]
+          : null,
+      settlementIncludeDetails:
+        view === "settlement"
+          ? Boolean(params.settlementId)
+          : view === "warehouse",
+      settlementStatuses:
+        view === "warehouse"
+          ? ["warehouse_pending"]
+          : null,
       sitePhotoBatchId:
         panel === "site" && params.batchId ? params.batchId : null,
       tripIds: params.tripId ? [params.tripId] : null,
@@ -110,7 +122,10 @@ export default async function HelperPage({
     shouldSignTripMedia && panel === "site" && Boolean(params.batchId)
       ? await signBatchesByTripId(unsignedBatchesByTripId)
       : unsignedBatchesByTripId;
-  const signedSettlements = ["settlement", "warehouse"].includes(view)
+  const shouldSignSettlementMedia =
+    (view === "settlement" && Boolean(params.settlementId)) ||
+    view === "warehouse";
+  const signedSettlements = shouldSignSettlementMedia
     ? await service.attachSignedSettlementUrls(
         workspace.settlements || [],
         createR2ObjectStore(),
@@ -627,6 +642,7 @@ function TripWorkspace({
   );
   const chrome = <ActiveTripChrome trip={trip} />;
   const workChrome = <ReturnToTripsButton />;
+  const purchasePanel = <PurchaseTasks tripId={trip.id} />;
   const quotePanel = <QuoteTaskWorkspace tripId={trip.id} />;
   const sitePanel = <SitePhotoWorkspace tripId={trip.id} />;
 
@@ -635,6 +651,10 @@ function TripWorkspace({
       <TripSectionSwitcher
         chrome={chrome}
         connection={connectionPanel}
+        detail={purchasePanel}
+        hideBackInDetail
+        hideChromeInDetail
+        hideNavInDetail
         initialSection="overview"
         key={panel}
         overview={overviewPanel}
@@ -650,6 +670,10 @@ function TripWorkspace({
       <TripSectionSwitcher
         chrome={chrome}
         connection={connectionPanel}
+        detail={purchasePanel}
+        hideBackInDetail
+        hideChromeInDetail
+        hideNavInDetail
         initialSection="work"
         key={panel}
         overview={overviewPanel}
@@ -673,7 +697,7 @@ function TripWorkspace({
         sitePanel
       )
     ) : (
-      <PurchaseTasks tripId={trip.id} />
+      purchasePanel
     );
 
   return (
@@ -683,6 +707,7 @@ function TripWorkspace({
       detail={detailPanel}
       hideBackInDetail={panel === "purchase"}
       hideChromeInDetail={panel === "site" || panel === "quote" || panel === "purchase"}
+      hideNavInDetail={panel === "purchase"}
       initialSection={panel === "quote" ? "quote" : "detail"}
       key={panel}
       overview={overviewPanel}
@@ -725,10 +750,14 @@ function TripOverview({
 }) {
   const batchCount = Number(summary.site_photo_batch_count || 0);
   const quoteTaskCount = Number(summary.quote_task_count || 0);
-  const openQuotes = Number(summary.open_quote_task_count || 0);
+  const openQuotes = Number(
+    summary.unfinished_quote_task_count ?? summary.open_quote_task_count ?? 0,
+  );
+  const completedQuoteTasks = Number(
+    summary.completed_quote_task_count ?? Math.max(quoteTaskCount - openQuotes, 0),
+  );
   const purchaseTaskCount = Number(summary.purchase_task_count || 0);
   const openPurchases = Number(summary.unfinished_purchase_count || 0);
-  const completedQuotes = Math.max(quoteTaskCount - openQuotes, 0);
   const completedPurchases = Math.max(purchaseTaskCount - openPurchases, 0);
   return (
     <section className="grid gap-3">
@@ -738,7 +767,7 @@ function TripOverview({
           <CompactStatusLine
             label="細圖/報價"
             urgent={openQuotes > 0}
-            value={`${completedQuotes}/${quoteTaskCount || 0} 完成`}
+            value={`${completedQuoteTasks}/${quoteTaskCount || 0} 完成`}
           />
           <CompactStatusLine
             label="採買任務"
@@ -776,7 +805,7 @@ function TripEndGate({
           <div>
             <p className="text-sm font-semibold">還不能結束行程</p>
             <p className="mt-1 text-xs leading-5">
-              尚有 {unfinishedPurchases} 筆採買未結案。待採買、挑臉待審、挑臉待小幫手確認都必須先完成、取消、標記缺貨或找不到。
+              尚有 {unfinishedPurchases} 筆採買未結案。待採買、挑臉待審、挑臉待小幫手確認都必須先完成或取消。
             </p>
           </div>
         </div>

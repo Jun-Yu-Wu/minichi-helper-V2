@@ -151,6 +151,87 @@ test("admin home summary uses one aggregate query instead of loading dashboard r
   assert.deepEqual(dashboard.purchaseTasks, []);
 });
 
+test("settlement list views can read summaries without evidence payloads", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return {
+        rows: [{
+          evidence: [],
+          helper_display_name: "Mina",
+          id: "00000000-0000-0000-0000-000000000001",
+          line_items: [],
+          payments: [],
+          product_total_jpy: 12000,
+          status: "pending_admin_review",
+          trip_name: "Tokyo live",
+        }],
+      };
+    },
+  };
+
+  const dashboard = await service.listAdminDashboard(database, {
+    sections: ["settlements"],
+    settlementIncludeDetails: false,
+  });
+
+  assert.equal(dashboard.settlements.length, 1);
+  assert.deepEqual(dashboard.settlements[0].evidence, []);
+  assert.deepEqual(dashboard.settlements[0].line_items, []);
+  assert.doesNotMatch(queries[0].sql, /settlement_evidence se/);
+  assert.doesNotMatch(queries[0].sql, /settlement_line_items sli/);
+  assert.doesNotMatch(queries[0].sql, /settlement_payments sp/);
+});
+
+test("settlement detail views can scope to a selected settlement", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      if (sql.includes("from helper_app.helper_profiles")) {
+        return {
+          rows: [{
+            auth_user_id: "user-1",
+            id: "helper-1",
+            is_active: true,
+          }],
+        };
+      }
+      if (sql.includes("select id, trip_name")) {
+        return { rows: [] };
+      }
+      return {
+        rows: [{
+          evidence: [{ id: "evidence-1", storage_key: "key" }],
+          id: "00000000-0000-0000-0000-000000000001",
+          line_items: [{ id: "line-1" }],
+          payments: [],
+          status: "pending_helper_precheck",
+        }],
+      };
+    },
+  };
+
+  const workspace = await service.getHelperWorkspace(database, "user-1", new Date(), {
+    sections: ["settlements"],
+    settlementIds: ["00000000-0000-0000-0000-000000000001"],
+    settlementIncludeDetails: true,
+  });
+
+  const settlementQuery = queries.find((query) =>
+    String(query.sql).includes("from helper_app.settlements s"),
+  );
+  assert.ok(settlementQuery);
+  assert.match(settlementQuery.sql, /s\.id = any\(\$2::uuid\[\]\)/);
+  assert.match(settlementQuery.sql, /settlement_evidence se/);
+  assert.deepEqual(settlementQuery.params, [
+    "helper-1",
+    ["00000000-0000-0000-0000-000000000001"],
+  ]);
+  assert.equal(workspace.settlements[0].evidence.length, 1);
+});
+
 test("admin live dashboard scopes active trips and workflow reads to the selected trip", async () => {
   const queries = [];
   const database = {
@@ -207,9 +288,10 @@ test("admin live purchase list reads task summaries without signed-photo payload
 
   const purchaseQuery = queries.find(({ sql }) => sql.includes("helper_app.purchase_tasks pt"));
   assert.ok(purchaseQuery);
-  assert.match(purchaseQuery.sql, /count\(ptp\.id\)::int as photo_count/);
+  assert.match(purchaseQuery.sql, /photo_counts\.photo_count/);
   assert.doesNotMatch(purchaseQuery.sql, /jsonb_agg/);
   assert.doesNotMatch(purchaseQuery.sql, /storage_key/);
+  assert.match(purchaseQuery.sql, /latest_face\.photo_role = 'face_check_report'/);
 });
 
 test("purchase task detail reads one selected task before signing photos", async () => {
@@ -239,6 +321,8 @@ test("purchase task detail reads one selected task before signing photos", async
   assert.deepEqual(queries[0].params, ["purchase-task-1", "trip-1", "user-1"]);
   assert.match(queries[0].sql, /where pt\.id = \$1 and pt\.trip_id = \$2 and hp\.auth_user_id = \$3/);
   assert.match(queries[0].sql, /where ptp\.purchase_task_id = pt\.id/);
+  assert.match(queries[0].sql, /latest_face\.photo_role = 'face_check_report'/);
+  assert.match(queries[0].sql, /order by latest_face\.created_at desc, latest_face\.id desc/);
   assert.match(queries[0].sql, /limit 1/);
 });
 
@@ -447,6 +531,68 @@ test("helper workspace scopes the trip read and runs selected workflow reads con
   ]);
   assert.match(tripQuery.sql, /id = any\(\$2::uuid\[\]\)/);
   assert.equal(maxActiveWorkflowQueries, 4);
+});
+
+test("helper trip summaries expose quote task progress counts", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      if (sql.includes("from helper_app.helper_profiles")) {
+        return { rows: [{ id: "helper-1", is_active: true }] };
+      }
+      if (sql.includes("select id, trip_name")) {
+        return {
+          rows: [{
+            business_date: "2026-07-02",
+            id: "00000000-0000-0000-0000-000000000001",
+            status: "active",
+            timezone: "Asia/Tokyo",
+          }],
+        };
+      }
+      return {
+        rows: [{
+          completed_quote_task_count: 2,
+          quote_photo_count: 3,
+          quote_task_count: 3,
+          replied_quote_photo_count: 2,
+          trip_id: "00000000-0000-0000-0000-000000000001",
+          unfinished_quote_task_count: 1,
+        }],
+      };
+    },
+  };
+
+  const workspace = await service.getHelperWorkspace(
+    database,
+    "user-1",
+    new Date("2026-07-02T00:00:00.000Z"),
+    {
+      sections: ["tripSummaries"],
+      tripIds: ["00000000-0000-0000-0000-000000000001"],
+    },
+  );
+
+  const summaryQuery = queries.find(({ sql }) =>
+    sql.includes("site_photo_batch_count"),
+  );
+  assert.ok(summaryQuery);
+  assert.match(summaryQuery.sql, /as completed_quote_task_count/);
+  assert.match(summaryQuery.sql, /as unfinished_quote_task_count/);
+  assert.match(summaryQuery.sql, /as quote_photo_count/);
+  assert.match(summaryQuery.sql, /as replied_quote_photo_count/);
+  assert.deepEqual(
+    workspace.tripSummariesByTripId["00000000-0000-0000-0000-000000000001"],
+    {
+      completed_quote_task_count: 2,
+      quote_photo_count: 3,
+      quote_task_count: 3,
+      replied_quote_photo_count: 2,
+      trip_id: "00000000-0000-0000-0000-000000000001",
+      unfinished_quote_task_count: 1,
+    },
+  );
 });
 
 test("helper site photo list reads batch summaries without photo payloads", async () => {
@@ -1303,10 +1449,12 @@ test("helper completes a purchase task and creates completed-only staging previe
   const queries = [];
   const database = fakeDatabase(
     [
-      { rows: [{ id: "helper-1", is_active: true }] },
       {
         rows: [
           {
+            authorized_helper_id: "helper-1",
+            authorized_helper_is_active: true,
+            authorized_trip_status: "active",
             helper_id: "helper-1",
             id: "purchase-task-1",
             line_community_name: "客人A",
@@ -1317,17 +1465,6 @@ test("helper completes a purchase task and creates completed-only staging previe
             sale_price_twd: 380,
             status: "open",
             trip_id: "trip-1",
-          },
-        ],
-      },
-      {
-        rows: [
-          {
-            assigned_helper_id: "helper-1",
-            id: "trip-1",
-            status: "active",
-            version: 3,
-            ...todayTripFields(),
           },
         ],
       },
@@ -1359,10 +1496,9 @@ test("helper completes a purchase task and creates completed-only staging previe
     action: "complete",
     authUserId: "user-1",
     completedQuantity: "2",
-    helperNote: "剩餘一件缺貨",
+    helperNote: "少買一件",
     idempotencyKey: "purchase-response-1",
     purchaseTaskId: "purchase-task-1",
-    remainingResolution: "unavailable",
     unavailableQuantity: "1",
   });
 
@@ -1380,18 +1516,206 @@ test("helper completes a purchase task and creates completed-only staging previe
     completedQuantity: 2,
     purchaseTaskId: "purchase-task-1",
     remainingQuantity: 1,
-    remainingResolution: "unavailable",
+    remainingResolution: "canceled",
   });
+});
+
+test("helper purchase completion clamps over-reported quantity to requested quantity", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [
+          {
+            authorized_helper_id: "helper-1",
+            authorized_helper_is_active: true,
+            authorized_trip_status: "active",
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            line_community_name: "客人A",
+            product_name: "測試商品",
+            quantity: 3,
+            original_price_jpy: 1200,
+            requires_face_check: false,
+            sale_price_twd: 380,
+            status: "open",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            completed_quantity: 3,
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            line_community_name: "客人A",
+            product_name: "測試商品",
+            original_price_jpy: 1200,
+            sale_price_twd: 380,
+            source_quote_reply_id: null,
+            source_quote_task_id: null,
+            source_quote_task_photo_id: null,
+            status: "completed",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      { rows: [{ id: "preview-1" }] },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const task = await service.respondPurchaseTask(database, {
+    action: "complete",
+    authUserId: "user-1",
+    completedQuantity: "9",
+    idempotencyKey: "purchase-response-over",
+    purchaseTaskId: "purchase-task-1",
+  });
+
+  assert.equal(task.status, "completed");
+  const updateQuery = queries.find((query) =>
+    String(query.sql).includes("set status = 'completed'"),
+  );
+  assert.ok(updateQuery);
+  assert.equal(updateQuery.params[1], 3);
+  assert.equal(updateQuery.params[2], 0);
+});
+
+test("helper purchase completion with zero quantity requires a cancellation reason", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [
+          {
+            authorized_helper_id: "helper-1",
+            authorized_helper_is_active: true,
+            authorized_trip_status: "active",
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            line_community_name: "客人A",
+            product_name: "測試商品",
+            quantity: 3,
+            original_price_jpy: 1200,
+            requires_face_check: false,
+            sale_price_twd: 380,
+            status: "open",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            completed_quantity: 0,
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            status: "canceled",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  await assert.rejects(
+    () => service.respondPurchaseTask(database, {
+      action: "complete",
+      authUserId: "user-1",
+      completedQuantity: "0",
+      idempotencyKey: "purchase-response-zero",
+      purchaseTaskId: "purchase-task-1",
+    }),
+    (error) => error.code === "invalid_input" && /reason/i.test(error.message),
+  );
+
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("insert into helper_app.staging_order_previews")),
+    false,
+  );
+});
+
+test("helper purchase completion with zero quantity and reason cancels without staging preview", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [
+          {
+            authorized_helper_id: "helper-1",
+            authorized_helper_is_active: true,
+            authorized_trip_status: "active",
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            line_community_name: "客人A",
+            product_name: "測試商品",
+            quantity: 3,
+            original_price_jpy: 1200,
+            requires_face_check: false,
+            sale_price_twd: 380,
+            status: "open",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            completed_quantity: 0,
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            status: "canceled",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const task = await service.respondPurchaseTask(database, {
+    action: "complete",
+    authUserId: "user-1",
+    completedQuantity: "0",
+    helperNote: "現場缺貨，取消",
+    idempotencyKey: "purchase-response-zero",
+    purchaseTaskId: "purchase-task-1",
+  });
+
+  assert.equal(task.status, "canceled");
+  assert.equal(task.completed_quantity, 0);
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("insert into helper_app.staging_order_previews")),
+    false,
+  );
+  const updateQuery = queries.find((query) =>
+    String(query.sql).includes("set status = $2"),
+  );
+  assert.ok(updateQuery);
+  assert.equal(updateQuery.params[3], "現場缺貨，取消");
+  const auditQuery = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.trip_audit_events"),
+  );
+  assert.ok(auditQuery);
+  assert.equal(auditQuery.params[4], "helper_purchase_canceled");
 });
 
 test("helper can cancel a completed purchase task and remove staging preview", async () => {
   const queries = [];
   const database = fakeDatabase(
     [
-      { rows: [{ id: "helper-1", is_active: true }] },
       {
         rows: [
           {
+            authorized_helper_id: "helper-1",
+            authorized_helper_is_active: true,
+            authorized_trip_status: "active",
             completed_quantity: 1,
             helper_id: "helper-1",
             id: "purchase-task-1",
@@ -1403,17 +1727,6 @@ test("helper can cancel a completed purchase task and remove staging preview", a
             sale_price_twd: 380,
             status: "completed",
             trip_id: "trip-1",
-          },
-        ],
-      },
-      {
-        rows: [
-          {
-            assigned_helper_id: "helper-1",
-            id: "trip-1",
-            status: "active",
-            version: 3,
-            ...todayTripFields(),
           },
         ],
       },
@@ -1458,19 +1771,149 @@ test("helper can cancel a completed purchase task and remove staging preview", a
   });
 });
 
-test("partial purchase requires an explicit remaining resolution and reason", async () => {
-  await assert.rejects(
-    () =>
-      service.respondPurchaseTask({}, {
-        action: "complete",
-        authUserId: "user-1",
-        completedQuantity: "1",
-        idempotencyKey: "purchase-response-2",
-        purchaseTaskId: "purchase-task-1",
-        unavailableQuantity: "1",
-      }),
-    (error) => error.code === "invalid_input",
+test("helper can complete a partial purchase without unavailable or not-found reason", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [
+          {
+            authorized_helper_id: "helper-1",
+            authorized_helper_is_active: true,
+            authorized_trip_status: "active",
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            line_community_name: "客人A",
+            product_name: "測試商品",
+            quantity: 3,
+            original_price_jpy: 1200,
+            requires_face_check: false,
+            sale_price_twd: 380,
+            status: "open",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            completed_quantity: 1,
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            line_community_name: "客人A",
+            product_name: "測試商品",
+            original_price_jpy: 1200,
+            sale_price_twd: 380,
+            source_quote_reply_id: null,
+            source_quote_task_id: null,
+            source_quote_task_photo_id: null,
+            status: "completed",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      { rows: [{ id: "preview-1" }] },
+      { rows: [] },
+    ],
+    queries,
   );
+
+  const task = await service.respondPurchaseTask(database, {
+    action: "complete",
+    authUserId: "user-1",
+    completedQuantity: "1",
+    idempotencyKey: "purchase-response-partial",
+    purchaseTaskId: "purchase-task-1",
+  });
+
+  assert.equal(task.status, "completed");
+  const updateQuery = queries.find((query) =>
+    String(query.sql).includes("set status = 'completed'"),
+  );
+  assert.ok(updateQuery);
+  assert.equal(updateQuery.params[1], 1);
+  assert.equal(updateQuery.params[2], 2);
+});
+
+test("helper face-check photo response writes media and task photo without redundant media update", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [
+          {
+            authorized_helper_id: "helper-1",
+            authorized_helper_is_active: true,
+            authorized_trip_status: "active",
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            line_community_name: "客人A",
+            product_name: "挑臉商品",
+            quantity: 1,
+            original_price_jpy: 1800,
+            requires_face_check: true,
+            sale_price_twd: 560,
+            status: "open",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      { rows: [] },
+      { rows: [] },
+      {
+        rows: [
+          {
+            completed_quantity: 1,
+            helper_id: "helper-1",
+            id: "purchase-task-1",
+            status: "review_pending",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const task = await service.respondPurchaseTask(database, {
+    action: "complete",
+    authUserId: "user-1",
+    completedQuantity: "1",
+    faceCheckPhoto: {
+      byteSize: 1024,
+      contentType: "image/jpeg",
+      originalFilename: "face.jpg",
+      storageKey: "helper-app/trip-1/purchase-face-check/purchase-task-1/face.jpg",
+    },
+    idempotencyKey: "face-check-upload-1",
+    purchaseTaskId: "purchase-task-1",
+  });
+
+  assert.equal(task.status, "review_pending");
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("insert into helper_app.purchase_task_photos")),
+    true,
+  );
+  assert.equal(
+    queries.some((query) =>
+      String(query.sql).includes("on conflict (purchase_task_id, photo_role, sort_order) do update") &&
+      String(query.sql).includes("set storage_key = excluded.storage_key")
+    ),
+    true,
+  );
+  assert.equal(
+    queries.some((query) =>
+      String(query.sql).includes("set retention_status = 'order_evidence'") &&
+      String(query.sql).includes("where storage_key = $1")
+    ),
+    false,
+  );
+  const auditQuery = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.trip_audit_events"),
+  );
+  assert.ok(auditQuery);
+  assert.equal(auditQuery.params[4], "helper_purchase_face_check_submitted");
 });
 
 test("admin face-check approval waits for helper final confirmation", async () => {
@@ -1523,10 +1966,12 @@ test("helper final confirmation completes an approved face-check purchase and cr
   const queries = [];
   const database = fakeDatabase(
     [
-      { rows: [{ id: "helper-1", is_active: true }] },
       {
         rows: [
           {
+            authorized_helper_id: "helper-1",
+            authorized_helper_is_active: true,
+            authorized_trip_status: "active",
             completed_quantity: 1,
             helper_id: "helper-1",
             id: "purchase-task-1",
@@ -1538,17 +1983,6 @@ test("helper final confirmation completes an approved face-check purchase and cr
             sale_price_twd: 560,
             status: "approved_pending_helper_confirmation",
             trip_id: "trip-1",
-          },
-        ],
-      },
-      {
-        rows: [
-          {
-            assigned_helper_id: "helper-1",
-            id: "trip-1",
-            status: "active",
-            version: 3,
-            ...todayTripFields(),
           },
         ],
       },

@@ -59,6 +59,7 @@ import { AdminLiveQuoteWorkspace } from "./AdminLiveQuoteWorkspace";
 import { AdminPurchasePhotos } from "./AdminPurchasePhotos";
 
 type AdminSearchParams = {
+  checkoutSettlementId?: string;
   helperId?: string;
   helperMode?: string;
   liveSection?: string;
@@ -95,6 +96,12 @@ export default async function AdminPage({
 
   const dashboard = await service.listAdminDashboard(database.getDatabasePool(), {
       sections: adminDashboardSections(activeView, params.mainSection, liveSection),
+      settlementIds:
+        activeView === "checkout" && params.checkoutSettlementId
+          ? [params.checkoutSettlementId]
+          : null,
+      settlementIncludeDetails:
+        activeView === "checkout" ? Boolean(params.checkoutSettlementId) : true,
       tripStatuses:
         activeView === "main" && params.mainSection === "trips"
           ? tripStatusesForGroups(adminMainOpenTripGroups)
@@ -113,12 +120,14 @@ export default async function AdminPage({
             : null,
     });
   const purchaseTasks = dashboard.purchaseTasks;
-  const settlements = activeView === "checkout" && dashboard.settlements.length
+  const settlements = activeView === "checkout" && params.checkoutSettlementId && dashboard.settlements.length
     ? await service.attachSignedSettlementUrls(
         dashboard.settlements,
         createR2ObjectStore(),
       )
-    : [];
+    : activeView === "checkout"
+      ? dashboard.settlements
+      : [];
   const rebuyTasks = activeView === "rebuy" && dashboard.rebuyTasks.length
     ? await service.attachSignedRebuyTaskUrls(
         dashboard.rebuyTasks,
@@ -134,7 +143,7 @@ export default async function AdminPage({
       selectedTripGroups={adminMainOpenTripGroups}
     />
   ) : activeView === "checkout" ? (
-    <AdminCheckout settlements={settlements} />
+    <AdminCheckout selectedSettlementId={params.checkoutSettlementId} settlements={settlements} />
   ) : activeView === "tasks" ? (
     <AdminTaskPublishing
       dashboard={dashboard}
@@ -183,7 +192,13 @@ export default async function AdminPage({
   );
 }
 
-function AdminCheckout({ settlements }: { settlements: any[] }) {
+function AdminCheckout({
+  selectedSettlementId,
+  settlements,
+}: {
+  selectedSettlementId?: string;
+  settlements: any[];
+}) {
   const groups = [
     {
       empty: "目前沒有待開始結帳。",
@@ -211,6 +226,11 @@ function AdminCheckout({ settlements }: { settlements: any[] }) {
   ];
   return (
     <AdminSection icon={<CreditCard className="size-5" />} title="結帳">
+      {selectedSettlementId ? (
+        <Button asChild className="w-fit" size="sm" variant="ghost">
+          <Link href="/admin?view=checkout">返回結帳列表</Link>
+        </Button>
+      ) : null}
       {settlements.length ? (
         <div className="grid gap-6">
           {groups.map((group) => {
@@ -223,6 +243,48 @@ function AdminCheckout({ settlements }: { settlements: any[] }) {
                 </div>
                 {records.length ? records.map((settlement) => {
                   const hasRate = Number(settlement.jpy_to_twd_rate || 0) > 0;
+                  if (!selectedSettlementId) {
+                    const href = `/admin?view=checkout&checkoutSettlementId=${encodeURIComponent(settlement.id)}`;
+                    const nextAction =
+                      settlement.status === "pending_helper_precheck"
+                        ? "等待小幫手預檢"
+                        : settlement.status === "pending_admin_review"
+                          ? "審核結帳"
+                          : settlement.status === "payment_pending"
+                            ? "記錄付款"
+                            : settlement.status === "warehouse_review_pending"
+                              ? "審核送倉"
+                              : settlement.status === "final_payment_pending"
+                                ? "支付尾款"
+                                : settlement.status === "warehouse_pending"
+                                  ? "等待送倉"
+                                  : settlement.status === "pending_helper_confirmation"
+                                    ? "等待小幫手確認"
+                                    : "查看";
+                    return (
+                      <Link
+                        className="rounded-xl border bg-card p-4 shadow-sm transition hover:border-primary/30 hover:bg-accent/40"
+                        href={href}
+                        key={settlement.id}
+                      >
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <StatusBadge tone={settlement.status === "completed" ? "green" : settlement.status.includes("payment") ? "amber" : "blue"}>
+                                {settlementStatusLabel(settlement.status)}
+                              </StatusBadge>
+                              <h3 className="font-semibold">{settlement.trip_name} · {settlement.helper_display_name}</h3>
+                            </div>
+                            <p className="mt-1 text-sm text-muted-foreground">
+                              商品 JPY {settlement.product_total_jpy}
+                              {settlement.total_payable_twd !== null ? ` · 應付 TWD ${settlement.total_payable_twd}` : " · 待計算"}
+                            </p>
+                          </div>
+                          <span className="text-sm font-medium text-primary">{nextAction}</span>
+                        </div>
+                      </Link>
+                    );
+                  }
                   return (
             <article className="grid gap-4 rounded-xl border bg-card p-4 shadow-sm" key={settlement.id}>
               <div>

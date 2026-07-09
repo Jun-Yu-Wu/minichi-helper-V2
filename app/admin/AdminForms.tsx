@@ -561,6 +561,7 @@ export function CreatePurchaseTaskForm({
 }) {
   const [photos, setPhotos] = useState<AdminTaskUploadPhoto[]>([]);
   const photosRef = useRef<AdminTaskUploadPhoto[]>([]);
+  const uploadPromisesRef = useRef(new Map<string, Promise<Partial<AdminTaskUploadPhoto>>>());
   const [state, setState] = useState<AdminActionResult>({});
   const [pending, setPending] = useState(false);
   const [formResetKey, setFormResetKey] = useState(0);
@@ -600,15 +601,7 @@ export function CreatePurchaseTaskForm({
       ...selected.map((photo, index) => ({ ...photo, sortOrder: current.length + index })),
     ]);
     for (const photo of selected.filter((item) => !item.error)) {
-      updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" });
-      void uploadAdminTaskPhoto(photo, trip.id)
-        .then((uploaded) => updatePhoto(photo.clientPhotoId, uploaded))
-        .catch((error) => {
-          updatePhoto(photo.clientPhotoId, {
-            error: error instanceof Error ? error.message : "照片上傳失敗。",
-            status: "failed",
-          });
-        });
+      startPhotoUpload(photo);
     }
   }
 
@@ -616,6 +609,7 @@ export function CreatePurchaseTaskForm({
     setPhotos((current) => {
       const removed = current.find((photo) => photo.clientPhotoId === clientPhotoId);
       if (removed) URL.revokeObjectURL(removed.objectUrl);
+      uploadPromisesRef.current.delete(clientPhotoId);
       return current
         .filter((photo) => photo.clientPhotoId !== clientPhotoId)
         .map((photo, index) => ({ ...photo, sortOrder: index }));
@@ -636,10 +630,11 @@ export function CreatePurchaseTaskForm({
       const uploadedPhotos = await Promise.all(
         photos.map(async (photo) => {
           if (photo.storageKey) return photo;
-          updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" });
+          const pendingUpload = uploadPromisesRef.current.get(photo.clientPhotoId);
           try {
-            const uploaded = await uploadAdminTaskPhoto(photo, trip.id);
-            updatePhoto(photo.clientPhotoId, uploaded);
+            const uploaded = pendingUpload
+              ? await pendingUpload
+              : await startPhotoUpload(photo);
             return { ...photo, ...uploaded };
           } catch (error) {
             const message = error instanceof Error ? error.message : "照片上傳失敗。";
@@ -665,6 +660,7 @@ export function CreatePurchaseTaskForm({
       setState(result);
       if (result.ok) {
         for (const photo of uploadedPhotos) URL.revokeObjectURL(photo.objectUrl);
+        uploadPromisesRef.current.clear();
         setPhotos([]);
         form.reset();
         setFormResetKey((current) => current + 1);
@@ -674,6 +670,26 @@ export function CreatePurchaseTaskForm({
     } finally {
       setPending(false);
     }
+  }
+
+  function startPhotoUpload(photo: AdminTaskUploadPhoto) {
+    const existing = uploadPromisesRef.current.get(photo.clientPhotoId);
+    if (existing) return existing;
+    updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" });
+    const uploadPromise = uploadAdminTaskPhoto(photo, trip.id)
+      .then((uploaded) => {
+        updatePhoto(photo.clientPhotoId, uploaded);
+        uploadPromisesRef.current.delete(photo.clientPhotoId);
+        return uploaded;
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "照片上傳失敗。";
+        updatePhoto(photo.clientPhotoId, { error: message, status: "failed" });
+        uploadPromisesRef.current.delete(photo.clientPhotoId);
+        throw error;
+      });
+    uploadPromisesRef.current.set(photo.clientPhotoId, uploadPromise);
+    return uploadPromise;
   }
 
   function updatePhoto(clientPhotoId: string, patch: Partial<AdminTaskUploadPhoto>) {
@@ -769,7 +785,7 @@ export function CreatePurchaseTaskForm({
           !canCreate ||
           pending ||
           !photos.length ||
-          photos.some((photo) => Boolean(photo.error) || photo.status !== "uploaded")
+          photos.some((photo) => Boolean(photo.error))
         }
         size="sm"
         type="submit"

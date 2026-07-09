@@ -35,6 +35,9 @@ const ADMIN_DASHBOARD_SECTIONS = [
  * @param {object} database
  * @param {{
  *   sections?: string[],
+ *   settlementIds?: string[] | null,
+ *   settlementIncludeDetails?: boolean,
+ *   settlementStatuses?: string[] | null,
  *   tripStatuses?: string[] | null,
  *   workflowTripIds?: string[] | null
  * }} [options]
@@ -43,6 +46,9 @@ async function listAdminDashboard(
   database,
   {
     sections = ADMIN_DASHBOARD_SECTIONS,
+    settlementIds = null,
+    settlementIncludeDetails = true,
+    settlementStatuses = null,
     tripStatuses = null,
     workflowTripIds = null,
   } = {},
@@ -90,7 +96,13 @@ async function listAdminDashboard(
       ? listStagingOrderPreviews(database, { tripIds: workflowTripIds })
       : Promise.resolve([]),
     included.has("stagingMergeJobs") ? listStagingMergeJobs(database) : Promise.resolve([]),
-    included.has("settlements") ? listSettlements(database) : Promise.resolve([]),
+    included.has("settlements")
+      ? listSettlements(database, {
+          includeDetails: settlementIncludeDetails,
+          settlementIds,
+          statuses: settlementStatuses,
+        })
+      : Promise.resolve([]),
   ]);
   return {
     helpers: helpers.rows,
@@ -195,6 +207,9 @@ const HELPER_WORKSPACE_SECTIONS = [
  * @param {Date} [now]
  * @param {{
  *   sections?: string[],
+ *   settlementIds?: string[] | null,
+ *   settlementIncludeDetails?: boolean,
+ *   settlementStatuses?: string[] | null,
  *   sitePhotoBatchId?: string | null,
  *   tripIds?: string[] | null,
  *   tripStatuses?: string[] | null
@@ -203,6 +218,9 @@ const HELPER_WORKSPACE_SECTIONS = [
 async function getHelperWorkspace(database, authUserId, now = new Date(), options = {}) {
   const {
     sections = HELPER_WORKSPACE_SECTIONS,
+    settlementIds = null,
+    settlementIncludeDetails = true,
+    settlementStatuses = null,
     sitePhotoBatchId = null,
     tripIds = null,
     tripStatuses = null,
@@ -284,7 +302,12 @@ async function getHelperWorkspace(database, authUserId, now = new Date(), option
       ? listRebuyTasks(database, { helperId: profile.id })
       : Promise.resolve([]),
     included.has("settlements")
-      ? listSettlements(database, { helperId: profile.id })
+      ? listSettlements(database, {
+          helperId: profile.id,
+          includeDetails: settlementIncludeDetails,
+          settlementIds,
+          statuses: settlementStatuses,
+        })
       : Promise.resolve([]),
     included.has("sitePhotoBatches")
       ? sitePhotoBatchId
@@ -339,9 +362,50 @@ async function listHelperTripSummaries(
              from helper_app.quote_tasks qt
              where qt.trip_id = t.id) as quote_task_count,
             (select count(*)::int
+             from (
+               select qt.id
+               from helper_app.quote_tasks qt
+               left join helper_app.quote_task_photos qtp on qtp.quote_task_id = qt.id
+               where qt.trip_id = t.id
+               group by qt.id, qt.status
+               having qt.status = 'completed'
+                  or (
+                    count(qtp.id) > 0
+                    and count(qtp.id) = count(qtp.id) filter (
+                      where qtp.reply_status in ('replied', 'converted_to_purchase')
+                    )
+                  )
+             ) completed_quote_tasks) as completed_quote_task_count,
+            (select count(*)::int
+             from (
+               select qt.id
+               from helper_app.quote_tasks qt
+               left join helper_app.quote_task_photos qtp on qtp.quote_task_id = qt.id
+               where qt.trip_id = t.id
+               group by qt.id, qt.status
+               having not (
+                 qt.status = 'completed'
+                 or (
+                   count(qtp.id) > 0
+                   and count(qtp.id) = count(qtp.id) filter (
+                     where qtp.reply_status in ('replied', 'converted_to_purchase')
+                   )
+                 )
+               )
+             ) unfinished_quote_tasks) as unfinished_quote_task_count,
+            (select count(*)::int
              from helper_app.quote_tasks qt
              where qt.trip_id = t.id
                and qt.status <> 'completed') as open_quote_task_count,
+            (select count(*)::int
+             from helper_app.quote_task_photos qtp
+             join helper_app.quote_tasks qt on qt.id = qtp.quote_task_id
+             where qt.trip_id = t.id) as quote_photo_count,
+            (select count(*)::int
+             from helper_app.quote_task_photos qtp
+             join helper_app.quote_tasks qt on qt.id = qtp.quote_task_id
+             where qt.trip_id = t.id
+               and qtp.reply_status in ('replied', 'converted_to_purchase')) as replied_quote_photo_count,
             (select count(*)::int
              from helper_app.quote_task_photos qtp
              join helper_app.quote_tasks qt on qt.id = qtp.quote_task_id
@@ -361,13 +425,35 @@ async function listHelperTripSummaries(
   return result.rows;
 }
 
-async function listSettlements(database, { helperId = null } = {}) {
+async function listSettlements(
+  database,
+  {
+    helperId = null,
+    includeDetails = true,
+    settlementIds = null,
+    statuses = null,
+  } = {},
+) {
+  if ((settlementIds && settlementIds.length === 0) || (statuses && statuses.length === 0)) {
+    return [];
+  }
   const params = [];
-  const where = helperId ? "where s.helper_id = $1" : "";
-  if (helperId) params.push(helperId);
-  const result = await database.query(
-    `select s.*, t.trip_name, t.business_date, t.timezone,
-            hp.display_name as helper_display_name,
+  const conditions = [];
+  if (helperId) {
+    params.push(helperId);
+    conditions.push(`s.helper_id = $${params.length}`);
+  }
+  if (settlementIds) {
+    params.push(settlementIds);
+    conditions.push(`s.id = any($${params.length}::uuid[])`);
+  }
+  if (statuses) {
+    params.push(statuses);
+    conditions.push(`s.status = any($${params.length}::text[])`);
+  }
+  const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+  const detailColumns = includeDetails
+    ? `,
             coalesce((
               select jsonb_agg(jsonb_build_object(
                 'id', sli.id,
@@ -400,7 +486,15 @@ async function listSettlements(database, { helperId = null } = {}) {
               ) order by sp.paid_at)
               from helper_app.settlement_payments sp
               where sp.settlement_id = s.id
-            ), '[]'::jsonb) as payments
+            ), '[]'::jsonb) as payments`
+    : `,
+            '[]'::jsonb as line_items,
+            '[]'::jsonb as evidence,
+            '[]'::jsonb as payments`;
+  const result = await database.query(
+    `select s.*, t.trip_name, t.business_date, t.timezone,
+            hp.display_name as helper_display_name
+            ${detailColumns}
      from helper_app.settlements s
      join helper_app.trips t on t.id = s.trip_id
      join helper_app.helper_profiles hp on hp.id = s.helper_id
@@ -458,14 +552,29 @@ async function listPurchaseTasks(
               pt.admin_review_note, pt.created_at, pt.updated_at, pt.completed_at,
               t.trip_name, t.business_date, t.timezone, t.status as trip_status,
               hp.display_name as helper_display_name,
-              count(ptp.id)::int as photo_count,
+              coalesce(photo_counts.photo_count, 0)::int as photo_count,
               '[]'::jsonb as photos
        from helper_app.purchase_tasks pt
        join helper_app.trips t on t.id = pt.trip_id
        join helper_app.helper_profiles hp on hp.id = pt.helper_id
-       left join helper_app.purchase_task_photos ptp on ptp.purchase_task_id = pt.id
+       left join lateral (
+         select count(*)::int as photo_count
+         from helper_app.purchase_task_photos ptp
+         where ptp.purchase_task_id = pt.id
+           and (
+             ptp.photo_role <> 'face_check_report'
+             or ptp.id = (
+               select latest_face.id
+               from helper_app.purchase_task_photos latest_face
+               where latest_face.purchase_task_id = pt.id
+                 and latest_face.photo_role = 'face_check_report'
+               order by latest_face.created_at desc, latest_face.id desc
+               limit 1
+             )
+           )
+       ) photo_counts on true
        ${where}
-       group by pt.id, t.id, hp.id
+       group by pt.id, t.id, hp.id, photo_counts.photo_count
        order by pt.created_at desc`,
       params,
     );
@@ -481,26 +590,45 @@ async function listPurchaseTasks(
             pt.admin_review_note, pt.created_at, pt.updated_at, pt.completed_at,
             t.trip_name, t.business_date, t.timezone, t.status as trip_status,
             hp.display_name as helper_display_name,
-            count(ptp.id)::int as photo_count,
+            coalesce(photos.photo_count, 0)::int as photo_count,
             coalesce(
-              jsonb_agg(
-                jsonb_build_object(
-                  'id', ptp.id,
-                  'storage_key', ptp.storage_key,
-                  'photo_role', ptp.photo_role,
-                  'sort_order', ptp.sort_order,
-                  'created_at', ptp.created_at
-                )
-                order by ptp.photo_role asc, ptp.sort_order asc
-              ) filter (where ptp.id is not null),
+              photos.items,
               '[]'::jsonb
             ) as photos
      from helper_app.purchase_tasks pt
      join helper_app.trips t on t.id = pt.trip_id
      join helper_app.helper_profiles hp on hp.id = pt.helper_id
-     left join helper_app.purchase_task_photos ptp on ptp.purchase_task_id = pt.id
+     left join lateral (
+       select count(*)::int as photo_count,
+              jsonb_agg(
+                jsonb_build_object(
+                  'id', visible_photos.id,
+                  'storage_key', visible_photos.storage_key,
+                  'photo_role', visible_photos.photo_role,
+                  'sort_order', visible_photos.sort_order,
+                  'created_at', visible_photos.created_at
+                )
+                order by visible_photos.photo_role asc, visible_photos.sort_order asc, visible_photos.created_at asc
+              ) as items
+       from (
+         select ptp.id, ptp.storage_key, ptp.photo_role, ptp.sort_order, ptp.created_at
+         from helper_app.purchase_task_photos ptp
+         where ptp.purchase_task_id = pt.id
+           and (
+             ptp.photo_role <> 'face_check_report'
+             or ptp.id = (
+               select latest_face.id
+               from helper_app.purchase_task_photos latest_face
+               where latest_face.purchase_task_id = pt.id
+                 and latest_face.photo_role = 'face_check_report'
+               order by latest_face.created_at desc, latest_face.id desc
+               limit 1
+             )
+           )
+       ) visible_photos
+     ) photos on true
      ${where}
-     group by pt.id, t.id, hp.id
+     group by pt.id, t.id, hp.id, photos.photo_count, photos.items
      order by pt.created_at desc`,
     params,
   );
@@ -557,6 +685,17 @@ async function getPurchaseTaskDetail(
               ) as items
        from helper_app.purchase_task_photos ptp
        where ptp.purchase_task_id = pt.id
+         and (
+           ptp.photo_role <> 'face_check_report'
+           or ptp.id = (
+             select latest_face.id
+             from helper_app.purchase_task_photos latest_face
+             where latest_face.purchase_task_id = pt.id
+               and latest_face.photo_role = 'face_check_report'
+             order by latest_face.created_at desc, latest_face.id desc
+             limit 1
+           )
+         )
      ) photos on true
      where ${conditions.join(" and ")}
      limit 1`,
@@ -1548,40 +1687,20 @@ async function createPurchaseTask(database, input) {
     throw new HelperAppServiceError("invalid_input", "At least one purchase reference photo is required.");
   }
   return withTransaction(database, async (client) => {
-    const trip = await lockTrip(client, normalized.tripId);
-    if (!trip.assigned_helper_id) {
-      throw new HelperAppServiceError("invalid_trip", "Trip must have an assigned helper.");
-    }
-    if (trip.status !== "active") {
-      throw new HelperAppServiceError("trip_not_active", "Purchase tasks can only be created for an active trip.");
-    }
+    const trip = await getActiveAssignedTripForTaskCreation(client, normalized.tripId);
     const task = await insertPurchaseTask(client, {
       ...normalized,
       helperId: trip.assigned_helper_id,
     });
-    for (const [index, photo] of referencePhotos.entries()) {
-      await client.query(
-        `insert into helper_app.media_objects
-           (storage_key, media_kind, retention_status, original_filename,
-            content_type, byte_size)
-         values ($1, 'purchase_reference_photo', 'task_evidence', $2, $3, $4)
-         on conflict (storage_key) do update
-         set media_kind = 'purchase_reference_photo',
-             retention_status = 'task_evidence',
-             original_filename = coalesce(excluded.original_filename, helper_app.media_objects.original_filename),
-             content_type = coalesce(excluded.content_type, helper_app.media_objects.content_type),
-             byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)`,
-        [photo.storageKey, photo.originalFilename, photo.contentType, photo.byteSize],
-      );
-      await insertPurchasePhoto(client, {
-        helperId: trip.assigned_helper_id,
-        photoRole: "manual_reference",
-        purchaseTaskId: task.id,
-        sortOrder: index,
-        storageKey: photo.storageKey,
-        tripId: trip.id,
-      });
-    }
+    await upsertPurchaseReferenceMediaBatch(client, referencePhotos);
+    await insertPurchasePhotosBatch(client, referencePhotos.map((photo, index) => ({
+      helperId: trip.assigned_helper_id,
+      photoRole: "manual_reference",
+      purchaseTaskId: task.id,
+      sortOrder: index,
+      storageKey: photo.storageKey,
+      tripId: trip.id,
+    })));
     return task;
   });
 }
@@ -1592,10 +1711,12 @@ async function quickPublishPurchaseTask(database, input) {
   return withTransaction(database, async (client) => {
     const quoteResult = await client.query(
       `select qtp.id, qtp.quote_task_id, qtp.trip_id, qtp.helper_id, qtp.storage_key,
-              qtp.reply_status, qt.status as quote_task_status, reply.id as reply_id,
+              qtp.reply_status, qt.status as quote_task_status, t.status as trip_status,
+              reply.id as reply_id,
               reply.price_jpy, reply.detail_photos
        from helper_app.quote_task_photos qtp
        join helper_app.quote_tasks qt on qt.id = qtp.quote_task_id
+       join helper_app.trips t on t.id = qtp.trip_id
        left join lateral (
          select qpr.*
          from helper_app.quote_photo_replies qpr
@@ -1612,11 +1733,10 @@ async function quickPublishPurchaseTask(database, input) {
     if (quotePhoto.reply_status === "converted_to_purchase") {
       throw new HelperAppServiceError("already_converted", "This quote photo is already a purchase task.");
     }
-    const trip = await lockTrip(client, quotePhoto.trip_id);
-    if (trip.status !== "active") {
+    if (quotePhoto.trip_status !== "active") {
       throw new HelperAppServiceError("trip_not_active", "Purchase tasks can only be created for an active trip.");
     }
-    if (normalized.tripId !== trip.id) {
+    if (normalized.tripId !== quotePhoto.trip_id) {
       throw new HelperAppServiceError("invalid_input", "Quote photo does not belong to the selected trip.");
     }
 
@@ -1628,17 +1748,17 @@ async function quickPublishPurchaseTask(database, input) {
       sourceQuoteTaskId: quotePhoto.quote_task_id,
       sourceQuoteTaskPhotoId: quotePhoto.id,
     });
-    await insertPurchasePhoto(client, {
+    const purchasePhotos = [{
       helperId: quotePhoto.helper_id,
       photoRole: "source",
       purchaseTaskId: task.id,
       sortOrder: 0,
       storageKey: quotePhoto.storage_key,
       tripId: quotePhoto.trip_id,
-    });
+    }];
     const detailPhotos = Array.isArray(quotePhoto.detail_photos) ? quotePhoto.detail_photos : [];
     for (const [index, detailPhoto] of detailPhotos.entries()) {
-      await insertPurchasePhoto(client, {
+      purchasePhotos.push({
         helperId: quotePhoto.helper_id,
         photoRole: "detail_reply",
         purchaseTaskId: task.id,
@@ -1647,6 +1767,8 @@ async function quickPublishPurchaseTask(database, input) {
         tripId: quotePhoto.trip_id,
       });
     }
+    await insertPurchasePhotosBatch(client, purchasePhotos);
+    await markMediaAsOrderEvidenceBatch(client, purchasePhotos.map((photo) => photo.storageKey));
     await client.query(
       `update helper_app.quote_task_photos
        set reply_status = 'converted_to_purchase',
@@ -2035,13 +2157,17 @@ async function checkoutRebuyTasks(database, input) {
 async function respondPurchaseTask(database, input) {
   const normalized = normalizePurchaseResponseInput(input);
   return withTransaction(database, async (client) => {
-    const helper = await findActiveHelperForUser(client, normalized.authUserId);
-    const task = await lockPurchaseTask(client, normalized.purchaseTaskId);
+    const { helper, task } = await lockPurchaseTaskForHelper(client, {
+      authUserId: normalized.authUserId,
+      purchaseTaskId: normalized.purchaseTaskId,
+    });
     if (task.helper_id !== helper.id) {
       throw new HelperAppServiceError("forbidden", "Purchase task is not assigned to this helper.");
     }
-    const trip = await lockTrip(client, task.trip_id);
-    assertTripCanUseLiveWorkspace(trip, "Purchase tasks can be updated only while the trip is active.");
+    assertTripCanUseLiveWorkspace(
+      { status: task.authorized_trip_status },
+      "Purchase tasks can be updated only while the trip is active.",
+    );
     const cancelingCompletedPurchase = task.status === "completed" && normalized.action === "cancel";
     if (["completed", "canceled", "unavailable", "not_found"].includes(task.status) && !cancelingCompletedPurchase) {
       if (task.idempotency_key && task.idempotency_key === normalized.idempotencyKey) {
@@ -2050,15 +2176,19 @@ async function respondPurchaseTask(database, input) {
       throw new HelperAppServiceError("invalid_status", "This purchase task is already closed.");
     }
 
-    if (normalized.action === "cancel" || normalized.action === "unavailable" || normalized.action === "not_found") {
+    const requestedQuantity = Math.max(1, Number(task.quantity || 1));
+    const completedQuantity = Math.min(normalized.completedQuantity ?? requestedQuantity, requestedQuantity);
+    const cancelsByZeroQuantity = normalized.action === "complete" && completedQuantity === 0;
+
+    if (normalized.action === "cancel" || normalized.action === "unavailable" || normalized.action === "not_found" || cancelsByZeroQuantity) {
       if (!normalized.helperNote) {
         throw new HelperAppServiceError("invalid_input", "A reason is required.");
       }
-      const status = normalized.action === "cancel" ? "canceled" : normalized.action;
+      const status = normalized.action === "cancel" || cancelsByZeroQuantity ? "canceled" : normalized.action;
       const result = await client.query(
         `update helper_app.purchase_tasks
          set status = $2,
-             completed_quantity = null,
+             completed_quantity = 0,
              unavailable_quantity = $3,
              helper_note = $4,
              idempotency_key = $5,
@@ -2070,7 +2200,7 @@ async function respondPurchaseTask(database, input) {
         [
           task.id,
           status,
-          normalized.unavailableQuantity ?? task.quantity,
+          normalized.unavailableQuantity ?? requestedQuantity,
           normalized.helperNote,
           normalized.idempotencyKey,
         ],
@@ -2090,19 +2220,6 @@ async function respondPurchaseTask(database, input) {
       return result.rows[0];
     }
 
-    const completedQuantity = normalized.completedQuantity ?? task.quantity;
-    if (completedQuantity > task.quantity) {
-      throw new HelperAppServiceError("invalid_input", "Completed quantity cannot exceed requested quantity.");
-    }
-    if (completedQuantity < task.quantity && normalized.unavailableQuantity == null) {
-      throw new HelperAppServiceError("invalid_input", "Partial purchases must explicitly resolve the remaining quantity.");
-    }
-    if (completedQuantity < task.quantity && !normalized.remainingResolution) {
-      throw new HelperAppServiceError("invalid_input", "Partial purchases must state how the remaining quantity was resolved.");
-    }
-    if (completedQuantity < task.quantity && !normalized.helperNote) {
-      throw new HelperAppServiceError("invalid_input", "Partial purchases require a reason for the remaining quantity.");
-    }
     if (task.requires_face_check && task.status === "open") {
       if (!normalized.faceCheckPhoto) {
         throw new HelperAppServiceError("invalid_input", "Face-check photo is required.");
@@ -2126,11 +2243,9 @@ async function respondPurchaseTask(database, input) {
           helper.id,
         ],
       );
-      await insertPurchasePhoto(client, {
+      await upsertLatestFaceCheckPurchasePhoto(client, {
         helperId: helper.id,
-        photoRole: "face_check_report",
         purchaseTaskId: task.id,
-        sortOrder: 0,
         storageKey: normalized.faceCheckPhoto.storageKey,
         tripId: task.trip_id,
       });
@@ -2148,7 +2263,7 @@ async function respondPurchaseTask(database, input) {
         [
           task.id,
           completedQuantity,
-          task.quantity - completedQuantity,
+          requestedQuantity - completedQuantity,
           normalized.helperNote,
           normalized.faceCheckNote,
           normalized.idempotencyKey,
@@ -2184,12 +2299,12 @@ async function respondPurchaseTask(database, input) {
       [
         task.id,
         completedQuantity,
-        task.quantity - completedQuantity,
-        completedQuantity < task.quantity
+        requestedQuantity - completedQuantity,
+        completedQuantity < requestedQuantity
           ? formatPartialPurchaseNote(
               normalized.helperNote,
-              task.quantity - completedQuantity,
-              normalized.remainingResolution,
+              requestedQuantity - completedQuantity,
+              "canceled",
             )
           : normalized.helperNote,
         normalized.idempotencyKey,
@@ -2204,8 +2319,8 @@ async function respondPurchaseTask(database, input) {
       after_state: {
         completedQuantity,
         purchaseTaskId: task.id,
-        remainingQuantity: task.quantity - completedQuantity,
-        remainingResolution: normalized.remainingResolution,
+        remainingQuantity: requestedQuantity - completedQuantity,
+        remainingResolution: completedQuantity < requestedQuantity ? "canceled" : null,
       },
       before_state: { status: task.status },
       trip_id: task.trip_id,
@@ -2220,7 +2335,8 @@ function formatPartialPurchaseNote(note, remainingQuantity, remainingResolution)
     not_found: "未找到",
     unavailable: "缺貨",
   };
-  return `未購買 ${remainingQuantity} 件：${labels[remainingResolution] || remainingResolution}。${note}`;
+  const suffix = note ? `。${note}` : "";
+  return `未購買 ${remainingQuantity} 件：${labels[remainingResolution] || remainingResolution}${suffix}`;
 }
 
 async function reviewFaceCheckPurchaseTask(database, input) {
@@ -2574,7 +2690,7 @@ async function markHelperEnded(database, { authUserId, expectedVersion, tripId }
     if (Number(openPurchases.rows[0]?.count || 0) > 0) {
       throw new HelperAppServiceError(
         "unfinished_purchase_tasks",
-        "尚有未完成的採買任務，請先完成、取消、標記缺貨或找不到。",
+        "尚有未完成的採買任務，請先完成或取消。",
       );
     }
     const quoteWarnings = await client.query(
@@ -3131,6 +3247,24 @@ async function lockTrip(client, tripId) {
   );
   if (!result.rows[0]) throw new HelperAppServiceError("trip_not_found", "Trip was not found.");
   return result.rows[0];
+}
+
+async function getActiveAssignedTripForTaskCreation(client, tripId) {
+  const result = await client.query(
+    `select id, assigned_helper_id, status
+     from helper_app.trips
+     where id = $1`,
+    [requiredText(tripId, "tripId")],
+  );
+  const trip = result.rows[0];
+  if (!trip) throw new HelperAppServiceError("trip_not_found", "Trip was not found.");
+  if (!trip.assigned_helper_id) {
+    throw new HelperAppServiceError("invalid_trip", "Trip must have an assigned helper.");
+  }
+  if (trip.status !== "active") {
+    throw new HelperAppServiceError("trip_not_active", "Purchase tasks can only be created for an active trip.");
+  }
+  return trip;
 }
 
 async function persistTripTransition(client, trip) {
@@ -4016,8 +4150,8 @@ function normalizePurchaseResponseInput(input) {
   const completedQuantity = completedText == null ? null : Number(completedText);
   const unavailableQuantity = unavailableText == null ? null : Number(unavailableText);
   const remainingResolution = optionalText(input.remainingResolution);
-  if (completedQuantity != null && (!Number.isInteger(completedQuantity) || completedQuantity <= 0)) {
-    throw new HelperAppServiceError("invalid_input", "Completed quantity must be a positive integer.");
+  if (completedQuantity != null && (!Number.isInteger(completedQuantity) || completedQuantity < 0)) {
+    throw new HelperAppServiceError("invalid_input", "Completed quantity must be a non-negative integer.");
   }
   if (unavailableQuantity != null && (!Number.isInteger(unavailableQuantity) || unavailableQuantity < 0)) {
     throw new HelperAppServiceError("invalid_input", "Unavailable quantity must be a non-negative integer.");
@@ -4027,12 +4161,6 @@ function normalizePurchaseResponseInput(input) {
     !["canceled", "not_found", "unavailable"].includes(remainingResolution)
   ) {
     throw new HelperAppServiceError("invalid_input", "Invalid remaining quantity resolution.");
-  }
-  if (action === "complete" && unavailableQuantity > 0 && !remainingResolution) {
-    throw new HelperAppServiceError("invalid_input", "Partial purchases must state how the remaining quantity was resolved.");
-  }
-  if (action === "complete" && unavailableQuantity > 0 && !optionalText(input.helperNote)) {
-    throw new HelperAppServiceError("invalid_input", "Partial purchases require a reason for the remaining quantity.");
   }
   return {
     action,
@@ -4317,6 +4445,83 @@ async function insertPurchasePhoto(client, input) {
   );
 }
 
+async function upsertPurchaseReferenceMediaBatch(client, photos) {
+  if (!photos.length) return;
+  await client.query(
+    `insert into helper_app.media_objects
+       (storage_key, media_kind, retention_status, original_filename,
+        content_type, byte_size)
+     select input.storage_key,
+            'purchase_reference_photo',
+            'order_evidence',
+            input.original_filename,
+            input.content_type,
+            input.byte_size
+     from unnest($1::text[], $2::text[], $3::text[], $4::bigint[])
+       as input(storage_key, original_filename, content_type, byte_size)
+     on conflict (storage_key) do update
+     set media_kind = 'purchase_reference_photo',
+         retention_status = 'order_evidence',
+         original_filename = coalesce(excluded.original_filename, helper_app.media_objects.original_filename),
+         content_type = coalesce(excluded.content_type, helper_app.media_objects.content_type),
+         byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)`,
+    [
+      photos.map((photo) => photo.storageKey),
+      photos.map((photo) => photo.originalFilename || null),
+      photos.map((photo) => photo.contentType || null),
+      photos.map((photo) => Number.isFinite(Number(photo.byteSize)) ? Number(photo.byteSize) : null),
+    ],
+  );
+}
+
+async function insertPurchasePhotosBatch(client, photos) {
+  if (!photos.length) return;
+  await client.query(
+    `insert into helper_app.purchase_task_photos
+       (purchase_task_id, trip_id, helper_id, storage_key, photo_role, sort_order)
+     select *
+     from unnest($1::uuid[], $2::uuid[], $3::uuid[], $4::text[], $5::text[], $6::int[])
+       as input(purchase_task_id, trip_id, helper_id, storage_key, photo_role, sort_order)
+     on conflict (purchase_task_id, photo_role, sort_order) do nothing`,
+    [
+      photos.map((photo) => photo.purchaseTaskId),
+      photos.map((photo) => photo.tripId),
+      photos.map((photo) => photo.helperId),
+      photos.map((photo) => photo.storageKey),
+      photos.map((photo) => photo.photoRole),
+      photos.map((photo) => photo.sortOrder),
+    ],
+  );
+}
+
+async function upsertLatestFaceCheckPurchasePhoto(client, input) {
+  await client.query(
+    `insert into helper_app.purchase_task_photos
+       (purchase_task_id, trip_id, helper_id, storage_key, photo_role, sort_order, created_at)
+     values ($1, $2, $3, $4, 'face_check_report', 0, now())
+     on conflict (purchase_task_id, photo_role, sort_order) do update
+     set storage_key = excluded.storage_key,
+         created_at = now()`,
+    [
+      input.purchaseTaskId,
+      input.tripId,
+      input.helperId,
+      input.storageKey,
+    ],
+  );
+}
+
+async function markMediaAsOrderEvidenceBatch(client, storageKeys) {
+  const keys = [...new Set(storageKeys.filter(Boolean))];
+  if (!keys.length) return;
+  await client.query(
+    `update helper_app.media_objects
+     set retention_status = 'order_evidence'
+     where storage_key = any($1::text[])`,
+    [keys],
+  );
+}
+
 async function lockPurchaseTask(client, purchaseTaskId) {
   const result = await client.query(
     `select *
@@ -4327,6 +4532,30 @@ async function lockPurchaseTask(client, purchaseTaskId) {
   );
   if (!result.rows[0]) throw new HelperAppServiceError("purchase_task_not_found", "Purchase task was not found.");
   return result.rows[0];
+}
+
+async function lockPurchaseTaskForHelper(client, { authUserId, purchaseTaskId }) {
+  const result = await client.query(
+    `select pt.*,
+            hp.id as authorized_helper_id,
+            hp.is_active as authorized_helper_is_active,
+            t.status as authorized_trip_status
+     from helper_app.purchase_tasks pt
+     join helper_app.trips t on t.id = pt.trip_id
+     join helper_app.helper_profiles hp on hp.auth_user_id = $2
+     where pt.id = $1
+     for update of pt, t, hp`,
+    [purchaseTaskId, authUserId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new HelperAppServiceError("purchase_task_not_found", "Purchase task was not found.");
+  const helper = {
+    id: row.authorized_helper_id,
+    is_active: row.authorized_helper_is_active,
+  };
+  if (!helper.id) throw new HelperAppServiceError("helper_not_found", "Helper profile was not found.");
+  if (!helper.is_active) throw new HelperAppServiceError("helper_inactive", "Helper profile is inactive.");
+  return { helper, task: row };
 }
 
 async function syncStagingOrderPreview(client, task) {

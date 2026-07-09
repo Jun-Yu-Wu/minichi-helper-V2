@@ -650,8 +650,12 @@ function purchaseStatusTone(status: string): "amber" | "blue" | "green" | "neutr
 }
 
 function adminPrimaryPurchasePhotos(photos: any[]) {
+  const latestFaceCheck = photos
+    .filter((photo) => String(photo.photo_role || "") === "face_check_report")
+    .sort(compareNewestPhotoFirst)[0];
+  if (latestFaceCheck) return [latestFaceCheck];
   return photos.filter((photo) =>
-    ["detail_reply", "face_check_report"].includes(String(photo.photo_role || "")),
+    String(photo.photo_role || "") === "detail_reply",
   );
 }
 
@@ -659,4 +663,13 @@ function adminHiddenPurchasePhotos(photos: any[]) {
   return photos.filter((photo) =>
     !["detail_reply", "face_check_report"].includes(String(photo.photo_role || "")),
   );
+}
+
+function compareNewestPhotoFirst(left: any, right: any) {
+  const leftTime = Date.parse(String(left.created_at || ""));
+  const rightTime = Date.parse(String(right.created_at || ""));
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  return String(right.id || "").localeCompare(String(left.id || ""));
 }
