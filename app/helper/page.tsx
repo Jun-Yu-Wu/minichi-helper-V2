@@ -39,13 +39,17 @@ import { QuoteTaskWorkspace } from "./QuoteTaskReplies";
 import { RebuyTasks } from "./RebuyTasks";
 import { SitePhotoWorkspace } from "./SitePhotoWorkspace";
 import { SettlementPrecheckForm, WarehouseProofForm } from "./Settlements";
+import { SettlementAutoRefresh } from "./SettlementAutoRefresh";
 import { TripSectionSwitcher } from "./TripSectionSwitcher";
 import { WaitingForActivationRefresh } from "./WaitingForActivationRefresh";
 
 type HelperSearchParams = {
   batchId?: string;
   panel?: string;
+  rebuySection?: string;
+  rebuyTaskId?: string;
   settlementId?: string;
+  warehouseSettlementId?: string;
   tripId?: string;
   tripGroups?: string;
   view?: string;
@@ -83,6 +87,8 @@ export default async function HelperPage({
       settlementIds:
         view === "settlement" && params.settlementId
           ? [params.settlementId]
+          : view === "warehouse" && params.warehouseSettlementId
+            ? [params.warehouseSettlementId]
           : null,
       settlementIncludeDetails:
         view === "settlement"
@@ -92,6 +98,8 @@ export default async function HelperPage({
         view === "warehouse"
           ? ["warehouse_pending"]
           : null,
+      rebuyIncludePhotos: view === "rebuy" ? Boolean(params.rebuyTaskId) : true,
+      rebuyTaskIds: view === "rebuy" && params.rebuyTaskId ? [params.rebuyTaskId] : null,
       sitePhotoBatchId:
         panel === "site" && params.batchId ? params.batchId : null,
       tripIds: params.tripId ? [params.tripId] : null,
@@ -131,7 +139,7 @@ export default async function HelperPage({
         createR2ObjectStore(),
       )
     : workspace.settlements || [];
-  const signedRebuyTasks = view === "rebuy"
+  const signedRebuyTasks = view === "rebuy" && Boolean(params.rebuyTaskId)
     ? await service.attachSignedRebuyTaskUrls(
         workspace.rebuyTasks || [],
         createR2ObjectStore(),
@@ -152,9 +160,9 @@ export default async function HelperPage({
   ) : view === "settlement" ? (
     <HelperSettlements selectedSettlementId={params.settlementId} settlements={signedSettlements} />
   ) : view === "rebuy" ? (
-    <RebuyTasks tasks={signedRebuyTasks} />
+    <RebuyTasks rebuySection={normalizeRebuySection(params.rebuySection)} selectedTaskId={params.rebuyTaskId} tasks={signedRebuyTasks} />
   ) : view === "warehouse" ? (
-    <HelperWarehouse settlements={signedSettlements} />
+    <HelperWarehouse selectedSettlementId={params.warehouseSettlementId} settlements={signedSettlements} />
   ) : (
     <HelperHome
       inProgressTrips={workspace.groups.inProgress}
@@ -174,21 +182,48 @@ function HelperSettlements({
 }) {
   const selectedSettlement = settlements.find((settlement) => settlement.id === selectedSettlementId);
   if (selectedSettlement) {
+    const waitingForRate =
+      selectedSettlement.status === "pending_helper_precheck" &&
+      Number(selectedSettlement.jpy_to_twd_rate || 0) <= 0;
     return (
       <section className="grid gap-4">
-        <Button asChild size="sm" variant="ghost">
-          <Link href="/helper?view=settlement">返回結帳</Link>
-        </Button>
-        <SectionHeader eyebrow="小幫手結帳" title={selectedSettlement.trip_name} />
-        <div className="grid gap-2">
+        <div className="flex items-center justify-between gap-3">
+          <Button asChild size="sm" variant="ghost">
+            <Link href="/helper?view=settlement">返回結帳</Link>
+          </Button>
+          <StatusBadge tone={selectedSettlement.status === "completed" ? "green" : "blue"}>
+            {settlementStageLabel(selectedSettlement)}
+          </StatusBadge>
+        </div>
+        <h2 className="text-2xl font-semibold tracking-tight">{selectedSettlement.trip_name}</h2>
+        <SettlementAutoRefresh
+          settlementId={selectedSettlement.id}
+          settlements={[selectedSettlement]}
+        />
+        {waitingForRate ? (
+          <InsightBanner
+            body="管理員填入當日 JPY→TWD 匯率後，這筆結帳會自動移到進行中，屆時再進行初次檢查。"
+            title="等待管理員填入當日匯率"
+            tone="amber"
+          />
+        ) : (
+          <InsightBanner
+            body={helperSettlementNextStep(selectedSettlement.status)}
+            title="你現在需要做什麼"
+            tone={selectedSettlement.status === "correction_required" ? "red" : "blue"}
+          />
+        )}
+        {!waitingForRate ? <div className="grid gap-2">
           <SettlementPrecheckForm settlement={selectedSettlement} />
           {selectedSettlement.status === "pending_helper_confirmation" ? (
-            <form action={confirmSettlementAction}>
-              <input name="settlementId" type="hidden" value={selectedSettlement.id} />
-              <Button type="submit">確認結帳金額並等待付款</Button>
-            </form>
+            <ActionButtonForm
+              action={confirmSettlementAction}
+              fields={[{ name: "settlementId", value: selectedSettlement.id }]}
+              label="確認結帳金額並等待付款"
+              pendingLabel="確認中..."
+            />
           ) : null}
-        </div>
+        </div> : null}
       </section>
     );
   }
@@ -202,63 +237,108 @@ function HelperSettlements({
     "warehouse_review_pending",
     "final_payment_pending",
   ]);
-  const inProgress = settlements.filter((settlement) => inProgressStatuses.has(settlement.status));
+  const notStarted = settlements.filter(
+    (settlement) =>
+      settlement.status === "pending_helper_precheck" &&
+      Number(settlement.jpy_to_twd_rate || 0) <= 0,
+  );
+  const inProgress = settlements
+    .filter(
+      (settlement) =>
+        inProgressStatuses.has(settlement.status) &&
+        !notStarted.some((record) => record.id === settlement.id),
+    )
+    .sort((a, b) => Number(needsHelperAction(b)) - Number(needsHelperAction(a)));
   const completed = settlements.filter((settlement) => settlement.status === "completed");
   return (
-    <section className="grid gap-5">
-      <SectionHeader eyebrow="小幫手結帳" title="行程結帳" />
+    <Surface className="grid gap-4">
+      <SettlementAutoRefresh settlements={settlements} />
+      <SettlementGroup settlements={notStarted} title="未開始" />
       <SettlementGroup settlements={inProgress} title="進行中" />
       <SettlementGroup settlements={completed} title="已完成" />
-    </section>
+    </Surface>
   );
 }
 
-function SettlementGroup({ settlements, title }: { settlements: any[]; title: string }) {
+function SettlementGroup({
+  hrefForSettlement = (settlement) => `/helper?view=settlement&settlementId=${encodeURIComponent(settlement.id)}`,
+  settlements,
+  title,
+}: {
+  hrefForSettlement?: (settlement: any) => string;
+  settlements: any[];
+  title: string;
+}) {
   return (
-    <section className="grid gap-3">
+    <section className="grid gap-2">
       <div className="flex items-center justify-between gap-3">
-        <h3 className="text-lg font-semibold">{title}</h3>
-        <span className="text-sm text-muted-foreground">{settlements.length} 筆</span>
+        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+        <span className="text-xs font-medium text-muted-foreground">{settlements.length} 筆</span>
       </div>
       {settlements.length ? (
-        <div className="grid gap-3">
+        <div className="grid gap-2">
           {settlements.map((settlement) => (
             <Link
-              className="rounded-xl border bg-card p-4 shadow-sm transition hover:border-primary/30 hover:bg-accent/40"
-              href={`/helper?view=settlement&settlementId=${encodeURIComponent(settlement.id)}`}
+              className={`flex items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-foreground/20 hover:bg-accent/30 ${
+                settlement.status === "completed"
+                  ? "border-emerald-200 bg-emerald-50/60"
+                  : "bg-background"
+              }`}
+              href={hrefForSettlement(settlement)}
               key={settlement.id}
             >
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <div>
-                  <h4 className="font-semibold">{settlement.trip_name}</h4>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {service.dateOnly(settlement.business_date, settlement.timezone)} · {settlementStatusLabel(settlement.status)}
-                  </p>
-                </div>
-                <span className="text-sm font-medium text-muted-foreground">
-                  {settlement.total_payable_twd !== null ? `TWD ${settlement.total_payable_twd}` : "待匯率"}
-                </span>
-              </div>
+              <span className="min-w-0">
+                <strong className="block truncate text-base">{settlement.trip_name}</strong>
+              </span>
+              <span className="flex shrink-0 items-center gap-2">
+                <StatusBadge tone={settlement.status === "completed" ? "green" : settlement.status.includes("payment") ? "amber" : "blue"}>
+                  {settlementStageLabel(settlement)}
+                </StatusBadge>
+                {needsHelperAction(settlement) ? (
+                  <span
+                    aria-label="需要你處理"
+                    className="inline-flex size-7 items-center justify-center rounded-full bg-amber-100 text-base font-bold text-amber-800"
+                    title="需要你處理"
+                  >
+                    !
+                  </span>
+                ) : null}
+              </span>
             </Link>
           ))}
         </div>
       ) : (
-        <EmptyState title={`目前沒有${title}結帳`} body="需要處理的結帳會依狀態出現在這裡。" />
+        <p className="rounded-lg border border-dashed p-3 text-sm text-muted-foreground">
+          目前沒有{title}結帳。
+        </p>
       )}
     </section>
   );
 }
 
-function HelperWarehouse({ settlements }: { settlements: any[] }) {
+function HelperWarehouse({ selectedSettlementId, settlements }: { selectedSettlementId?: string; settlements: any[] }) {
   const waiting = settlements.filter((settlement) => settlement.status === "warehouse_pending");
+  const selectedSettlement = waiting.find((settlement) => settlement.id === selectedSettlementId);
+  if (selectedSettlement) {
+    return (
+      <section className="grid gap-4">
+        <Button asChild className="w-fit" size="sm" variant="ghost">
+          <Link href="/helper?view=warehouse">返回集運回報</Link>
+        </Button>
+        <SectionHeader eyebrow="集運回報" title={selectedSettlement.trip_name} />
+        <InsightBanner body="請上傳商品送去集運的照片，送出後會交由管理員審核。" title="回報送去集運的照片" tone="amber" />
+        <WarehouseProofForm settlement={selectedSettlement} />
+      </section>
+    );
+  }
   return (
     <section className="grid gap-4">
       <SectionHeader eyebrow="集運倉" title="集運倉回報" />
-      {waiting.length ? waiting.map((settlement) => (
-        <WarehouseProofForm key={settlement.id} settlement={settlement} />
-      )) : (
-        <EmptyState title="目前沒有待回報的送倉證明" body="付款後需要送倉回報時，系統會在這裡顯示。" />
-      )}
+      <SettlementGroup
+        hrefForSettlement={(settlement) => `/helper?view=warehouse&warehouseSettlementId=${encodeURIComponent(settlement.id)}`}
+        settlements={waiting}
+        title="需要回報"
+      />
     </section>
   );
 }
@@ -1019,12 +1099,53 @@ function settlementStatusLabel(status: string) {
     final_payment_pending: "待尾款",
     payment_pending: "待付款",
     pending_admin_review: "管理員審核中",
-    pending_helper_confirmation: "待確認",
-    pending_helper_precheck: "待預檢",
-    warehouse_pending: "待送倉回報",
+    pending_helper_confirmation: "最終確認",
+    pending_helper_precheck: "初次檢查",
+    warehouse_pending: "集運回報",
     warehouse_review_pending: "送倉審核中",
   };
   return labels[status] || status;
+}
+
+function settlementStageLabel(settlement: any) {
+  if (
+    settlement.status === "pending_helper_precheck" &&
+    Number(settlement.jpy_to_twd_rate || 0) <= 0
+  ) {
+    return "等待管理員匯率";
+  }
+  if (["pending_admin_review", "correction_required"].includes(settlement.status)) {
+    return "管理員審核";
+  }
+  if (settlement.status === "pending_helper_confirmation") return "最終確認";
+  if (["payment_pending", "final_payment_pending"].includes(settlement.status)) return "等待匯款";
+  if (["warehouse_pending", "warehouse_review_pending"].includes(settlement.status)) return "集運回報";
+  return settlementStatusLabel(settlement.status);
+}
+
+function needsHelperAction(settlement: any) {
+  if (
+    settlement.status === "pending_helper_precheck" &&
+    Number(settlement.jpy_to_twd_rate || 0) <= 0
+  ) {
+    return false;
+  }
+  return ["pending_helper_precheck", "correction_required", "pending_helper_confirmation", "warehouse_pending"].includes(settlement.status);
+}
+
+function helperSettlementNextStep(status: string) {
+  const steps: Record<string, string> = {
+    completed: "結帳與送倉流程已完成，可隨時回來查看紀錄。",
+    correction_required: "依管理員的補正內容更新收據、交通費或說明後重新送出。",
+    final_payment_pending: "尾款由管理員處理中，不需要重複操作。",
+    payment_pending: "管理員正在安排付款，資料有更新時此頁會自動同步。",
+    pending_admin_review: "資料已送出，等待管理員審核金額。",
+    pending_helper_confirmation: "請核對結帳總額，確認無誤後送出。",
+    pending_helper_precheck: "確認商品、上傳每日收據，並填寫交通費申請。",
+    warehouse_pending: "款項已處理，請到集運倉回報上傳送達證明。",
+    warehouse_review_pending: "送倉證明已送出，等待管理員審核。",
+  };
+  return steps[status] || "查看最新結帳狀態與下一步。";
 }
 
 async function signBatchesByTripId(batchesByTripId: Record<string, any[]>) {
@@ -1062,6 +1183,11 @@ function normalizeHelperView(value?: string) {
     return value || "home";
   }
   return "home";
+}
+
+function normalizeRebuySection(value?: string) {
+  if (value === "public" || value === "mine") return value;
+  return undefined;
 }
 
 function normalizeTripPanel(value?: string): TripPanel {

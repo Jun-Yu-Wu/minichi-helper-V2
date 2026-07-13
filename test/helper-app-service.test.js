@@ -121,6 +121,81 @@ test("admin dashboard reads only the sections requested by the current view", as
   assert.deepEqual(dashboard.settlements, []);
 });
 
+test("staging merge list uses aggregate counts and defers reviewed rows until a batch is selected", async () => {
+  const listQueries = [];
+  const database = {
+    async query(sql, params) {
+      listQueries.push({ params, sql });
+      return {
+        rows: [{
+          id: "merge-1",
+          included_order_count: 2,
+          reviewed_order_count: 3,
+          selected_photo_count: 4,
+          unknown_customer_count: 1,
+          reviewed_orders: [],
+        }],
+      };
+    },
+  };
+
+  const list = await service.listAdminDashboard(database, {
+    sections: ["stagingMergeJobs"],
+  });
+
+  assert.equal(list.stagingMergeJobs[0].included_order_count, 2);
+  assert.match(listQueries[0].sql, /selected_photo_count/);
+  assert.match(listQueries[0].sql, /'\[\]'::jsonb as reviewed_orders/);
+  assert.deepEqual(listQueries[0].params, []);
+});
+
+test("selected staging order scopes review rows and photo metadata to the current detail", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return {
+        rows: [{
+          id: "merge-1",
+          reviewed_orders: [{
+            id: "reviewed-order-1",
+            photos: [{ id: "photo-1", storage_key: "helper/photo.jpg" }],
+          }],
+        }],
+      };
+    },
+  };
+
+  const detail = await service.listAdminDashboard(database, {
+    sections: ["stagingMergeJobs"],
+    stagingMergeIncludeOrders: true,
+    stagingMergeIncludeOrderPhotos: true,
+    stagingMergeJobId: "merge-1",
+    stagingMergeReviewedOrderId: "reviewed-order-1",
+  });
+
+  assert.equal(detail.stagingMergeJobs[0].reviewed_orders[0].id, "reviewed-order-1");
+  assert.deepEqual(queries[0].params, ["merge-1", "reviewed-order-1"]);
+  assert.match(queries[0].sql, /rso\.id = \$2/);
+  assert.match(queries[0].sql, /reviewed_staging_order_photos rsop/);
+});
+
+test("selected staging merge photos receive temporary signed URLs without changing storage keys", async () => {
+  const result = await service.attachSignedStagingMergeJobUrls(
+    [{
+      id: "merge-1",
+      reviewed_orders: [{
+        id: "reviewed-order-1",
+        photos: [{ id: "photo-1", storage_key: "helper/photo.jpg" }],
+      }],
+    }],
+    { signedGetUrl: async (storageKey) => `signed:${storageKey}` },
+  );
+
+  assert.equal(result[0].reviewed_orders[0].photos[0].signed_url, "signed:helper/photo.jpg");
+  assert.equal(result[0].reviewed_orders[0].photos[0].storage_key, "helper/photo.jpg");
+});
+
 test("admin home summary uses one aggregate query instead of loading dashboard records", async () => {
   const queries = [];
   const database = {
@@ -736,6 +811,77 @@ test("lists rebuy tasks by newest publication time without admin priority orderi
 
   assert.match(queries[0].sql, /coalesce\(rt\.public_available_at, rt\.created_at\) desc/);
   assert.doesNotMatch(queries[0].sql, /rt\.priority asc/);
+});
+
+test("rebuy summary list skips photo joins until a task is selected", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return { rows: [] };
+    },
+  };
+
+  await service.listRebuyTasks(database, { helperId: "helper-1", includePhotos: false });
+
+  assert.doesNotMatch(String(queries[0].sql), /rebuy_task_photos/);
+  assert.match(String(queries[0].sql), /'\[\]'::jsonb as photos/);
+});
+
+test("admin rebuy summaries can scope public open tasks and one assigned helper", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return { rows: [] };
+    },
+  };
+
+  await service.listRebuyTasks(database, {
+    includePhotos: false,
+    includePrivateCustomerData: true,
+    statuses: ["open"],
+    visibility: "public",
+  });
+
+  assert.match(queries[0].sql, /rt\.visibility = \$2/);
+  assert.match(queries[0].sql, /rt\.status = any\(\$3::text\[\]\)/);
+  assert.deepEqual(queries[0].params, [true, "public", ["open"]]);
+
+  queries.length = 0;
+  await service.listRebuyTasks(database, {
+    assignedHelperId: "helper-1",
+    includePhotos: false,
+    includePrivateCustomerData: true,
+    visibility: "private",
+  });
+
+  assert.match(queries[0].sql, /rt\.visibility = \$2/);
+  assert.match(queries[0].sql, /rt\.assigned_helper_id = \$3/);
+  assert.deepEqual(queries[0].params, [true, "private", "helper-1"]);
+});
+
+test("selected rebuy detail scopes by id and includes photos", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return { rows: [] };
+    },
+  };
+
+  await service.listRebuyTasks(database, {
+    helperId: "helper-1",
+    rebuyTaskIds: ["00000000-0000-0000-0000-000000000001"],
+  });
+
+  assert.match(String(queries[0].sql), /rebuy_task_photos/);
+  assert.match(String(queries[0].sql), /rt\.id = any\(\$3::uuid\[\]\)/);
+  assert.deepEqual(queries[0].params, [
+    false,
+    "helper-1",
+    ["00000000-0000-0000-0000-000000000001"],
+  ]);
 });
 
 test("helper departure rejects inactive helpers before trip mutation", async () => {
@@ -2147,6 +2293,76 @@ test("settlement precheck allows optional transport photo when amount and route 
   assert.equal(update.params[2], "Shinjuku to Ikebukuro");
 });
 
+test("settlement precheck batches receipt and transport evidence writes", async () => {
+  const queries = [];
+  const settlement = {
+    helper_id: "helper-1",
+    id: "settlement-1",
+    status: "pending_helper_precheck",
+    trip_id: "trip-1",
+  };
+  const database = fakeDatabase(
+    [
+      {
+        rows: [{
+          auth_user_id: "auth-helper-1",
+          id: "helper-1",
+          is_active: true,
+        }],
+      },
+      { rows: [settlement] },
+      { rows: [] },
+      { rows: [] },
+      {
+        rows: [{
+          ...settlement,
+          status: "pending_admin_review",
+          transport_claim_jpy: 500,
+          transport_claim_note: "Shinjuku to Ikebukuro",
+        }],
+      },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  await service.submitSettlementPrecheck(database, {
+    authUserId: "auth-helper-1",
+    helperNote: "",
+    idempotencyKey: "settlement-submit-1",
+    receipt: {
+      byteSize: 10,
+      contentType: "image/jpeg",
+      originalFilename: "receipt.jpg",
+      storageKey: "receipt-key",
+    },
+    settlementId: "settlement-1",
+    transportClaimNote: "Shinjuku to Ikebukuro",
+    transportJpy: 500,
+    transportProof: {
+      byteSize: 12,
+      contentType: "image/jpeg",
+      originalFilename: "transport.jpg",
+      storageKey: "transport-key",
+    },
+  });
+
+  const mediaInsert = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.media_objects") &&
+    String(query.sql).includes("unnest")
+  );
+  const evidenceInsert = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.settlement_evidence") &&
+    String(query.sql).includes("unnest")
+  );
+  assert.deepEqual(mediaInsert.params[0], ["receipt-key", "transport-key"]);
+  assert.deepEqual(evidenceInsert.params[2], ["daily_receipt", "transport_proof"]);
+  assert.equal(
+    queries.filter((query) => String(query.sql).includes("settlement_evidence")).length,
+    1,
+  );
+});
+
 test("ending an eligible trip records quote warnings and creates a staging-based settlement", async () => {
   const queries = [];
   const endedTrip = {
@@ -2274,7 +2490,6 @@ test("admin can set settlement exchange rate before helper precheck", async () =
   };
   const database = fakeDatabase(
     [
-      { rows: [settlement] },
       {
         rows: [{
           ...settlement,
@@ -2282,7 +2497,6 @@ test("admin can set settlement exchange rate before helper precheck", async () =
           jpy_to_twd_rate: 0.22,
         }],
       },
-      { rows: [] },
     ],
     queries,
   );
@@ -2298,7 +2512,10 @@ test("admin can set settlement exchange rate before helper precheck", async () =
   const update = queries.find((query) =>
     String(query.sql).includes("set jpy_to_twd_rate = $2"),
   );
-  assert.deepEqual(update.params, ["settlement-1", 0.22, 2_200]);
+  assert.match(update.sql, /with target as/);
+  assert.match(update.sql, /insert into helper_app\.trip_audit_events/);
+  assert.doesNotMatch(update.sql, /for update/);
+  assert.deepEqual(update.params, ["settlement-1", 0.22, "admin-1"]);
 });
 
 test("public rebuy claim locks version and records ownership atomically", async () => {
@@ -2613,18 +2830,20 @@ test("approved staging merge writes main order, source link, and selected photos
 });
 
 function fakeDatabase(results, queries = []) {
+  let index = 0;
+  async function nextQuery(sql, params) {
+    queries.push({ params, sql });
+    if (sql === "begin" || sql === "commit" || sql === "rollback") return { rows: [] };
+    const result = results[index];
+    index += 1;
+    if (!result) throw new Error(`Unexpected query: ${sql}`);
+    return result;
+  }
   return {
+    query: nextQuery,
     async connect() {
-      let index = 0;
       return {
-        async query(sql, params) {
-          queries.push({ params, sql });
-          if (sql === "begin" || sql === "commit" || sql === "rollback") return { rows: [] };
-          const result = results[index];
-          index += 1;
-          if (!result) throw new Error(`Unexpected query: ${sql}`);
-          return result;
-        },
+        query: nextQuery,
         release() {},
       };
     },

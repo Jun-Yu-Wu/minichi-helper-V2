@@ -8,6 +8,17 @@ before or during the MINICHI helper rewrite. The source behavior is
 
 ## Confirmed Decisions
 
+### Settlement UI follow-up confirmed on 2026-07-09
+
+- Helper settlements remain in `未開始` until the admin enters the daily
+  JPY-to-TWD rate, then move to `進行中`.
+- The displayed stages are initial check, admin review, final confirmation,
+  waiting for transfer, and warehouse report. Helper-action stages are
+  highlighted and ordered first.
+- Helper and admin initial-check views show salary.
+- Warehouse report reuses the settlement list/detail UI pattern and asks for the
+  forwarding-warehouse handoff photo in detail.
+
 ### Round 24 confirmed on 2026-07-02
 
 Slice 8 is inserted before production launch rehearsal as a UI/UX redesign and

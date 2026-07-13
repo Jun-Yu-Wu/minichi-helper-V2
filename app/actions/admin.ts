@@ -11,6 +11,7 @@ import { createServerSupabaseClient } from "../../src/server/supabase";
 export type AdminActionResult = {
   error?: string;
   ok?: true;
+  settlement?: any;
 };
 
 async function requireAdmin() {
@@ -273,14 +274,29 @@ export async function reviewSettlementAction(formData: FormData) {
   revalidatePath("/admin");
 }
 
-export async function setSettlementExchangeRateAction(formData: FormData) {
-  const admin = await requireAdmin();
-  await service.setSettlementExchangeRate(database.getDatabasePool(), {
-    actorUserId: admin.user.id,
-    jpyToTwdRate: formText(formData, "jpyToTwdRate"),
-    settlementId: formText(formData, "settlementId"),
-  });
-  revalidatePath("/admin");
+export async function setSettlementExchangeRateAction(
+  _previousState: AdminActionResult,
+  formData: FormData,
+): Promise<AdminActionResult> {
+  const startedAt = performance.now();
+  try {
+    const admin = await requireAdmin();
+    const authorizedAt = performance.now();
+    const settlement = await service.setSettlementExchangeRate(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      jpyToTwdRate: formText(formData, "jpyToTwdRate"),
+      settlementId: formText(formData, "settlementId"),
+    });
+    const completedAt = performance.now();
+    console.info("admin_settlement_exchange_rate_saved", JSON.stringify({
+      authMs: Math.round(authorizedAt - startedAt),
+      dbMs: Math.round(completedAt - authorizedAt),
+      totalMs: Math.round(completedAt - startedAt),
+    }));
+    return { ok: true, settlement };
+  } catch (error) {
+    return actionError(error);
+  }
 }
 
 export async function recordSettlementPaymentAction(formData: FormData) {

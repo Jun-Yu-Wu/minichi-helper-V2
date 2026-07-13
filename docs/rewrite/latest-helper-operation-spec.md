@@ -941,7 +941,17 @@ Hourly settlement uses `departed_at -> ended_at`, including travel/work time.
 
 Helper precheck:
 
+- Before the admin enters the daily exchange rate, the settlement appears in
+  the helper's `未開始` group. Opening it shows only that the daily rate is
+  pending; helper precheck controls remain locked.
+- After the rate is entered, the settlement moves to `進行中`.
+- The visible workflow stages are `初次檢查 -> 管理員審核 -> 最終確認 ->
+  等待匯款 -> 集運回報`. Every stage has an explicit badge. Helper-action
+  stages (`初次檢查`, `最終確認`, and `集運回報`) are highlighted and sorted
+  before passive in-progress records.
 - Helper reviews settlement detail.
+- Both helper and admin views show the calculated salary during initial
+  precheck, marked as pending admin review.
 - If details are wrong, helper submits correction information.
 - Daily receipt photo is required.
 - Transport proof and transport amount are required only when claiming transport.
@@ -987,6 +997,9 @@ withheld until warehouse report and final payment.
 
 Helper warehouse report:
 
+- The warehouse-report entry uses the same card-list and detail hierarchy as
+  settlement. Opening a card asks the helper to report the forwarding-warehouse
+  handoff photo.
 - Upload one photo showing goods handed to the forwarding warehouse.
 - Optional text note.
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useEffect, useRef, useState } from "react";
-import { ImageUp, X } from "lucide-react";
+import { ChevronDown, ImageUp, PackagePlus, X } from "lucide-react";
 
 import {
   createHelperAction,
@@ -357,6 +357,7 @@ export function CreateRebuyTaskForm({
   const photosRef = useRef<AdminTaskUploadPhoto[]>([]);
   const [state, setState] = useState<AdminActionResult>({});
   const [pending, setPending] = useState(false);
+  const [isOpen, setIsOpen] = useState(false);
   const sourceCandidates = purchaseTasks.filter((task) => ["canceled", "unavailable", "not_found"].includes(task.status));
 
   useEffect(() => {
@@ -462,40 +463,81 @@ export function CreateRebuyTaskForm({
   }
 
   return (
-    <form className="grid gap-3 rounded-xl border bg-card p-4 shadow-sm" onSubmit={submitRebuyTask}>
-      <h2 className="text-lg font-semibold">新增補買任務</h2>
-      <select name="visibility" defaultValue="private" disabled={pending}>
-        <option value="private">指定小幫手</option>
-        <option value="public">公共補買池</option>
-      </select>
-      <select name="assignedHelperId" disabled={pending}>
-        <option value="">公共任務或從原採買帶入</option>
-        {helpers.filter((helper) => helper.is_active).map((helper) => (
-          <option key={helper.id} value={helper.id}>{helper.display_name}</option>
-        ))}
-      </select>
-      <select name="sourcePurchaseTaskId" disabled={pending}>
-        <option value="">手動建立，不綁定原採買</option>
-        {sourceCandidates.map((task) => (
-          <option key={task.id} value={task.id}>
-            {task.product_name} · {task.line_community_name || "未填客人"} · {task.status}
-          </option>
-        ))}
-      </select>
+    <form className="grid gap-5 rounded-lg border bg-card p-4 shadow-sm sm:p-5" onSubmit={submitRebuyTask}>
+      <Button
+        aria-expanded={isOpen}
+        className="h-auto w-full justify-start gap-3 p-0 text-left hover:bg-transparent"
+        type="button"
+        variant="ghost"
+        onClick={() => setIsOpen((current) => !current)}
+      >
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-secondary">
+          <PackagePlus className="size-5" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-lg font-semibold">建立補買任務</span>
+          <span className="mt-1 block text-sm text-muted-foreground">指定小幫手處理，或發布到公開補買池讓現場夥伴認領。</span>
+        </span>
+        <ChevronDown className={`mt-1 size-5 shrink-0 text-muted-foreground transition-transform ${isOpen ? "rotate-180" : ""}`} />
+      </Button>
+      {isOpen ? <>
       <div className="grid gap-3 sm:grid-cols-2">
-        <input name="productName" placeholder="商品名稱（手動建立必填）" disabled={pending} />
-        <CustomerNicknameInput
-          disabled={pending}
-          placeholder="客人 LINE 名稱（從客戶主檔建議）"
-          required={false}
-        />
+        <label className="grid gap-1">
+          <span>任務類型</span>
+          <select name="visibility" defaultValue="private" disabled={pending}>
+            <option value="private">指定小幫手</option>
+            <option value="public">公開補買池</option>
+          </select>
+        </label>
+        <label className="grid gap-1">
+          <span>指定小幫手</span>
+          <select name="assignedHelperId" disabled={pending}>
+            <option value="">公開任務或沿用原採買</option>
+            {helpers.filter((helper) => helper.is_active).map((helper) => (
+              <option key={helper.id} value={helper.id}>{helper.display_name}</option>
+            ))}
+          </select>
+        </label>
+      </div>
+      <label className="grid gap-1">
+        <span>從未完成採買建立</span>
+        <select name="sourcePurchaseTaskId" disabled={pending}>
+          <option value="">不綁定原採買，手動建立</option>
+          {sourceCandidates.map((task) => (
+            <option key={task.id} value={task.id}>
+              {task.product_name} · {task.line_community_name || "未填客人"} · {task.status}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="grid gap-1">
+          <span>商品名稱</span>
+          <input name="productName" placeholder="手動建立時必填" disabled={pending} />
+        </label>
+        <label className="grid gap-1">
+          <span>客人 LINE 名稱</span>
+          <CustomerNicknameInput disabled={pending} placeholder="從客戶主檔建議" required={false} />
+        </label>
       </div>
       <div className="grid gap-3 sm:grid-cols-3">
-        <input name="quantity" inputMode="numeric" placeholder="數量" disabled={pending} />
-        <input name="originalPriceJpy" inputMode="numeric" placeholder="JPY 單價" disabled={pending} />
-        <input name="salePriceTwd" inputMode="numeric" placeholder="TWD 售價" disabled={pending} />
+        <label className="grid gap-1">
+          <span>數量</span>
+          <input name="quantity" inputMode="numeric" min="1" placeholder="1" disabled={pending} />
+        </label>
+        <label className="grid gap-1">
+          <span>JPY 單價</span>
+          <input name="originalPriceJpy" inputMode="numeric" min="0" placeholder="0" disabled={pending} />
+        </label>
+        <label className="grid gap-1">
+          <span>TWD 售價</span>
+          <input name="salePriceTwd" inputMode="numeric" min="0" placeholder="0" disabled={pending} />
+        </label>
       </div>
-      <textarea name="instructions" placeholder="補買指示" disabled={pending} />
+      <label className="grid gap-1">
+        <span>補買指示</span>
+        <textarea name="instructions" placeholder="例如：架位、款式或替代條件" disabled={pending} />
+      </label>
       <div className="grid gap-2">
         <p className="text-sm font-medium">補買參考照（選填）</p>
         <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-3 text-center">
@@ -545,9 +587,10 @@ export function CreateRebuyTaskForm({
         ) : null}
       </div>
       <ActionMessage state={state} />
-      <Button disabled={pending || photos.some((photo) => Boolean(photo.error))} type="submit">
+      <Button className="sm:w-fit" disabled={pending || photos.some((photo) => Boolean(photo.error))} type="submit">
         {pending ? "建立中..." : "建立補買任務"}
       </Button>
+      </> : null}
     </form>
   );
 }

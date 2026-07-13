@@ -1,8 +1,10 @@
 import Link from "next/link";
 import type React from "react";
 import {
+  ArrowLeft,
   CalendarDays,
   Camera,
+  ChevronRight,
   ClipboardList,
   CreditCard,
   Home,
@@ -23,14 +25,11 @@ import {
   editReviewedStagingOrderPhotosAction,
   mergeApprovedStagingJobAction,
   prepareStagingReviewAction,
-  recordSettlementPaymentAction,
   rejectStagingMergeJobAction,
-  reviewSettlementAction,
-  reviewWarehouseProofAction,
-  setSettlementExchangeRateAction,
   reviewFaceCheckPurchaseAction,
 } from "../actions/admin";
 import { ActionButtonForm } from "../components/ActionButtonForm";
+import { SettlementAmountHero } from "../components/SettlementUi";
 import {
   EmptyState,
   InsightBanner,
@@ -57,6 +56,8 @@ import { AdminLivePhotosWorkspace } from "./AdminLivePhotosWorkspace";
 import { AdminLivePurchaseWorkspace } from "./AdminLivePurchaseWorkspace";
 import { AdminLiveQuoteWorkspace } from "./AdminLiveQuoteWorkspace";
 import { AdminPurchasePhotos } from "./AdminPurchasePhotos";
+import { SettlementActionForm } from "./SettlementActionForm";
+import { SettlementExchangeRateForm } from "./SettlementExchangeRateForm";
 
 type AdminSearchParams = {
   checkoutSettlementId?: string;
@@ -64,7 +65,12 @@ type AdminSearchParams = {
   helperMode?: string;
   liveSection?: string;
   liveTripId?: string;
+  mergeJobId?: string;
+  reviewedOrderId?: string;
   mainSection?: string;
+  rebuyHelperId?: string;
+  rebuyScope?: string;
+  rebuyTaskId?: string;
   taskCategory?: string;
   taskSubType?: string;
   taskTripId?: string;
@@ -75,6 +81,7 @@ type AdminSearchParams = {
 
 type TripGroupId = "completed" | "inProgress" | "notStarted";
 type LiveSection = "photos" | "purchase" | "quote" | "staging";
+type RebuyScope = "public" | "assigned";
 
 export default async function AdminPage({
   searchParams,
@@ -84,6 +91,7 @@ export default async function AdminPage({
   const params = (await searchParams) || {};
   const activeView = normalizeAdminView(params.view);
   const liveSection = normalizeLiveSection(params.liveSection);
+  const rebuyScope = activeView === "rebuy" ? normalizeRebuyScope(params.rebuyScope) : undefined;
   const adminMainOpenTripGroups =
     activeView === "main" && params.mainSection === "trips"
       ? parseOpenTripGroups(params.tripGroups ?? params.tripGroup, true)
@@ -102,6 +110,27 @@ export default async function AdminPage({
           : null,
       settlementIncludeDetails:
         activeView === "checkout" ? Boolean(params.checkoutSettlementId) : true,
+      rebuyIncludePhotos: activeView === "rebuy" ? Boolean(params.rebuyTaskId) : true,
+      rebuyTaskIds: activeView === "rebuy" && params.rebuyTaskId ? [params.rebuyTaskId] : null,
+      rebuyVisibility:
+        activeView === "rebuy" && rebuyScope
+          ? rebuyScope === "public" ? "public" : "private"
+          : null,
+      rebuyStatuses:
+        activeView === "rebuy" && rebuyScope === "public" && !params.rebuyTaskId
+          ? ["open"]
+          : null,
+      rebuyAssignedHelperId:
+        activeView === "rebuy" && rebuyScope === "assigned" && params.rebuyHelperId
+          ? params.rebuyHelperId
+          : null,
+      stagingMergeJobId:
+        activeView === "merge" && params.mergeJobId ? params.mergeJobId : null,
+      stagingMergeIncludeOrders: activeView === "merge" && Boolean(params.mergeJobId),
+      stagingMergeReviewedOrderId:
+        activeView === "merge" && params.reviewedOrderId ? params.reviewedOrderId : null,
+      stagingMergeIncludeOrderPhotos:
+        activeView === "merge" && Boolean(params.reviewedOrderId),
       tripStatuses:
         activeView === "main" && params.mainSection === "trips"
           ? tripStatusesForGroups(adminMainOpenTripGroups)
@@ -128,12 +157,18 @@ export default async function AdminPage({
     : activeView === "checkout"
       ? dashboard.settlements
       : [];
-  const rebuyTasks = activeView === "rebuy" && dashboard.rebuyTasks.length
+  const rebuyTasks = activeView === "rebuy" && params.rebuyTaskId && dashboard.rebuyTasks.length
     ? await service.attachSignedRebuyTaskUrls(
         dashboard.rebuyTasks,
         createR2ObjectStore(),
       )
-    : [];
+    : dashboard.rebuyTasks;
+  const stagingMergeJobs = activeView === "merge" && params.reviewedOrderId && dashboard.stagingMergeJobs.length
+    ? await service.attachSignedStagingMergeJobUrls(
+        dashboard.stagingMergeJobs,
+        createR2ObjectStore(),
+      )
+    : dashboard.stagingMergeJobs;
   return activeView === "main" ? (
     <AdminMain
       dashboard={dashboard}
@@ -153,13 +188,14 @@ export default async function AdminPage({
     />
   ) : activeView === "rebuy" ? (
     <AdminSection icon={<PackageSearch className="size-5" />} title="補買">
-      <div className="grid gap-4">
-        <CreateRebuyTaskForm
-          helpers={dashboard.helpers}
-          purchaseTasks={dashboard.purchaseTasks}
-        />
-        <AdminRebuyList tasks={rebuyTasks} />
-      </div>
+      <AdminRebuyWorkspace
+        helpers={dashboard.helpers}
+        purchaseTasks={dashboard.purchaseTasks}
+        rebuyScope={rebuyScope}
+        selectedHelperId={params.rebuyHelperId}
+        selectedTaskId={params.rebuyTaskId}
+        tasks={rebuyTasks}
+      />
     </AdminSection>
   ) : activeView === "live" && liveSection === "photos" ? (
     <AdminSection icon={<Radio className="size-5" />} title="即時回傳">
@@ -183,7 +219,9 @@ export default async function AdminPage({
     />
   ) : activeView === "merge" ? (
     <AdminStagingReview
-      jobs={dashboard.stagingMergeJobs}
+      jobs={stagingMergeJobs}
+      selectedJobId={params.mergeJobId}
+      selectedOrderId={params.reviewedOrderId}
       stagingOrderPreviews={dashboard.stagingOrderPreviews}
       trips={dashboard.trips}
     />
@@ -203,7 +241,7 @@ function AdminCheckout({
     {
       empty: "目前沒有待開始結帳。",
       statuses: ["pending_helper_precheck"],
-      title: "未付款",
+      title: "未開始",
     },
     {
       empty: "目前沒有進行中的結帳。",
@@ -224,79 +262,103 @@ function AdminCheckout({
       title: "已完成",
     },
   ];
+  if (selectedSettlementId) {
+    const settlement = settlements[0];
+    return (
+      <section className="grid gap-4">
+        <div className="flex items-center justify-between gap-3">
+          <Button asChild size="sm" variant="ghost">
+            <Link href="/admin?view=checkout">
+              <ArrowLeft className="mr-2 size-4" />
+              返回結帳
+            </Link>
+          </Button>
+          {settlement ? (
+            <StatusBadge tone={adminSettlementTone(settlement)}>
+              {adminSettlementBadgeLabel(settlement)}
+            </StatusBadge>
+          ) : null}
+        </div>
+        {settlement ? (
+          <>
+            <div>
+              <h2 className="text-2xl font-semibold tracking-tight">{settlement.trip_name}</h2>
+              <p className="mt-1 text-sm text-muted-foreground">{settlement.helper_display_name}</p>
+            </div>
+            <AdminSettlementDetail settlement={settlement} />
+          </>
+        ) : (
+          <EmptyPanel title="找不到結帳行程" body="這筆結帳可能已更新或不存在。" />
+        )}
+      </section>
+    );
+  }
   return (
     <AdminSection icon={<CreditCard className="size-5" />} title="結帳">
-      {selectedSettlementId ? (
-        <Button asChild className="w-fit" size="sm" variant="ghost">
-          <Link href="/admin?view=checkout">返回結帳列表</Link>
-        </Button>
-      ) : null}
       {settlements.length ? (
-        <div className="grid gap-6">
+        <Surface className="grid gap-5">
           {groups.map((group) => {
             const records = settlements.filter((settlement) => group.statuses.includes(settlement.status));
             return (
-              <section className="grid gap-3" key={group.title}>
+              <section className="grid gap-2" key={group.title}>
                 <div className="flex items-center justify-between">
-                  <h3 className="text-lg font-semibold">{group.title}</h3>
-                  <span className="text-sm text-muted-foreground">{records.length} 筆</span>
+                  <h3 className="font-semibold">{group.title}</h3>
+                  <span className="text-xs text-muted-foreground">{records.length} 筆</span>
                 </div>
                 {records.length ? records.map((settlement) => {
-                  const hasRate = Number(settlement.jpy_to_twd_rate || 0) > 0;
-                  if (!selectedSettlementId) {
-                    const href = `/admin?view=checkout&checkoutSettlementId=${encodeURIComponent(settlement.id)}`;
-                    const nextAction =
-                      settlement.status === "pending_helper_precheck"
-                        ? "等待小幫手預檢"
-                        : settlement.status === "pending_admin_review"
-                          ? "審核結帳"
-                          : settlement.status === "payment_pending"
-                            ? "記錄付款"
-                            : settlement.status === "warehouse_review_pending"
-                              ? "審核送倉"
-                              : settlement.status === "final_payment_pending"
-                                ? "支付尾款"
-                                : settlement.status === "warehouse_pending"
-                                  ? "等待送倉"
-                                  : settlement.status === "pending_helper_confirmation"
-                                    ? "等待小幫手確認"
-                                    : "查看";
-                    return (
-                      <Link
-                        className="rounded-xl border bg-card p-4 shadow-sm transition hover:border-primary/30 hover:bg-accent/40"
-                        href={href}
-                        key={settlement.id}
-                      >
-                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                          <div>
-                            <div className="flex flex-wrap items-center gap-2">
-                              <StatusBadge tone={settlement.status === "completed" ? "green" : settlement.status.includes("payment") ? "amber" : "blue"}>
-                                {settlementStatusLabel(settlement.status)}
-                              </StatusBadge>
-                              <h3 className="font-semibold">{settlement.trip_name} · {settlement.helper_display_name}</h3>
-                            </div>
-                            <p className="mt-1 text-sm text-muted-foreground">
-                              商品 JPY {settlement.product_total_jpy}
-                              {settlement.total_payable_twd !== null ? ` · 應付 TWD ${settlement.total_payable_twd}` : " · 待計算"}
-                            </p>
-                          </div>
-                          <span className="text-sm font-medium text-primary">{nextAction}</span>
-                        </div>
-                      </Link>
-                    );
-                  }
+                  const href = `/admin?view=checkout&checkoutSettlementId=${encodeURIComponent(settlement.id)}`;
+                  const needsAdmin = adminSettlementNeedsAction(settlement);
                   return (
-            <article className="grid gap-4 rounded-xl border bg-card p-4 shadow-sm" key={settlement.id}>
-              <div>
-                <div className="flex flex-wrap items-center gap-2">
-                  <StatusBadge tone={settlement.status === "completed" ? "green" : settlement.status.includes("payment") ? "amber" : "blue"}>
-                    {settlementStatusLabel(settlement.status)}
-                  </StatusBadge>
-                  <h3 className="font-semibold">{settlement.trip_name} · {settlement.helper_display_name}</h3>
-                </div>
-                <p className="text-sm text-muted-foreground">
-                  商品 JPY {settlement.product_total_jpy}
-                </p>
+                    <Link
+                      className="flex items-center justify-between gap-3 rounded-2xl border bg-card px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-foreground/20 hover:bg-accent/30"
+                      href={href}
+                      key={settlement.id}
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate font-medium">{settlement.trip_name}</p>
+                        <p className="truncate text-xs text-muted-foreground">{settlement.helper_display_name}</p>
+                      </div>
+                      <div className="flex shrink-0 items-center gap-2">
+                        <StatusBadge tone={adminSettlementTone(settlement)}>
+                          {adminSettlementBadgeLabel(settlement)}
+                        </StatusBadge>
+                        {needsAdmin ? (
+                          <span aria-label="需要管理員處理" className="grid size-6 place-items-center rounded-full bg-amber-100 text-sm font-semibold text-amber-800">
+                            !
+                          </span>
+                        ) : null}
+                      </div>
+                    </Link>
+                  );
+                }) : (
+                  <div className="rounded-2xl border border-dashed bg-background/70 px-4 py-5 text-sm text-muted-foreground">
+                    {group.empty}
+                  </div>
+                )}
+              </section>
+            );
+          })}
+        </Surface>
+      ) : (
+        <EmptyPanel title="結帳工作區" body="目前沒有待處理結帳。" />
+      )}
+    </AdminSection>
+  );
+}
+
+function AdminSettlementDetail({ settlement }: { settlement: any }) {
+  const hasRate = Number(settlement.jpy_to_twd_rate || 0) > 0;
+  const showReviewEssentials = ["pending_admin_review", "correction_required"].includes(settlement.status);
+  const showPaymentEssentials = settlement.total_payable_twd !== null && hasRate;
+  return (
+    <article className="grid gap-4 rounded-2xl border bg-card p-4 shadow-sm sm:p-5" key={settlement.id}>
+              <SettlementAmountHero label="本次應付小幫手" settlement={settlement} />
+              <InsightBanner
+                body={adminSettlementNextStep(settlement)}
+                title="管理員下一步"
+                tone={settlement.status === "correction_required" ? "red" : "blue"}
+              />
+              <div className="grid gap-3">
                 {!hasRate ? (
                   <InsightBanner
                     body="儲存後會顯示商品墊款；小幫手送出預檢後再核准結帳。"
@@ -305,36 +367,29 @@ function AdminCheckout({
                   />
                 ) : null}
                 {settlement.status !== "completed" ? (
-                  <form action={setSettlementExchangeRateAction} className="mt-3 grid gap-2 rounded-md border bg-background p-3 sm:grid-cols-[1fr_auto]">
-                    <input name="settlementId" type="hidden" value={settlement.id} />
-                    <label className="grid gap-1 text-sm">
-                      <span className="font-medium">當日 JPY→TWD 匯率</span>
-                      <input
-                        defaultValue={settlement.jpy_to_twd_rate ?? ""}
-                        inputMode="decimal"
-                        name="jpyToTwdRate"
-                        placeholder="例如 0.22"
-                        required
-                      />
-                    </label>
-                    <Button className="self-end" type="submit" variant={hasRate ? "outline" : "default"}>
-                      {hasRate ? "更新匯率" : "儲存匯率"}
-                    </Button>
-                  </form>
+                  <SettlementExchangeRateForm settlement={settlement} />
                 ) : null}
-                {settlement.total_payable_twd !== null && hasRate ? (
-                  <div className="mt-3 grid gap-1 rounded-lg bg-muted/50 p-3 text-sm">
-                    <p>商品墊款 TWD {settlement.item_advance_twd}</p>
-                    <AdminCompensationLine settlement={settlement} />
-                    <p>核准交通費 TWD {settlement.approved_transport_twd || 0}</p>
-                    <p className="font-semibold">
-                      應付 TWD {settlement.total_payable_twd}
-                      {settlement.is_split_payment ? " · 兩階段付款" : " · 一次付款"}
-                    </p>
+              </div>
+                {showPaymentEssentials ? (
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <AdminSettlementFact label="商品墊款" value={`TWD ${settlement.item_advance_twd}`} />
+                    <AdminSettlementFact
+                      label={settlement.compensation_mode === "hourly" ? "小幫手薪資" : "小幫手報酬"}
+                      value={`TWD ${adminCompensationAmount(settlement)}`}
+                      note={adminCompensationNote(settlement)}
+                    />
+                    <AdminSettlementFact label="交通費" value={`TWD ${settlement.approved_transport_twd || 0}`} />
                   </div>
                 ) : null}
-                {hasRate && settlement.line_items?.length ? (
-                  <div className="mt-3 grid gap-2 rounded-lg border bg-background p-3 text-sm">
+                {hasRate && ["pending_helper_precheck", "correction_required"].includes(settlement.status) ? (
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+                    <p className="font-semibold">初檢參考</p>
+                    <p className="mt-1">預估報酬 TWD {adminCompensationAmount(settlement)}，待管理員審核後確認。</p>
+                  </div>
+                ) : null}
+                {hasRate && showReviewEssentials && settlement.line_items?.length ? (
+                  <div className="grid gap-2 rounded-2xl border bg-background p-3 text-sm">
+                    <p className="font-medium">商品核對</p>
                     {settlement.line_items.map((item: any) => (
                       <div className="flex items-start justify-between gap-3 border-b pb-2 last:border-b-0 last:pb-0" key={item.id}>
                         <div>
@@ -351,21 +406,20 @@ function AdminCheckout({
                   </div>
                 ) : null}
                 {settlement.transport_claim_jpy ? (
-                  <div className="mt-3 rounded-md border bg-background p-3 text-sm">
+                  <div className="rounded-2xl border bg-background p-3 text-sm">
                     <p className="font-medium">交通申請 JPY {settlement.transport_claim_jpy}</p>
                     <p className="mt-1 text-muted-foreground">
                       {settlement.transport_claim_note || "未填交通區間"}
                     </p>
                   </div>
                 ) : null}
-              </div>
               {settlement.evidence?.length ? (
-                <div className="grid gap-2">
+                <div className="grid gap-2 rounded-2xl border bg-background p-3">
                   <p className="text-sm font-medium">已上傳照片</p>
-                  <div className="flex flex-wrap gap-2">
+                  <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
                   {settlement.evidence.map((item: any) => (
                       <a className="grid gap-1 text-xs text-muted-foreground" href={item.signed_url} key={item.id} rel="noreferrer" target="_blank">
-                        <img alt={settlementEvidenceLabel(item.evidence_type)} className="size-20 rounded-md border object-cover" src={item.signed_url} />
+                        <img alt={settlementEvidenceLabel(item.evidence_type)} className="aspect-square w-full rounded-md border object-cover" src={item.signed_url} />
                         <span>{settlementEvidenceLabel(item.evidence_type)}</span>
                       </a>
                   ))}
@@ -373,119 +427,426 @@ function AdminCheckout({
                 </div>
               ) : null}
               {settlement.status === "pending_admin_review" ? (
-                <div className="grid gap-3 rounded-md border bg-background p-3">
-                  <form action={reviewSettlementAction} className="grid gap-3 sm:grid-cols-2">
+                <div className="grid gap-3 rounded-2xl border bg-background p-3">
+                  <SettlementActionForm
+                    buttonClassName="sm:col-span-2"
+                    buttonLabel="核准並計算結帳"
+                    className="grid gap-3 sm:grid-cols-2"
+                    endpoint={`/api/admin/settlements/${encodeURIComponent(settlement.id)}`}
+                    pendingLabel="核准中..."
+                  >
+                    <input name="action" type="hidden" value="review" />
                     <input name="settlementId" type="hidden" value={settlement.id} />
                     <input name="reviewAction" type="hidden" value="approve" />
                     <input
-                      defaultValue={settlement.jpy_to_twd_rate ?? ""}
+                      value=""
                       name="jpyToTwdRate"
                       type="hidden"
+                      readOnly
                     />
                     <select name="transportDecision" defaultValue="reject">
                       <option value="reject">不核准交通費／無申請</option>
                       <option value="approve">核准交通費</option>
                     </select>
                     <textarea className="sm:col-span-2" name="adminReviewNote" placeholder="審核備註（選填）" />
-                    <Button className="sm:col-span-2" type="submit">核准並計算結帳</Button>
-                  </form>
-                  <form action={reviewSettlementAction} className="flex gap-2">
+                  </SettlementActionForm>
+                  <SettlementActionForm
+                    buttonLabel="退回"
+                    buttonVariant="outline"
+                    className="flex gap-2"
+                    endpoint={`/api/admin/settlements/${encodeURIComponent(settlement.id)}`}
+                    pendingLabel="退回中..."
+                  >
+                    <input name="action" type="hidden" value="review" />
                     <input name="settlementId" type="hidden" value={settlement.id} />
                     <input name="reviewAction" type="hidden" value="reject" />
                     <input className="flex-1" name="adminReviewNote" placeholder="退回補正原因" required />
-                    <Button type="submit" variant="outline">退回</Button>
-                  </form>
+                  </SettlementActionForm>
                 </div>
               ) : null}
               {["payment_pending", "final_payment_pending"].includes(settlement.status) ? (
-                <div className="grid gap-2">
+                <div className="grid gap-2 rounded-2xl border bg-background p-3">
                   <p className="text-sm font-medium">
                     本次應付 TWD {settlementNextPaymentAmount(settlement)}
                   </p>
-                  <form action={recordSettlementPaymentAction} className="flex flex-col gap-2 sm:flex-row">
+                  <SettlementActionForm
+                    buttonLabel={settlement.status === "final_payment_pending" ? "支付尾款" : "記錄付款"}
+                    className="flex flex-col gap-2 sm:flex-row"
+                    endpoint={`/api/admin/settlements/${encodeURIComponent(settlement.id)}`}
+                    pendingLabel={settlement.status === "final_payment_pending" ? "支付中..." : "記錄中..."}
+                  >
+                    <input name="action" type="hidden" value="record_payment" />
                     <input name="settlementId" type="hidden" value={settlement.id} />
                     <textarea className="flex-1" name="transferNotification" placeholder="貼上轉帳通知文字" required />
-                    <Button type="submit">{settlement.status === "final_payment_pending" ? "支付尾款" : "記錄付款"}</Button>
-                  </form>
+                  </SettlementActionForm>
                 </div>
               ) : null}
               {settlement.status === "warehouse_review_pending" ? (
-                <form action={reviewWarehouseProofAction}>
-                  <input name="settlementId" type="hidden" value={settlement.id} />
-                  <Button type="submit">核准送倉證明</Button>
-                </form>
+                <div className="rounded-2xl border bg-background p-3">
+                  <SettlementActionForm
+                    buttonLabel="核准送倉證明"
+                    endpoint={`/api/admin/settlements/${encodeURIComponent(settlement.id)}`}
+                    pendingLabel="核准中..."
+                  >
+                    <input name="action" type="hidden" value="review_warehouse_proof" />
+                    <input name="settlementId" type="hidden" value={settlement.id} />
+                  </SettlementActionForm>
+                </div>
               ) : null}
-            </article>
-                  );
-                }) : (
-                  <EmptyPanel title={group.empty} body="有符合狀態的結帳後會顯示在這裡。" />
-                )}
-              </section>
-            );
-          })}
-        </div>
-      ) : (
-        <EmptyPanel title="結帳工作區" body="目前沒有待處理結帳。" />
-      )}
-    </AdminSection>
+    </article>
   );
 }
 
-function AdminRebuyList({ tasks }: { tasks: any[] }) {
-  if (!tasks.length) {
-    return <EmptyPanel title="補買工作區" body="目前沒有補買任務。" />;
+function AdminRebuyWorkspace({
+  helpers,
+  purchaseTasks,
+  rebuyScope,
+  selectedHelperId,
+  selectedTaskId,
+  tasks,
+}: {
+  helpers: any[];
+  purchaseTasks: any[];
+  rebuyScope?: RebuyScope;
+  selectedHelperId?: string;
+  selectedTaskId?: string;
+  tasks: any[];
+}) {
+  const publicTasks = tasks.filter((task) => task.visibility === "public" && task.status === "open");
+  const privateTasks = tasks.filter((task) => task.visibility === "private");
+  const selectedTask = tasks[0];
+  const detailScope = rebuyScope || (selectedTask?.visibility === "private" ? "assigned" : "public");
+  const assignedListHref = "/admin?view=rebuy&rebuyScope=assigned";
+  const publicListHref = "/admin?view=rebuy&rebuyScope=public";
+
+  if (selectedTaskId) {
+    const helperId = detailScope === "assigned" ? selectedHelperId : undefined;
+    return (
+      <AdminRebuyList
+        backHref={
+          detailScope === "assigned" && helperId
+            ? helperRebuyHref(helperId)
+            : detailScope === "assigned"
+              ? assignedListHref
+              : publicListHref
+        }
+        eyebrow="補買任務詳情"
+        helperId={helperId}
+        scope={detailScope}
+        selectedTaskId={selectedTaskId}
+        tasks={tasks}
+        title="補買任務"
+      />
+    );
+  }
+
+  if (rebuyScope === "public") {
+    return (
+      <div className="grid gap-4">
+        <RebuyBackButton href="/admin?view=rebuy" label="返回補買工作區" />
+        <AdminRebuyList
+          backHref="/admin?view=rebuy"
+          eyebrow="目前發布、等待小幫手認領"
+          scope="public"
+          tasks={publicTasks}
+          title="公共補買"
+        />
+      </div>
+    );
+  }
+
+  if (rebuyScope === "assigned" && selectedHelperId) {
+    const helper = helpers.find((item) => item.id === selectedHelperId);
+    return (
+      <div className="grid gap-4">
+        <RebuyBackButton href={assignedListHref} label="返回指定小幫手列表" />
+        <AdminRebuyList
+          backHref={helperRebuyHref(selectedHelperId)}
+          eyebrow={helper ? `${helper.display_name} 的指定補買` : "指定小幫手補買"}
+          helperId={selectedHelperId}
+          scope="assigned"
+          tasks={privateTasks}
+          title={helper ? `${helper.display_name} 的補買任務` : "指定小幫手補買"}
+        />
+      </div>
+    );
+  }
+
+  if (rebuyScope === "assigned") {
+    return (
+      <div className="grid gap-4">
+        <RebuyBackButton href="/admin?view=rebuy" label="返回補買工作區" />
+        <AdminRebuyHelperList helpers={helpers} tasks={privateTasks} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid gap-6">
+      <section className="grid gap-3">
+        <SectionTitle eyebrow="先選擇要查看的補買類型" title="補買工作區" />
+        <div className="grid gap-3 sm:grid-cols-2">
+          <AdminRebuyEntryCard
+            count={publicTasks.length}
+            countLabel="筆待認領"
+            description="查看目前已發布到公共補買池、等待小幫手認領的任務。"
+            href={publicListHref}
+            icon={<PackageSearch className="size-5" />}
+            title="公共補買"
+          />
+          <AdminRebuyEntryCard
+            count={helpers.length}
+            countLabel="位小幫手"
+            description="先選小幫手，再查看這位小幫手目前的指定補買摘要。"
+            href={assignedListHref}
+            icon={<UserRound className="size-5" />}
+            title="指定小幫手補買"
+          />
+        </div>
+      </section>
+      <CreateRebuyTaskForm helpers={helpers} purchaseTasks={purchaseTasks} />
+    </div>
+  );
+}
+
+function AdminRebuyHelperList({ helpers, tasks }: { helpers: any[]; tasks: any[] }) {
+  if (!helpers.length) {
+    return <EmptyPanel title="指定小幫手補買" body="目前沒有小幫手資料。" />;
   }
   return (
     <section className="grid gap-3">
-      <div className="flex items-center justify-between gap-3">
-        <h3 className="text-lg font-semibold">補買任務</h3>
-        <span className="text-sm text-muted-foreground">{tasks.length} 筆</span>
+      <SectionTitle count={helpers.length} eyebrow="依小幫手查看指定補買" title="小幫手列表" />
+      <div className="grid gap-3 sm:grid-cols-2">
+        {helpers.map((helper) => {
+          const helperTasks = tasks.filter((task) => task.assigned_helper_id === helper.id);
+          const unfinishedCount = helperTasks.filter((task) => ["open", "claimed"].includes(task.status)).length;
+          return (
+            <Link
+              className="group rounded-lg border bg-card p-4 shadow-sm transition hover:border-primary/30 hover:bg-accent/40"
+              href={helperRebuyHref(helper.id)}
+              key={helper.id}
+            >
+              <div className="flex items-start gap-3">
+                <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-secondary">
+                  <UserRound className="size-5" />
+                </span>
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="truncate font-semibold">{helper.display_name}</h3>
+                    <ChevronRight className="size-5 shrink-0 text-muted-foreground transition group-hover:text-foreground" />
+                  </div>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {helperTasks.length} 筆指定補買 · {unfinishedCount} 筆未完成
+                  </p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {helper.is_active ? "目前可接收新任務" : "小幫手已停用，僅查看既有任務"}
+                  </p>
+                </div>
+              </div>
+            </Link>
+          );
+        })}
       </div>
+    </section>
+  );
+}
+
+function AdminRebuyEntryCard({
+  count,
+  countLabel,
+  description,
+  href,
+  icon,
+  title,
+}: {
+  count: number;
+  countLabel: string;
+  description: string;
+  href: string;
+  icon: React.ReactNode;
+  title: string;
+}) {
+  return (
+    <Link className="group rounded-lg border bg-card p-4 shadow-sm transition hover:border-primary/30 hover:bg-accent/40" href={href}>
+      <div className="flex items-start gap-3">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-secondary">{icon}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-3">
+            <h3 className="font-semibold">{title}</h3>
+            <ChevronRight className="size-5 shrink-0 text-muted-foreground transition group-hover:text-foreground" />
+          </div>
+          <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+          <p className="mt-3 text-sm font-semibold">{count} {countLabel}</p>
+        </div>
+      </div>
+    </Link>
+  );
+}
+
+function AdminRebuyList({
+  backHref,
+  eyebrow,
+  helperId,
+  scope,
+  selectedTaskId,
+  tasks,
+  title,
+}: {
+  backHref: string;
+  eyebrow: string;
+  helperId?: string;
+  scope: RebuyScope;
+  selectedTaskId?: string;
+  tasks: any[];
+  title: string;
+}) {
+  if (selectedTaskId) {
+    const task = tasks[0];
+    return (
+      <section className="grid gap-3">
+        <RebuyBackButton href={backHref} label="返回摘要列表" />
+        {task ? <AdminRebuyDetail task={task} /> : <EmptyPanel title="找不到補買任務" body="任務可能已更新或不存在。" />}
+      </section>
+    );
+  }
+  if (!tasks.length) {
+    return <EmptyPanel title={title} body={scope === "public" ? "目前沒有等待認領的公共補買。" : "目前沒有指定補買任務。"} />;
+  }
+  return (
+    <section className="grid gap-3">
+      <SectionTitle count={tasks.length} eyebrow={eyebrow} title={title} />
       <div className="grid gap-3">
         {tasks.map((task) => (
-          <article className="rounded-xl border bg-card p-4 shadow-sm" key={task.id}>
-            <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-              <div>
+          <Link
+            className="group rounded-lg border bg-card p-4 shadow-sm transition hover:border-primary/30 hover:bg-accent/40"
+            href={rebuyTaskHref(scope, helperId, task.id)}
+            key={task.id}
+          >
+            <div className="flex items-start gap-3">
+              <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-2">
                   <StatusBadge tone={task.status === "reported" || task.status === "checked_out" ? "green" : task.status === "claimed" ? "amber" : "blue"}>
-                    {rebuyStatusLabel(task.status)}
+                    {scope === "public" && task.status === "open" ? "待認領" : rebuyStatusLabel(task.status)}
                   </StatusBadge>
-                  <StatusBadge tone={task.visibility === "public" ? "blue" : "neutral"}>
-                    {task.visibility === "public" ? "公共" : "指定"}
-                  </StatusBadge>
+                  {scope === "assigned" ? (
+                    <StatusBadge tone="neutral">指定</StatusBadge>
+                  ) : null}
                 </div>
                 <h3 className="mt-2 font-semibold">{task.product_name}</h3>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  {task.quantity} 件
+                  {task.quantity} 件 · {task.line_community_name || "未填客人"} · JPY {task.original_price_jpy ?? "-"} · TWD {task.sale_price_twd ?? "-"}
                 </p>
-                <p className="mt-1 text-sm">
-                  {task.line_community_name || "未填客人"} · JPY {task.original_price_jpy ?? "-"} · TWD {task.sale_price_twd ?? "-"}
+                <p className="mt-2 text-sm">
+                  {task.reported_quantity != null ? `已回報 ${task.reported_quantity} / ${task.quantity} 件` : "尚未回報"}
+                  {" · "}
+                  {scope === "public" ? "等待小幫手認領" : task.assigned_helper_display_name || "未指定小幫手"}
                 </p>
-                {task.instructions ? <p className="mt-2 text-sm">{task.instructions}</p> : null}
               </div>
+              <span className="flex size-9 shrink-0 items-center justify-center rounded-md text-muted-foreground transition group-hover:bg-background group-hover:text-foreground">
+                <ChevronRight className="size-5" />
+              </span>
             </div>
-            <div className="mt-3 grid gap-2 text-sm text-muted-foreground sm:grid-cols-2">
-              <p className="rounded-md bg-muted/60 px-3 py-2 font-medium text-foreground">
-                小幫手補買到：{task.reported_quantity != null ? `${task.reported_quantity} / ${task.quantity} 件` : `尚未回報 / ${task.quantity} 件`}
-              </p>
-              <p>指定：{task.assigned_helper_display_name || "-"}</p>
-              <p>認領：{task.claimed_helper_display_name || "-"}</p>
-              {task.remaining_quantity ? <p>剩餘：{task.remaining_quantity} · {task.remaining_reason}</p> : null}
-            </div>
-            {task.photos?.length ? (
-              <div className="mt-3 flex flex-wrap gap-2">
-                {task.photos.map((photo: any) => (
-                  <a className="grid gap-1 text-xs text-muted-foreground" href={photo.signed_url} key={photo.id} rel="noreferrer" target="_blank">
-                    <img alt={photo.photo_role} className="size-20 rounded-md border object-cover" src={photo.signed_url} />
-                    <span>{photo.photo_role === "reference" ? "參考" : "回報"}</span>
-                  </a>
-                ))}
-              </div>
-            ) : null}
-          </article>
+          </Link>
         ))}
       </div>
     </section>
+  );
+}
+
+function RebuyBackButton({ href, label }: { href: string; label: string }) {
+  return (
+    <Button asChild className="w-fit" size="sm" variant="ghost">
+      <Link href={href}>
+        <ArrowLeft className="mr-2 size-4" />
+        {label}
+      </Link>
+    </Button>
+  );
+}
+
+function helperRebuyHref(helperId: string) {
+  return `/admin?view=rebuy&rebuyScope=assigned&rebuyHelperId=${encodeURIComponent(helperId)}`;
+}
+
+function rebuyTaskHref(scope: RebuyScope, helperId: string | undefined, taskId: string) {
+  const params = new URLSearchParams({
+    rebuyScope: scope,
+    rebuyTaskId: taskId,
+    view: "rebuy",
+  });
+  if (scope === "assigned" && helperId) params.set("rebuyHelperId", helperId);
+  return `/admin?${params.toString()}`;
+}
+
+function AdminRebuyDetail({ task }: { task: any }) {
+  return (
+    <article className="rounded-lg border bg-card p-4 shadow-sm sm:p-5">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div>
+          <div className="flex flex-wrap items-center gap-2">
+            <StatusBadge tone={task.status === "reported" || task.status === "checked_out" ? "green" : task.status === "claimed" ? "amber" : "blue"}>
+              {rebuyStatusLabel(task.status)}
+            </StatusBadge>
+            <StatusBadge tone={task.visibility === "public" ? "blue" : "neutral"}>
+              {task.visibility === "public" ? "公共" : "指定"}
+            </StatusBadge>
+          </div>
+          <p className="mt-3 text-xs font-semibold uppercase text-muted-foreground">補買商品</p>
+          <h1 className="mt-1 text-xl font-semibold">{task.product_name}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {task.line_community_name || "未填客人"} · JPY {task.original_price_jpy ?? "-"} · TWD {task.sale_price_twd ?? "-"}
+          </p>
+        </div>
+      </div>
+      <div className="mt-4 grid gap-2 sm:grid-cols-3">
+        <AdminRebuyFact label="需要補買" value={`${task.quantity} 件`} />
+        <AdminRebuyFact label="小幫手回報" value={task.reported_quantity != null ? `${task.reported_quantity} / ${task.quantity} 件` : "尚未回報"} />
+        <AdminRebuyFact label="處理小幫手" value={task.claimed_helper_display_name || task.assigned_helper_display_name || "等待認領"} />
+      </div>
+      {task.remaining_quantity ? <p className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">尚缺 {task.remaining_quantity} 件：{task.remaining_reason}</p> : null}
+      {task.helper_report_note ? <p className="mt-3 text-sm">回報備註：{task.helper_report_note}</p> : null}
+      {task.instructions ? <p className="mt-3 rounded-md bg-background p-3 text-sm">{task.instructions}</p> : null}
+      {task.photos?.length ? (
+        <div className="mt-3 grid gap-2">
+          <p className="text-sm font-medium">補買照片</p>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {task.photos.map((photo: any) => (
+              <a className="grid gap-1 text-xs text-muted-foreground" href={photo.signed_url} key={photo.id} rel="noreferrer" target="_blank">
+                <img alt={photo.photo_role} className="aspect-square w-full rounded-md border object-cover" src={photo.signed_url} />
+                <span>{photo.photo_role === "reference" ? "參考" : "回報"}</span>
+              </a>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </article>
+  );
+}
+
+function AdminRebuyFact({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-md bg-muted/60 px-3 py-2">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 text-sm font-semibold">{value}</p>
+    </div>
+  );
+}
+
+function AdminSettlementFact({
+  label,
+  note,
+  value,
+}: {
+  label: string;
+  note?: string;
+  value: string;
+}) {
+  return (
+    <div className="rounded-2xl bg-muted/60 px-3 py-3">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className="mt-1 text-sm font-semibold">{value}</p>
+      {note ? <p className="mt-1 text-xs text-muted-foreground">{note}</p> : null}
+    </div>
   );
 }
 
@@ -501,22 +862,30 @@ function settlementNextPaymentAmount(settlement: any) {
   return settlement.is_split_payment ? Math.round(total / 2) : total;
 }
 
-function AdminCompensationLine({ settlement }: { settlement: any }) {
+function adminCompensationAmount(settlement: any) {
   const minutes = Number(settlement.work_minutes || 0);
   const hours = minutes / 60;
   if (settlement.compensation_mode === "hourly") {
-    return (
-      <p>
-        薪資 TWD {settlement.work_pay_twd || 0} · {formatHours(hours)} 小時 × TWD {settlement.hourly_rate_twd || 0}
-      </p>
-    );
+    return settlement.work_pay_twd ?? Math.round(hours * Number(settlement.hourly_rate_twd || 0));
   }
-  return (
-    <p>
-      薪資 TWD {Number(settlement.total_payable_twd || 0) - Number(settlement.approved_transport_twd || 0)}
-      {" "}· JPY {settlement.product_total_jpy} × 小幫手匯率 {settlement.helper_fx_rate || "-"}
-    </p>
-  );
+  const fxPay = Math.round(Number(settlement.product_total_jpy || 0) * Number(settlement.helper_fx_rate || 0));
+  return settlement.total_payable_twd == null
+    ? fxPay
+    : Math.max(
+        0,
+        Number(settlement.total_payable_twd || 0) -
+          Number(settlement.item_advance_twd || 0) -
+          Number(settlement.approved_transport_twd || 0),
+      );
+}
+
+function adminCompensationNote(settlement: any) {
+  const minutes = Number(settlement.work_minutes || 0);
+  const hours = minutes / 60;
+  if (settlement.compensation_mode === "hourly") {
+    return `${formatHours(hours)} 小時 × TWD ${settlement.hourly_rate_twd || 0}`;
+  }
+  return `商品 JPY ${settlement.product_total_jpy || 0} × 小幫手匯率 ${settlement.helper_fx_rate || "-"}`;
 }
 
 function formatHours(value: number) {
@@ -932,198 +1301,344 @@ function AdminLiveReturn({
 
 function AdminStagingReview({
   jobs,
+  selectedJobId,
+  selectedOrderId,
   stagingOrderPreviews,
   trips,
 }: {
   jobs: any[];
+  selectedJobId?: string;
+  selectedOrderId?: string;
   stagingOrderPreviews: any[];
   trips: any[];
 }) {
   const endedTrips = trips.filter((trip: any) => trip.status === "ended");
   const jobTripIds = new Set(jobs.map((job: any) => job.trip_id));
   const readyTrips = endedTrips.filter((trip: any) => !jobTripIds.has(trip.id));
+  const selectedJob = selectedJobId ? jobs.find((job: any) => job.id === selectedJobId) : null;
+  const pendingJobs = jobs.filter((job: any) => ["pending_review", "failed", "rejected"].includes(job.status));
+  const approvedJobs = jobs.filter((job: any) => job.status === "approved");
+  const includedOrders = jobs.reduce((sum, job) => sum + Number(job.included_order_count || 0), 0);
 
   return (
     <AdminSection icon={<Merge className="size-5" />} title="審核合併">
       <div className="grid gap-5">
-        <section className="grid gap-3">
-          <SectionTitle count={readyTrips.length} title="建立審核批次" />
-          {readyTrips.length ? (
-            <div className="grid gap-3 sm:grid-cols-2">
-              {readyTrips.map((trip: any) => {
-                const previewCount = stagingOrderPreviews.filter((preview: any) => preview.trip_id === trip.id).length;
-                return (
-                  <article className="rounded-xl border bg-card p-4 shadow-sm" key={trip.id}>
-                    <h4 className="font-semibold">{trip.trip_name}</h4>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                        {trip.helper_display_name || "未指派"} · {previewCount} 筆暫存訂單
-                    </p>
-                    <div className="mt-3">
-                      <ActionButtonForm
-                        action={prepareStagingReviewAction}
-                        fields={[{ name: "tripId", value: trip.id }]}
-                        label="建立審核"
-                      />
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          ) : (
-            <EmptyPanel title="沒有可建立的審核批次" body="只有已結束且尚未建立審核批次的行程會出現在這裡。" />
-          )}
-        </section>
+        <PageHeader
+          eyebrow="Staging review"
+          metrics={[
+            { label: "待審核批次", value: String(pendingJobs.length) },
+            { label: "已核准待合併", value: String(approvedJobs.length) },
+            { label: "待處理訂單", value: String(includedOrders) },
+            { label: "可建立批次行程", value: String(readyTrips.length) },
+          ]}
+          subtitle="先選一個行程批次，再逐筆確認訂單與最終照片；核准後才可執行一次明確的正式訂單合併。"
+          title="暫存訂單審核與合併"
+        />
 
-        <section className="grid gap-3">
-          <SectionTitle count={jobs.length} title="審核批次" />
-          {jobs.length ? (
-            <div className="grid gap-4">
-              {jobs.map((job: any) => {
-                const reviewedOrders = job.reviewed_orders || [];
-                const includedCount = reviewedOrders.filter((order: any) => !order.is_excluded).length;
-                const unknownCount = reviewedOrders.filter(
-                  (order: any) => !order.is_excluded && !order.customer_exists && !order.customer_confirmed,
-                ).length;
-                return (
-                  <article className="grid gap-4 rounded-xl border bg-card p-4 shadow-sm" key={job.id}>
-                    <div className="grid gap-3 md:grid-cols-[1fr_auto]">
-                      <div>
+        {selectedJob ? (
+          <StagingMergeJobDetail
+            job={selectedJob}
+            selectedOrderId={selectedOrderId}
+          />
+        ) : (
+          <>
+            {selectedJobId ? (
+              <InsightBanner body="這個審核批次可能已更新或不存在，請從下方清單重新選取。" title="找不到審核批次" tone="amber" />
+            ) : null}
+            <section className="grid gap-3">
+              <SectionTitle count={readyTrips.length} title="建立審核批次" />
+              {readyTrips.length ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {readyTrips.map((trip: any) => {
+                    const previewCount = stagingOrderPreviews.filter((preview: any) => preview.trip_id === trip.id).length;
+                    return (
+                      <article className="rounded-xl border bg-card p-4 shadow-sm" key={trip.id}>
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <h4 className="font-semibold">{trip.trip_name}</h4>
+                            <p className="mt-1 text-sm text-muted-foreground">
+                              {trip.helper_display_name || "未指派"} · {previewCount} 筆暫存訂單
+                            </p>
+                          </div>
+                          <StatusBadge tone="green">已結束</StatusBadge>
+                        </div>
+                        <div className="mt-3">
+                          <ActionButtonForm
+                            action={prepareStagingReviewAction}
+                            fields={[{ name: "tripId", value: trip.id }]}
+                            label="建立審核"
+                          />
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              ) : (
+                <EmptyPanel title="沒有可建立的審核批次" body="只有已結束且尚未建立審核批次的行程會出現在這裡。" />
+              )}
+            </section>
+
+            <section className="grid gap-3">
+              <SectionTitle count={jobs.length} title="審核批次清單" />
+              {jobs.length ? (
+                <div className="grid gap-2">
+                  {jobs.map((job: any) => (
+                    <Link
+                      className="flex items-center justify-between gap-4 rounded-2xl border bg-card px-4 py-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-primary/40 hover:bg-accent/30"
+                      href={`/admin?view=merge&mergeJobId=${encodeURIComponent(job.id)}`}
+                      key={job.id}
+                    >
+                      <div className="min-w-0">
                         <div className="flex flex-wrap items-center gap-2">
                           <StatusBadge tone={mergeStatusTone(job.status)}>{mergeStatusLabel(job.status)}</StatusBadge>
-                          <h4 className="font-semibold">{job.trip_name}</h4>
+                          <p className="truncate font-semibold">{job.trip_name}</p>
                         </div>
-                        <p className="mt-1 text-sm text-muted-foreground">
-                          {job.helper_display_name || "未指派"} · {includedCount} 筆會合併
+                        <p className="mt-1 truncate text-sm text-muted-foreground">
+                          {job.helper_display_name || "未指派"} · {Number(job.included_order_count || 0)} 筆會合併 · {Number(job.selected_photo_count || 0)} 張照片
                         </p>
-                        {unknownCount ? (
-                          <InsightBanner
-                            body="需明確確認後才能核准；合併不會自動建立客戶資料。"
-                            title={`${unknownCount} 筆 LINE 暱稱不在客戶名單`}
-                            tone="amber"
-                          />
-                        ) : null}
-                        {job.last_error ? <p className="mt-2 text-sm text-destructive">{job.last_error}</p> : null}
                       </div>
-                      <div className="flex flex-wrap items-start gap-2">
-                        {["pending_review", "failed", "rejected"].includes(job.status) ? (
-                          <ActionButtonForm
-                            action={approveStagingMergeJobAction}
-                            fields={[
-                              { name: "mergeJobId", value: job.id },
-                              { name: "expectedVersion", value: job.version },
-                            ]}
-                            label="核准審核"
-                            variant={unknownCount ? "outline" : "default"}
-                          />
-                        ) : null}
-                        {job.status === "approved" ? (
-                          <ActionButtonForm
-                            action={mergeApprovedStagingJobAction}
-                            fields={[
-                              { name: "mergeJobId", value: job.id },
-                              { name: "expectedVersion", value: job.version },
-                              { name: "idempotencyKey", value: `merge-${job.id}-${job.version}` },
-                            ]}
-                            label="合併至正式訂單"
-                          />
-                        ) : null}
+                      <div className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground">
+                        {Number(job.unknown_customer_count || 0) > 0 ? <span className="text-amber-700">需確認暱稱</span> : null}
+                        <ChevronRight className="size-5" />
                       </div>
-                    </div>
-
-                    {job.status !== "merged" ? (
-                      <form action={rejectStagingMergeJobAction} className="grid gap-2 rounded-md border bg-background p-3 sm:grid-cols-[1fr_auto]">
-                        <input name="mergeJobId" type="hidden" value={job.id} />
-                        <input name="rejectionNote" placeholder="退回原因" required />
-                        <Button type="submit" variant="outline">退回審核</Button>
-                      </form>
-                    ) : null}
-
-                    <div className="grid gap-3">
-                      {reviewedOrders.map((order: any) => (
-                        <div className="grid gap-3 rounded-lg border bg-background p-3" key={order.id}>
-                          <form action={editReviewedStagingOrderAction} className="grid gap-3">
-                            <input name="reviewedOrderId" type="hidden" value={order.id} />
-                            <div className="grid gap-2 md:grid-cols-2">
-                              <label className="grid gap-1 text-sm">
-                                <span className="font-medium">LINE 暱稱</span>
-                                <input name="lineCommunityName" defaultValue={order.line_community_name} required />
-                              </label>
-                              <label className="grid gap-1 text-sm">
-                                <span className="font-medium">商品</span>
-                                <input name="productName" defaultValue={order.product_name} required />
-                              </label>
-                              <label className="grid gap-1 text-sm">
-                                <span className="font-medium">外觀備註</span>
-                                <input name="appearanceNotes" defaultValue={order.appearance_notes || ""} />
-                              </label>
-                              <div className="grid grid-cols-3 gap-2">
-                                <label className="grid gap-1 text-sm">
-                                  <span className="font-medium">數量</span>
-                                  <input inputMode="numeric" name="quantity" defaultValue={order.quantity} required />
-                                </label>
-                                <label className="grid gap-1 text-sm">
-                                  <span className="font-medium">JPY</span>
-                                  <input inputMode="numeric" name="originalPriceJpy" defaultValue={order.original_price_jpy ?? ""} />
-                                </label>
-                                <label className="grid gap-1 text-sm">
-                                  <span className="font-medium">TWD</span>
-                                  <input inputMode="numeric" name="salePriceTwd" defaultValue={order.sale_price_twd} required />
-                                </label>
-                              </div>
-                            </div>
-                            <div className="flex flex-wrap items-center gap-3 text-sm">
-                              <label className="inline-flex items-center gap-2">
-                                <input name="customerConfirmed" type="checkbox" defaultChecked={order.customer_confirmed} />
-                                <span>{order.customer_exists ? "客戶名單已有此暱稱" : "確認未知暱稱仍可合併"}</span>
-                              </label>
-                              <label className="inline-flex items-center gap-2">
-                                <input name="isExcluded" type="checkbox" defaultChecked={order.is_excluded} />
-                                <span>排除不合併</span>
-                              </label>
-                              <input className="min-w-56 flex-1" name="exclusionReason" placeholder="排除原因" defaultValue={order.exclusion_reason || ""} />
-                              <Button size="sm" type="submit" variant="outline">儲存訂單</Button>
-                            </div>
-                          </form>
-                          {order.photos?.length ? (
-                            <form action={editReviewedStagingOrderPhotosAction} className="grid gap-2 rounded-md border bg-muted/30 p-3">
-                              <input name="reviewedOrderId" type="hidden" value={order.id} />
-                              <div className="flex items-center justify-between gap-3">
-                                <p className="text-sm font-medium">合併照片</p>
-                                <Button size="sm" type="submit" variant="outline">儲存照片</Button>
-                              </div>
-                              <div className="grid gap-2">
-                                {order.photos.map((photo: any) => (
-                                  <div className="grid gap-2 rounded-md border bg-background p-2 text-sm md:grid-cols-[auto_1fr_auto]" key={photo.id}>
-                                    <input name="photoId" type="hidden" value={photo.id} />
-                                    <label className="inline-flex items-center gap-2">
-                                      <input name="includePhoto" type="checkbox" value={photo.id} defaultChecked={photo.include_in_merge} />
-                                      <span>合併</span>
-                                    </label>
-                                    <label className="grid gap-1">
-                                      <span className="text-xs text-muted-foreground">
-                                        {photo.photo_role} · {photo.storage_key}
-                                      </span>
-                                      <input name={`photoLabel:${photo.id}`} placeholder="照片標籤" defaultValue={photo.label || ""} />
-                                    </label>
-                                    <span className="self-center text-xs text-muted-foreground">#{photo.sort_order}</span>
-                                  </div>
-                                ))}
-                              </div>
-                            </form>
-                          ) : null}
-                        </div>
-                      ))}
-                    </div>
-                  </article>
-                );
-              })}
-            </div>
-          ) : (
-            <EmptyPanel title="尚無審核批次" body="先從已結束行程建立審核批次。" />
-          )}
-        </section>
+                    </Link>
+                  ))}
+                </div>
+              ) : (
+                <EmptyPanel title="尚無審核批次" body="先從已結束行程建立審核批次。" />
+              )}
+            </section>
+          </>
+        )}
       </div>
     </AdminSection>
+  );
+}
+
+function StagingMergeJobDetail({ job, selectedOrderId }: { job: any; selectedOrderId?: string }) {
+  const reviewedOrders = job.reviewed_orders || [];
+  const selectedOrder = selectedOrderId
+    ? reviewedOrders.find((order: any) => order.id === selectedOrderId)
+    : null;
+  const unknownCount = Number(job.unknown_customer_count || 0);
+  return (
+    <section className="grid gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Button asChild size="sm" variant="ghost">
+          <Link href="/admin?view=merge">
+            <ArrowLeft className="mr-2 size-4" />
+            返回批次清單
+          </Link>
+        </Button>
+        <StatusBadge tone={mergeStatusTone(job.status)}>{mergeStatusLabel(job.status)}</StatusBadge>
+      </div>
+      <Surface className="grid gap-4">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-xs font-semibold uppercase text-muted-foreground">選取的審核批次</p>
+            <h3 className="mt-1 text-2xl font-semibold tracking-tight">{job.trip_name}</h3>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {job.helper_display_name || "未指派"} · {job.trip_status === "ended" ? "行程已結束" : "行程尚未結束"}
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {["pending_review", "failed", "rejected"].includes(job.status) ? (
+              <ActionButtonForm
+                action={approveStagingMergeJobAction}
+                fields={[{ name: "mergeJobId", value: job.id }, { name: "expectedVersion", value: job.version }]}
+                label="核准審核"
+                pendingLabel="核准中…"
+                variant={unknownCount ? "outline" : "default"}
+              />
+            ) : null}
+            {job.status === "approved" ? (
+              <ActionButtonForm
+                action={mergeApprovedStagingJobAction}
+                fields={[
+                  { name: "mergeJobId", value: job.id },
+                  { name: "expectedVersion", value: job.version },
+                  { name: "idempotencyKey", value: `merge-${job.id}-${job.version}` },
+                ]}
+                label="合併至正式訂單"
+                pendingLabel="合併中…"
+              />
+            ) : null}
+          </div>
+        </div>
+        <div className="grid gap-2 sm:grid-cols-3">
+          <MetricTile label="審核訂單" value={String(job.reviewed_order_count || 0)} />
+          <MetricTile label="會合併訂單" value={String(job.included_order_count || 0)} />
+          <MetricTile label="選取照片" value={String(job.selected_photo_count || 0)} />
+        </div>
+        {unknownCount ? (
+          <InsightBanner
+            body="請在訂單明細中明確確認未知暱稱，或排除該筆訂單；合併不會自動建立客戶資料。"
+            title={`${unknownCount} 筆 LINE 暱稱不在客戶名單`}
+            tone="amber"
+          />
+        ) : null}
+        {job.last_error ? <InsightBanner body={job.last_error} title="上次合併失敗，可重新檢查後再試" tone="red" /> : null}
+        {job.status !== "merged" ? (
+          <form action={rejectStagingMergeJobAction} className="grid gap-2 rounded-xl border bg-background p-3 sm:grid-cols-[1fr_auto]">
+            <input name="mergeJobId" type="hidden" value={job.id} />
+            <label className="grid gap-1 text-sm">
+              <span className="font-medium">退回原因</span>
+              <input name="rejectionNote" placeholder="例如：售價仍需確認" required />
+            </label>
+            <Button className="self-end" type="submit" variant="outline">退回審核</Button>
+          </form>
+        ) : (
+          <InsightBanner body="這個批次已寫入正式訂單；後續訂單編輯請到管理員訂單系統處理。" title="已完成正式合併" tone="green" />
+        )}
+      </Surface>
+
+      {selectedOrder ? (
+        <StagingReviewedOrderDetail job={job} order={selectedOrder} />
+      ) : selectedOrderId ? (
+        <EmptyPanel title="找不到這筆審核訂單" body="這筆訂單可能已被更新，請返回批次明細重新選取。" />
+      ) : (
+        <section className="grid gap-3">
+          <SectionTitle count={reviewedOrders.length} title="訂單審核清單" />
+          {reviewedOrders.length ? (
+            <div className="grid gap-2">
+              {reviewedOrders.map((order: any) => (
+                <Link
+                  className="flex items-center justify-between gap-4 rounded-2xl border bg-card px-4 py-4 shadow-sm transition hover:-translate-y-0.5 hover:border-primary/40 hover:bg-accent/30"
+                  href={`/admin?view=merge&mergeJobId=${encodeURIComponent(job.id)}&reviewedOrderId=${encodeURIComponent(order.id)}`}
+                  key={order.id}
+                >
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <StatusBadge tone={order.is_excluded ? "neutral" : "green"}>
+                        {order.is_excluded ? "已排除" : "會合併"}
+                      </StatusBadge>
+                      <p className="truncate font-semibold">{order.line_community_name} · {order.product_name}</p>
+                    </div>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {order.quantity} 件 · JPY {order.original_price_jpy ?? "-"} · TWD {order.sale_price_twd}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground">
+                    {!order.is_excluded && !order.customer_exists && !order.customer_confirmed ? <span className="text-amber-700">需確認</span> : null}
+                    <ChevronRight className="size-5" />
+                  </div>
+                </Link>
+              ))}
+            </div>
+          ) : (
+            <EmptyPanel title="沒有可審核訂單" body="這個批次目前沒有可供管理員檢查的 staging 訂單。" />
+          )}
+        </section>
+      )}
+    </section>
+  );
+}
+
+function StagingReviewedOrderDetail({ job, order }: { job: any; order: any }) {
+  return (
+    <section className="grid gap-4">
+      <Button asChild className="w-fit" size="sm" variant="ghost">
+        <Link href={`/admin?view=merge&mergeJobId=${encodeURIComponent(job.id)}`}>
+          <ArrowLeft className="mr-2 size-4" />
+          返回訂單清單
+        </Link>
+      </Button>
+      <Surface className="grid gap-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusBadge tone={order.is_excluded ? "neutral" : "green"}>
+            {order.is_excluded ? "這筆訂單已排除" : "這筆訂單會合併"}
+          </StatusBadge>
+          <h3 className="text-xl font-semibold">{order.line_community_name} · {order.product_name}</h3>
+        </div>
+        <InsightBanner
+          body="這裡編輯的是管理員審核副本，不會回寫小幫手原始採買回報。儲存任何修改後，批次需要重新核准。"
+          title="審核副本"
+          tone="blue"
+        />
+        <form action={editReviewedStagingOrderAction} className="grid gap-3">
+          <input name="reviewedOrderId" type="hidden" value={order.id} />
+          <div className="grid gap-3 md:grid-cols-2">
+            <label className="grid gap-1 text-sm">
+              <span className="font-medium">LINE 暱稱</span>
+              <input name="lineCommunityName" defaultValue={order.line_community_name} required />
+            </label>
+            <label className="grid gap-1 text-sm">
+              <span className="font-medium">商品</span>
+              <input name="productName" defaultValue={order.product_name} required />
+            </label>
+            <label className="grid gap-1 text-sm">
+              <span className="font-medium">外觀備註</span>
+              <input name="appearanceNotes" defaultValue={order.appearance_notes || ""} />
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium">數量</span>
+                <input inputMode="numeric" name="quantity" defaultValue={order.quantity} required />
+              </label>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium">JPY</span>
+                <input inputMode="numeric" name="originalPriceJpy" defaultValue={order.original_price_jpy ?? ""} />
+              </label>
+              <label className="grid gap-1 text-sm">
+                <span className="font-medium">TWD</span>
+                <input inputMode="numeric" name="salePriceTwd" defaultValue={order.sale_price_twd} required />
+              </label>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <label className="inline-flex items-center gap-2">
+              <input name="customerConfirmed" type="checkbox" defaultChecked={order.customer_confirmed} />
+              <span>{order.customer_exists ? "客戶名單已有此暱稱" : "確認未知暱稱仍可合併"}</span>
+            </label>
+            <label className="inline-flex items-center gap-2">
+              <input name="isExcluded" type="checkbox" defaultChecked={order.is_excluded} />
+              <span>排除不合併</span>
+            </label>
+            <input className="min-w-56 flex-1" name="exclusionReason" placeholder="排除原因（排除時必填）" defaultValue={order.exclusion_reason || ""} />
+            <Button size="sm" type="submit" variant="outline">儲存訂單</Button>
+          </div>
+        </form>
+      </Surface>
+
+      {order.photos?.length ? (
+        <Surface>
+          <form action={editReviewedStagingOrderPhotosAction} className="grid gap-3">
+            <input name="reviewedOrderId" type="hidden" value={order.id} />
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <h3 className="font-semibold">最終訂單照片</h3>
+                <p className="mt-1 text-sm text-muted-foreground">只會合併勾選的照片；來源 storage key 仍由後端保留。</p>
+              </div>
+              <Button size="sm" type="submit" variant="outline">儲存照片選擇</Button>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {order.photos.map((photo: any) => (
+                <div className="grid gap-2 rounded-xl border bg-background p-3" key={photo.id}>
+                  {photo.signed_url ? (
+                    <a href={photo.signed_url} rel="noreferrer" target="_blank">
+                      <img alt={photo.label || photo.photo_role || "訂單照片"} className="aspect-square w-full rounded-lg border object-cover" loading="lazy" src={photo.signed_url} />
+                    </a>
+                  ) : (
+                    <div className="grid aspect-square place-items-center rounded-lg border bg-muted text-xs text-muted-foreground">照片網址暫不可用</div>
+                  )}
+                  <input name="photoId" type="hidden" value={photo.id} />
+                  <label className="inline-flex items-center gap-2 text-sm font-medium">
+                    <input name="includePhoto" type="checkbox" value={photo.id} defaultChecked={photo.include_in_merge} />
+                    <span>合併這張照片</span>
+                  </label>
+                  <label className="grid gap-1 text-sm">
+                    <span className="text-xs text-muted-foreground">{photo.photo_role} · #{photo.sort_order}</span>
+                    <input name={`photoLabel:${photo.id}`} placeholder="照片標籤" defaultValue={photo.label || ""} />
+                  </label>
+                </div>
+              ))}
+            </div>
+          </form>
+        </Surface>
+      ) : (
+        <EmptyPanel title="沒有可選照片" body="這筆 staging 訂單目前沒有可供正式訂單使用的來源照片。" />
+      )}
+    </section>
   );
 }
 
@@ -1625,6 +2140,50 @@ function settlementStatusLabel(status: string) {
   return labels[status] || status;
 }
 
+function adminSettlementBadgeLabel(settlement: any) {
+  if (settlement.status === "pending_helper_precheck" && Number(settlement.jpy_to_twd_rate || 0) <= 0) {
+    return "等待匯率";
+  }
+  return settlementStatusLabel(settlement.status);
+}
+
+function adminSettlementTone(settlement: any): "amber" | "blue" | "green" | "neutral" | "red" {
+  if (settlement.status === "completed") return "green";
+  if (settlement.status === "correction_required") return "red";
+  if (adminSettlementNeedsAction(settlement)) return "amber";
+  if (settlement.status.includes("payment") || Number(settlement.jpy_to_twd_rate || 0) <= 0) return "amber";
+  return "blue";
+}
+
+function adminSettlementNeedsAction(settlement: any) {
+  if (settlement.status === "pending_helper_precheck") {
+    return Number(settlement.jpy_to_twd_rate || 0) <= 0;
+  }
+  return [
+    "pending_admin_review",
+    "payment_pending",
+    "warehouse_review_pending",
+    "final_payment_pending",
+  ].includes(settlement.status);
+}
+
+function adminSettlementNextStep(settlement: any) {
+  const steps: Record<string, string> = {
+    completed: "本筆結帳已完成，保留付款與送倉紀錄供日後查核。",
+    correction_required: "等待小幫手依退回原因補正資料。",
+    final_payment_pending: "核對送倉證明後支付剩餘尾款。",
+    payment_pending: "核對結帳總額並記錄本次轉帳通知。",
+    pending_admin_review: "核對收據與交通申請，核准後系統會計算應付金額。",
+    pending_helper_confirmation: "金額已核定，等待小幫手確認。",
+    pending_helper_precheck: Number(settlement.jpy_to_twd_rate || 0) > 0
+      ? "匯率已設定，等待小幫手送出收據與預檢資料。"
+      : "先設定當日 JPY→TWD 匯率，再等待小幫手預檢。",
+    warehouse_pending: "等待小幫手上傳送達集運倉的證明。",
+    warehouse_review_pending: "核對集運倉照片；通過後完成結帳或進入尾款。",
+  };
+  return steps[settlement.status] || "查看資料並處理目前階段。";
+}
+
 function settlementEvidenceLabel(type: string) {
   if (type === "daily_receipt") return "每日收據";
   if (type === "transport_proof") return "交通照片";
@@ -1665,6 +2224,11 @@ function normalizeAdminView(value?: string) {
 function normalizeLiveSection(value?: string): LiveSection {
   if (value === "quote" || value === "purchase" || value === "staging") return value;
   return "photos";
+}
+
+function normalizeRebuyScope(value?: string): RebuyScope | undefined {
+  if (value === "public" || value === "assigned") return value;
+  return undefined;
 }
 
 function adminDashboardSections(

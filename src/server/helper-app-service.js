@@ -38,6 +38,15 @@ const ADMIN_DASHBOARD_SECTIONS = [
  *   settlementIds?: string[] | null,
  *   settlementIncludeDetails?: boolean,
  *   settlementStatuses?: string[] | null,
+ *   rebuyTaskIds?: string[] | null,
+ *   rebuyIncludePhotos?: boolean,
+ *   rebuyVisibility?: string | null,
+ *   rebuyStatuses?: string[] | null,
+ *   rebuyAssignedHelperId?: string | null,
+ *   stagingMergeJobId?: string | null,
+ *   stagingMergeIncludeOrders?: boolean,
+ *   stagingMergeReviewedOrderId?: string | null,
+ *   stagingMergeIncludeOrderPhotos?: boolean,
  *   tripStatuses?: string[] | null,
  *   workflowTripIds?: string[] | null
  * }} [options]
@@ -49,6 +58,15 @@ async function listAdminDashboard(
     settlementIds = null,
     settlementIncludeDetails = true,
     settlementStatuses = null,
+    rebuyTaskIds = null,
+    rebuyIncludePhotos = true,
+    rebuyVisibility = null,
+    rebuyStatuses = null,
+    rebuyAssignedHelperId = null,
+    stagingMergeJobId = null,
+    stagingMergeIncludeOrders = false,
+    stagingMergeReviewedOrderId = null,
+    stagingMergeIncludeOrderPhotos = false,
     tripStatuses = null,
     workflowTripIds = null,
   } = {},
@@ -89,13 +107,27 @@ async function listAdminDashboard(
       ? listPurchaseTasks(database, { includePhotos: false, tripIds: workflowTripIds })
       : Promise.resolve([]),
     included.has("rebuyTasks")
-      ? listRebuyTasks(database, { includePrivateCustomerData: true })
+      ? listRebuyTasks(database, {
+          includePhotos: rebuyIncludePhotos,
+          includePrivateCustomerData: true,
+          visibility: rebuyVisibility,
+          statuses: rebuyStatuses,
+          assignedHelperId: rebuyAssignedHelperId,
+          rebuyTaskIds,
+        })
       : Promise.resolve([]),
     included.has("summary") ? loadAdminDashboardSummary(database) : Promise.resolve(null),
     included.has("stagingOrderPreviews")
       ? listStagingOrderPreviews(database, { tripIds: workflowTripIds })
       : Promise.resolve([]),
-    included.has("stagingMergeJobs") ? listStagingMergeJobs(database) : Promise.resolve([]),
+    included.has("stagingMergeJobs")
+      ? listStagingMergeJobs(database, {
+          includeReviewedOrders: stagingMergeIncludeOrders,
+          includeOrderPhotos: stagingMergeIncludeOrderPhotos,
+          mergeJobId: stagingMergeJobId,
+          reviewedOrderId: stagingMergeReviewedOrderId,
+        })
+      : Promise.resolve([]),
     included.has("settlements")
       ? listSettlements(database, {
           includeDetails: settlementIncludeDetails,
@@ -210,6 +242,8 @@ const HELPER_WORKSPACE_SECTIONS = [
  *   settlementIds?: string[] | null,
  *   settlementIncludeDetails?: boolean,
  *   settlementStatuses?: string[] | null,
+ *   rebuyIncludePhotos?: boolean,
+ *   rebuyTaskIds?: string[] | null,
  *   sitePhotoBatchId?: string | null,
  *   tripIds?: string[] | null,
  *   tripStatuses?: string[] | null
@@ -221,6 +255,8 @@ async function getHelperWorkspace(database, authUserId, now = new Date(), option
     settlementIds = null,
     settlementIncludeDetails = true,
     settlementStatuses = null,
+    rebuyIncludePhotos = true,
+    rebuyTaskIds = null,
     sitePhotoBatchId = null,
     tripIds = null,
     tripStatuses = null,
@@ -299,7 +335,11 @@ async function getHelperWorkspace(database, authUserId, now = new Date(), option
         })
       : Promise.resolve([]),
     included.has("rebuyTasks")
-      ? listRebuyTasks(database, { helperId: profile.id })
+      ? listRebuyTasks(database, {
+          helperId: profile.id,
+          includePhotos: rebuyIncludePhotos,
+          rebuyTaskIds,
+        })
       : Promise.resolve([]),
     included.has("settlements")
       ? listSettlements(database, {
@@ -706,7 +746,15 @@ async function getPurchaseTaskDetail(
 
 async function listRebuyTasks(
   database,
-  { helperId = null, includePrivateCustomerData = false } = {},
+  {
+    helperId = null,
+    includePhotos = true,
+    includePrivateCustomerData = false,
+    rebuyTaskIds = null,
+    visibility = null,
+    statuses = null,
+    assignedHelperId = null,
+  } = {},
 ) {
   const conditions = [];
   const params = [];
@@ -718,7 +766,50 @@ async function listRebuyTasks(
       or (rt.visibility = 'public' and rt.status = 'open')
     )`);
   }
+  if (rebuyTaskIds) {
+    if (rebuyTaskIds.length === 0) {
+      conditions.push("false");
+    } else {
+      params.push(rebuyTaskIds);
+      conditions.push(`rt.id = any($${params.length + 1}::uuid[])`);
+    }
+  }
+  if (visibility) {
+    params.push(visibility);
+    conditions.push(`rt.visibility = $${params.length + 1}`);
+  }
+  if (statuses) {
+    if (statuses.length === 0) {
+      conditions.push("false");
+    } else {
+      params.push(statuses);
+      conditions.push(`rt.status = any($${params.length + 1}::text[])`);
+    }
+  }
+  if (assignedHelperId) {
+    params.push(assignedHelperId);
+    conditions.push(`rt.assigned_helper_id = $${params.length + 1}`);
+  }
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
+  const photoSelect = includePhotos
+    ? `coalesce(
+              jsonb_agg(
+                jsonb_build_object(
+                  'id', rtp.id,
+                  'storage_key', rtp.storage_key,
+                  'photo_role', rtp.photo_role,
+                  'sort_order', rtp.sort_order,
+                  'created_at', rtp.created_at
+                )
+                order by rtp.photo_role asc, rtp.sort_order asc
+              ) filter (where rtp.id is not null),
+              '[]'::jsonb
+            )`
+    : `'[]'::jsonb`;
+  const photoJoin = includePhotos
+    ? "left join helper_app.rebuy_task_photos rtp on rtp.rebuy_task_id = rt.id"
+    : "";
+  const groupBy = includePhotos ? "group by rt.id, ah.id, ch.id" : "";
   const result = await database.query(
     `select rt.id, rt.visibility, rt.assigned_helper_id, rt.claimed_helper_id,
             rt.source_purchase_task_id, rt.source_trip_id,
@@ -741,31 +832,38 @@ async function listRebuyTasks(
             rt.reported_at, rt.checked_out_at,
             ah.display_name as assigned_helper_display_name,
             ch.display_name as claimed_helper_display_name,
-            coalesce(
-              jsonb_agg(
-                jsonb_build_object(
-                  'id', rtp.id,
-                  'storage_key', rtp.storage_key,
-                  'photo_role', rtp.photo_role,
-                  'sort_order', rtp.sort_order,
-                  'created_at', rtp.created_at
-                )
-                order by rtp.photo_role asc, rtp.sort_order asc
-              ) filter (where rtp.id is not null),
-              '[]'::jsonb
-            ) as photos
+            ${photoSelect} as photos
      from helper_app.rebuy_tasks rt
      left join helper_app.helper_profiles ah on ah.id = rt.assigned_helper_id
      left join helper_app.helper_profiles ch on ch.id = rt.claimed_helper_id
-     left join helper_app.rebuy_task_photos rtp on rtp.rebuy_task_id = rt.id
+     ${photoJoin}
      ${where}
-     group by rt.id, ah.id, ch.id
+     ${groupBy}
      order by
        coalesce(rt.public_available_at, rt.created_at) desc,
        rt.created_at desc`,
     [includePrivateCustomerData, ...params],
   );
   return result.rows;
+}
+
+async function listAuthorizedHelperRebuyTasks(
+  database,
+  /**
+   * @type {{
+   *   authUserId: string,
+   *   includePhotos?: boolean,
+   *   rebuyTaskIds?: string[] | null,
+   * }}
+   */
+  { authUserId, includePhotos = false, rebuyTaskIds = null } = {},
+) {
+  const helper = await findActiveHelperProfileForUser(database, authUserId);
+  return listRebuyTasks(database, {
+    helperId: helper.id,
+    includePhotos,
+    rebuyTaskIds,
+  });
 }
 
 async function listStagingOrderPreviews(database, { helperId = null, tripIds = null } = {}) {
@@ -793,10 +891,48 @@ async function listStagingOrderPreviews(database, { helperId = null, tripIds = n
   return result.rows;
 }
 
-async function listStagingMergeJobs(database) {
-  const result = await database.query(
-    `select mj.*, t.trip_name, t.business_date, t.timezone, t.status as trip_status,
-            hp.display_name as helper_display_name,
+async function listStagingMergeJobs(
+  database,
+  {
+    includeOrderPhotos = false,
+    includeReviewedOrders = false,
+    mergeJobId = null,
+    reviewedOrderId = null,
+  } = {},
+) {
+  if (mergeJobId === "") return [];
+  const params = [];
+  const mergeWhere = [];
+  if (mergeJobId) {
+    params.push(mergeJobId);
+    mergeWhere.push("mj.id = $1");
+  }
+  const reviewedOrderWhere = ["rso.merge_job_id = mj.id"];
+  if (reviewedOrderId) {
+    params.push(reviewedOrderId);
+    reviewedOrderWhere.push(`rso.id = $${params.length}`);
+  }
+  const where = mergeWhere.length ? `where ${mergeWhere.join(" and ")}` : "";
+  const photoExpression = includeOrderPhotos
+    ? "coalesce(photos.items, '[]'::jsonb)"
+    : "'[]'::jsonb";
+  const photoJoin = includeOrderPhotos
+    ? `
+              left join lateral (
+                select jsonb_agg(jsonb_build_object(
+                  'id', rsop.id,
+                  'storage_key', rsop.storage_key,
+                  'photo_role', rsop.photo_role,
+                  'label', rsop.label,
+                  'sort_order', rsop.sort_order,
+                  'include_in_merge', rsop.include_in_merge
+                ) order by rsop.sort_order asc) as items
+                from helper_app.reviewed_staging_order_photos rsop
+                where rsop.reviewed_order_id = rso.id
+              ) photos on true`
+    : "";
+  const reviewedOrderColumns = includeReviewedOrders
+    ? `
             coalesce((
               select jsonb_agg(jsonb_build_object(
                 'id', rso.id,
@@ -813,27 +949,30 @@ async function listStagingMergeJobs(database) {
                 'customer_exists', rso.customer_exists,
                 'customer_confirmed', rso.customer_confirmed,
                 'version', rso.version,
-                'photos', coalesce(photos.items, '[]'::jsonb)
+                'photos', ${photoExpression}
               ) order by rso.created_at asc)
               from helper_app.reviewed_staging_orders rso
-              left join lateral (
-                select jsonb_agg(jsonb_build_object(
-                  'id', rsop.id,
-                  'storage_key', rsop.storage_key,
-                  'photo_role', rsop.photo_role,
-                  'label', rsop.label,
-                  'sort_order', rsop.sort_order,
-                  'include_in_merge', rsop.include_in_merge
-                ) order by rsop.sort_order asc) as items
-                from helper_app.reviewed_staging_order_photos rsop
-                where rsop.reviewed_order_id = rso.id
-              ) photos on true
-              where rso.merge_job_id = mj.id
-            ), '[]'::jsonb) as reviewed_orders
+              ${photoJoin}
+              where ${reviewedOrderWhere.join(" and ")}
+            ), '[]'::jsonb)`
+    : `'[]'::jsonb`;
+  const result = await database.query(
+    `select mj.*, t.trip_name, t.business_date, t.timezone, t.status as trip_status,
+            hp.display_name as helper_display_name,
+            (select count(*)::int from helper_app.reviewed_staging_orders rso where rso.merge_job_id = mj.id) as reviewed_order_count,
+            (select count(*)::int from helper_app.reviewed_staging_orders rso where rso.merge_job_id = mj.id and rso.is_excluded = false) as included_order_count,
+            (select count(*)::int from helper_app.reviewed_staging_orders rso where rso.merge_job_id = mj.id and rso.is_excluded = false and rso.customer_exists = false and rso.customer_confirmed = false) as unknown_customer_count,
+            (select count(*)::int
+             from helper_app.reviewed_staging_order_photos rsop
+             join helper_app.reviewed_staging_orders rso on rso.id = rsop.reviewed_order_id
+             where rso.merge_job_id = mj.id and rsop.include_in_merge = true) as selected_photo_count,
+            ${reviewedOrderColumns} as reviewed_orders
      from helper_app.staging_merge_jobs mj
      join helper_app.trips t on t.id = mj.trip_id
      left join helper_app.helper_profiles hp on hp.id = t.assigned_helper_id
+     ${where}
      order by mj.updated_at desc`,
+    params,
   );
   return result.rows;
 }
@@ -1255,6 +1394,25 @@ async function attachSignedRebuyTaskUrls(tasks, r2Store) {
         (task.photos || []).map(async (photo) => ({
           ...photo,
           signed_url: await r2Store.signedGetUrl(photo.storage_key),
+        })),
+      ),
+    })),
+  );
+}
+
+async function attachSignedStagingMergeJobUrls(jobs, r2Store) {
+  return Promise.all(
+    jobs.map(async (job) => ({
+      ...job,
+      reviewed_orders: await Promise.all(
+        (job.reviewed_orders || []).map(async (order) => ({
+          ...order,
+          photos: await Promise.all(
+            (order.photos || []).map(async (photo) => ({
+              ...photo,
+              signed_url: await r2Store.signedGetUrl(photo.storage_key),
+            })),
+          ),
         })),
       ),
     })),
@@ -3237,6 +3395,19 @@ async function findActiveHelperForUser(client, authUserId) {
   return helper;
 }
 
+async function findActiveHelperProfileForUser(database, authUserId) {
+  const result = await database.query(
+    `select *
+     from helper_app.helper_profiles
+     where auth_user_id = $1`,
+    [authUserId],
+  );
+  const helper = result.rows[0];
+  if (!helper) throw new HelperAppServiceError("helper_not_found", "Helper profile was not found.");
+  if (!helper.is_active) throw new HelperAppServiceError("helper_inactive", "Helper profile is inactive.");
+  return helper;
+}
+
 async function lockTrip(client, tripId) {
   const result = await client.query(
     `select *
@@ -3391,16 +3562,26 @@ async function authorizeSettlementEvidenceUpload(
 }
 
 async function attachSignedSettlementUrls(settlements, r2Store) {
+  if (!settlements.some((settlement) => (settlement.evidence || []).some((item) => item.storage_key))) {
+    return settlements;
+  }
   return Promise.all(
-    settlements.map(async (settlement) => ({
-      ...settlement,
-      evidence: await Promise.all(
-        (settlement.evidence || []).map(async (item) => ({
-          ...item,
-          signed_url: await r2Store.signedGetUrl(item.storage_key),
-        })),
-      ),
-    })),
+    settlements.map(async (settlement) => {
+      const evidence = settlement.evidence || [];
+      if (!evidence.some((item) => item.storage_key)) return settlement;
+      return {
+        ...settlement,
+        evidence: await Promise.all(
+          evidence.map(async (item) => {
+            if (!item.storage_key) return item;
+            return {
+              ...item,
+              signed_url: await r2Store.signedGetUrl(item.storage_key),
+            };
+          }),
+        ),
+      };
+    }),
   );
 }
 
@@ -3426,20 +3607,14 @@ async function submitSettlementPrecheck(database, input) {
     if (!["pending_helper_precheck", "correction_required"].includes(settlement.status)) {
       throw new HelperAppServiceError("invalid_status", "This settlement cannot be submitted now.");
     }
-    await upsertSettlementEvidence(client, {
-      evidence: receipt,
-      evidenceType: "daily_receipt",
+    await upsertSettlementEvidenceBatch(client, {
+      evidenceItems: [
+        { evidence: receipt, evidenceType: "daily_receipt" },
+        ...(transportProof ? [{ evidence: transportProof, evidenceType: "transport_proof" }] : []),
+      ],
       helperId: helper.id,
       settlementId: settlement.id,
     });
-    if (transportProof) {
-      await upsertSettlementEvidence(client, {
-        evidence: transportProof,
-        evidenceType: "transport_proof",
-        helperId: helper.id,
-        settlementId: settlement.id,
-      });
-    }
     const updated = await client.query(
       `update helper_app.settlements
        set status = 'pending_admin_review',
@@ -3551,39 +3726,51 @@ async function reviewSettlement(database, input) {
 
 async function setSettlementExchangeRate(database, input) {
   const jpyToTwdRate = positiveNumber(input.jpyToTwdRate, "jpyToTwdRate");
-  return withTransaction(database, async (client) => {
-    const settlement = await lockSettlement(client, input.settlementId);
-    if (settlement.status === "completed") {
-      throw new HelperAppServiceError("invalid_status", "Completed settlement rate cannot be changed.");
-    }
-    const itemAdvanceTwd = Math.round(Number(settlement.product_total_jpy || 0) * jpyToTwdRate);
-    const result = await client.query(
-      `update helper_app.settlements
-       set jpy_to_twd_rate = $2,
-           item_advance_twd = $3,
-           updated_at = now()
+  const settlementId = requiredText(input.settlementId, "settlementId");
+  const itemAdvanceTwdExpression = `round(coalesce(target.product_total_jpy, 0) * $2::numeric)::int`;
+  const result = await database.query(
+    `with target as (
+       select id, trip_id, status, product_total_jpy, jpy_to_twd_rate, item_advance_twd
+       from helper_app.settlements
        where id = $1
-       returning *`,
-      [settlement.id, jpyToTwdRate, itemAdvanceTwd],
-    );
-    await insertAuditEvent(client, {
-      action: "admin_settlement_exchange_rate_set",
-      actor_role: "admin",
-      actor_user_id: input.actorUserId,
-      after_state: {
-        itemAdvanceTwd,
-        jpyToTwdRate,
-        settlementId: settlement.id,
-      },
-      before_state: {
-        itemAdvanceTwd: settlement.item_advance_twd,
-        jpyToTwdRate: settlement.jpy_to_twd_rate,
-        settlementId: settlement.id,
-      },
-      trip_id: settlement.trip_id,
-    });
-    return result.rows[0];
-  });
+     ),
+     updated as (
+       update helper_app.settlements s
+       set jpy_to_twd_rate = $2,
+           item_advance_twd = ${itemAdvanceTwdExpression},
+           updated_at = now()
+       from target
+       where s.id = target.id
+         and target.status <> 'completed'
+       returning s.*,
+         target.jpy_to_twd_rate as previous_jpy_to_twd_rate,
+         target.item_advance_twd as previous_item_advance_twd
+     ),
+     audit as (
+       insert into helper_app.trip_audit_events
+         (trip_id, actor_user_id, actor_role, action, before_state, after_state)
+       select trip_id, $3, 'admin', 'admin_settlement_exchange_rate_set',
+              jsonb_build_object(
+                'settlementId', id,
+                'jpyToTwdRate', previous_jpy_to_twd_rate,
+                'itemAdvanceTwd', previous_item_advance_twd
+              ),
+              jsonb_build_object(
+                'settlementId', id,
+                'jpyToTwdRate', jpy_to_twd_rate,
+                'itemAdvanceTwd', item_advance_twd
+              )
+       from updated
+       returning id
+     )
+     select *
+     from updated`,
+    [settlementId, jpyToTwdRate, input.actorUserId || null],
+  );
+  if (!result.rows[0]) {
+    throw new HelperAppServiceError("invalid_status", "Settlement rate cannot be changed.");
+  }
+  return result.rows[0];
 }
 
 async function confirmSettlement(database, input) {
@@ -3658,11 +3845,9 @@ async function submitWarehouseProof(database, input) {
     if (settlement.status !== "warehouse_pending") {
       throw new HelperAppServiceError("invalid_status", "Warehouse proof cannot be submitted now.");
     }
-    await upsertSettlementEvidence(client, {
-      evidence: proof,
-      evidenceType: "warehouse_proof",
+    await upsertSettlementEvidenceBatch(client, {
+      evidenceItems: [{ evidence: proof, evidenceType: "warehouse_proof", note: optionalText(input.note) }],
       helperId: helper.id,
-      note: optionalText(input.note),
       settlementId: settlement.id,
     });
     const result = await client.query(
@@ -3812,41 +3997,65 @@ function assertHelperOwnsSettlement(settlement, helper) {
   }
 }
 
-async function upsertSettlementEvidence(
+async function upsertSettlementEvidenceBatch(
   client,
-  { evidence, evidenceType, helperId, note = null, settlementId },
+  { evidenceItems, helperId, settlementId },
 ) {
-  const mediaKind = evidenceType === "daily_receipt"
-    ? "settlement_receipt"
-    : evidenceType === "transport_proof"
-      ? "transport_proof"
-      : "warehouse_evidence";
-  const retentionStatus = evidenceType === "warehouse_proof" ? "warehouse_evidence" : "order_evidence";
+  const items = evidenceItems.filter((item) => item?.evidence?.storageKey);
+  if (!items.length) return;
+  const mediaKinds = items.map(({ evidenceType }) => settlementEvidenceMediaKind(evidenceType));
+  const retentionStatuses = items.map(({ evidenceType }) =>
+    evidenceType === "warehouse_proof" ? "warehouse_evidence" : "order_evidence"
+  );
   await client.query(
     `insert into helper_app.media_objects
        (storage_key, media_kind, retention_status, original_filename,
         content_type, byte_size, uploaded_by_helper_id)
-     values ($1, $2, $3, $4, $5, $6, $7)
+     select *
+     from unnest(
+       $1::text[],
+       $2::text[],
+       $3::text[],
+       $4::text[],
+       $5::text[],
+       $6::bigint[],
+       $7::uuid[]
+     )
      on conflict (storage_key) do update
      set media_kind = excluded.media_kind, retention_status = excluded.retention_status`,
     [
-      evidence.storageKey,
-      mediaKind,
-      retentionStatus,
-      evidence.originalFilename,
-      evidence.contentType,
-      evidence.byteSize,
-      helperId,
+      items.map(({ evidence }) => evidence.storageKey),
+      mediaKinds,
+      retentionStatuses,
+      items.map(({ evidence }) => evidence.originalFilename),
+      items.map(({ evidence }) => evidence.contentType),
+      items.map(({ evidence }) => evidence.byteSize),
+      items.map(() => helperId),
     ],
   );
   await client.query(
     `insert into helper_app.settlement_evidence
        (settlement_id, storage_key, evidence_type, note)
-     values ($1, $2, $3, $4)
+     select *
+     from unnest($1::uuid[], $2::text[], $3::text[], $4::text[])
      on conflict (settlement_id, evidence_type) do update
      set storage_key = excluded.storage_key, note = excluded.note, updated_at = now()`,
-    [settlementId, evidence.storageKey, evidenceType, note],
+    [
+      items.map(() => settlementId),
+      items.map(({ evidence }) => evidence.storageKey),
+      items.map(({ evidenceType }) => evidenceType),
+      items.map(({ note }) => note || null),
+    ],
   );
+}
+
+function settlementEvidenceMediaKind(evidenceType) {
+  const mediaKind = evidenceType === "daily_receipt"
+    ? "settlement_receipt"
+    : evidenceType === "transport_proof"
+      ? "transport_proof"
+      : "warehouse_evidence";
+  return mediaKind;
 }
 
 async function auditSettlementState(
@@ -4765,6 +4974,7 @@ module.exports = {
   attachSignedPurchaseTaskUrls,
   attachSignedPhotoUrls,
   attachSignedRebuyTaskUrls,
+  attachSignedStagingMergeJobUrls,
   authorizeAdminTaskPhotoUpload,
   authorizePurchaseFaceCheckUpload,
   authorizeQuoteReplyUpload,
@@ -4790,6 +5000,7 @@ module.exports = {
   groupTripsByLocalDate,
   isHelperAppServiceError,
   listPurchaseTasks,
+  listAuthorizedHelperRebuyTasks,
   listAuthorizedHelperQuoteTaskSummaries,
   listAdminQuoteTaskSummaries,
   listQuoteTasks,
