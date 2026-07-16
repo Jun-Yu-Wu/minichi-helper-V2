@@ -27,8 +27,10 @@ import {
   prepareStagingReviewAction,
   rejectStagingMergeJobAction,
   reviewFaceCheckPurchaseAction,
+  setReviewedStagingOrderSelectionAction,
 } from "../actions/admin";
 import { ActionButtonForm } from "../components/ActionButtonForm";
+import { ServerActionForm } from "../components/ServerActionForm";
 import { SettlementAmountHero } from "../components/SettlementUi";
 import {
   EmptyState,
@@ -58,6 +60,8 @@ import { AdminLiveQuoteWorkspace } from "./AdminLiveQuoteWorkspace";
 import { AdminPurchasePhotos } from "./AdminPurchasePhotos";
 import { SettlementActionForm } from "./SettlementActionForm";
 import { SettlementExchangeRateForm } from "./SettlementExchangeRateForm";
+import { StagingOrderSelectionForm } from "./StagingOrderSelectionForm";
+import { StagingReviewedOrderEditor, StagingReviewedOrderPhotosEditor } from "./StagingReviewedOrderEditors";
 
 type AdminSearchParams = {
   checkoutSettlementId?: string;
@@ -76,6 +80,7 @@ type AdminSearchParams = {
   taskTripId?: string;
   tripGroup?: string;
   tripGroups?: string;
+  notice?: string;
   view?: string;
 };
 
@@ -222,6 +227,7 @@ export default async function AdminPage({
       jobs={stagingMergeJobs}
       selectedJobId={params.mergeJobId}
       selectedOrderId={params.reviewedOrderId}
+      notice={params.notice}
       stagingOrderPreviews={dashboard.stagingOrderPreviews}
       trips={dashboard.trips}
     />
@@ -1301,12 +1307,14 @@ function AdminLiveReturn({
 
 function AdminStagingReview({
   jobs,
+  notice,
   selectedJobId,
   selectedOrderId,
   stagingOrderPreviews,
   trips,
 }: {
   jobs: any[];
+  notice?: string;
   selectedJobId?: string;
   selectedOrderId?: string;
   stagingOrderPreviews: any[];
@@ -1323,6 +1331,7 @@ function AdminStagingReview({
   return (
     <AdminSection icon={<Merge className="size-5" />} title="審核合併">
       <div className="grid gap-5">
+        {notice ? <InsightBanner body={mergeNoticeBody(notice)} title="操作完成" tone="green" /> : null}
         <PageHeader
           eyebrow="Staging review"
           metrics={[
@@ -1421,6 +1430,11 @@ function StagingMergeJobDetail({ job, selectedOrderId }: { job: any; selectedOrd
     ? reviewedOrders.find((order: any) => order.id === selectedOrderId)
     : null;
   const unknownCount = Number(job.unknown_customer_count || 0);
+  const unknownOrders = job.unknown_customers?.length
+    ? job.unknown_customers
+    : reviewedOrders.filter(
+      (order: any) => !order.is_excluded && !order.customer_exists && !order.customer_confirmed,
+    );
   return (
     <section className="grid gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1448,6 +1462,7 @@ function StagingMergeJobDetail({ job, selectedOrderId }: { job: any; selectedOrd
                 fields={[{ name: "mergeJobId", value: job.id }, { name: "expectedVersion", value: job.version }]}
                 label="核准審核"
                 pendingLabel="核准中…"
+                successHref={`/admin?view=merge&mergeJobId=${encodeURIComponent(job.id)}&notice=approved`}
                 variant={unknownCount ? "outline" : "default"}
               />
             ) : null}
@@ -1461,6 +1476,7 @@ function StagingMergeJobDetail({ job, selectedOrderId }: { job: any; selectedOrd
                 ]}
                 label="合併至正式訂單"
                 pendingLabel="合併中…"
+                successHref={`/admin?view=merge&mergeJobId=${encodeURIComponent(job.id)}&notice=merged`}
               />
             ) : null}
           </div>
@@ -1472,21 +1488,27 @@ function StagingMergeJobDetail({ job, selectedOrderId }: { job: any; selectedOrd
         </div>
         {unknownCount ? (
           <InsightBanner
-            body="請在訂單明細中明確確認未知暱稱，或排除該筆訂單；合併不會自動建立客戶資料。"
-            title={`${unknownCount} 筆 LINE 暱稱不在客戶名單`}
+            body={unknownOrders.length
+              ? `請點擊下方標示的訂單，逐筆勾選「我確認此未知暱稱仍允許合併」並儲存；也可以排除該筆訂單。合併不會自動建立客戶資料。未確認項目：${unknownOrders.slice(0, 5).map((order: any) => `「${order.line_community_name}」／${order.product_name}`).join("、")}${unknownOrders.length > 5 ? ` 等 ${unknownOrders.length} 筆` : ""}。`
+              : "請點擊下方標示的訂單，逐筆確認未知暱稱或排除該筆訂單。合併不會自動建立客戶資料。"
+            }
+            title={`${unknownCount} 筆訂單需要客戶暱稱特別確認`}
             tone="amber"
           />
         ) : null}
         {job.last_error ? <InsightBanner body={job.last_error} title="上次合併失敗，可重新檢查後再試" tone="red" /> : null}
         {job.status !== "merged" ? (
-          <form action={rejectStagingMergeJobAction} className="grid gap-2 rounded-xl border bg-background p-3 sm:grid-cols-[1fr_auto]">
+          <ServerActionForm
+            action={rejectStagingMergeJobAction}
+            buttonLabel="退回審核"
+            className="grid gap-2 rounded-xl border bg-background p-3 sm:grid-cols-[1fr_auto]"
+          >
             <input name="mergeJobId" type="hidden" value={job.id} />
             <label className="grid gap-1 text-sm">
               <span className="font-medium">退回原因</span>
               <input name="rejectionNote" placeholder="例如：售價仍需確認" required />
             </label>
-            <Button className="self-end" type="submit" variant="outline">退回審核</Button>
-          </form>
+          </ServerActionForm>
         ) : (
           <InsightBanner body="這個批次已寫入正式訂單；後續訂單編輯請到管理員訂單系統處理。" title="已完成正式合併" tone="green" />
         )}
@@ -1497,44 +1519,24 @@ function StagingMergeJobDetail({ job, selectedOrderId }: { job: any; selectedOrd
       ) : selectedOrderId ? (
         <EmptyPanel title="找不到這筆審核訂單" body="這筆訂單可能已被更新，請返回批次明細重新選取。" />
       ) : (
-        <section className="grid gap-3">
-          <SectionTitle count={reviewedOrders.length} title="訂單審核清單" />
-          {reviewedOrders.length ? (
-            <div className="grid gap-2">
-              {reviewedOrders.map((order: any) => (
-                <Link
-                  className="flex items-center justify-between gap-4 rounded-2xl border bg-card px-4 py-4 shadow-sm transition hover:-translate-y-0.5 hover:border-primary/40 hover:bg-accent/30"
-                  href={`/admin?view=merge&mergeJobId=${encodeURIComponent(job.id)}&reviewedOrderId=${encodeURIComponent(order.id)}`}
-                  key={order.id}
-                >
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <StatusBadge tone={order.is_excluded ? "neutral" : "green"}>
-                        {order.is_excluded ? "已排除" : "會合併"}
-                      </StatusBadge>
-                      <p className="truncate font-semibold">{order.line_community_name} · {order.product_name}</p>
-                    </div>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                      {order.quantity} 件 · JPY {order.original_price_jpy ?? "-"} · TWD {order.sale_price_twd}
-                    </p>
-                  </div>
-                  <div className="flex shrink-0 items-center gap-2 text-sm text-muted-foreground">
-                    {!order.is_excluded && !order.customer_exists && !order.customer_confirmed ? <span className="text-amber-700">需確認</span> : null}
-                    <ChevronRight className="size-5" />
-                  </div>
-                </Link>
-              ))}
-            </div>
-          ) : (
-            <EmptyPanel title="沒有可審核訂單" body="這個批次目前沒有可供管理員檢查的 staging 訂單。" />
-          )}
-        </section>
+        reviewedOrders.length ? (
+          <StagingOrderSelectionForm
+            action={setReviewedStagingOrderSelectionAction}
+            disabled={job.status === "merging" || job.status === "merged"}
+            expectedVersion={Number(job.version)}
+            jobId={job.id}
+            orders={reviewedOrders}
+          />
+        ) : (
+          <EmptyPanel title="沒有可審核訂單" body="這個批次目前沒有可供管理員檢查的 staging 訂單。" />
+        )
       )}
     </section>
   );
 }
 
 function StagingReviewedOrderDetail({ job, order }: { job: any; order: any }) {
+  const batchHref = `/admin?view=merge&mergeJobId=${encodeURIComponent(job.id)}`;
   return (
     <section className="grid gap-4">
       <Button asChild className="w-fit" size="sm" variant="ghost">
@@ -1555,86 +1557,11 @@ function StagingReviewedOrderDetail({ job, order }: { job: any; order: any }) {
           title="審核副本"
           tone="blue"
         />
-        <form action={editReviewedStagingOrderAction} className="grid gap-3">
-          <input name="reviewedOrderId" type="hidden" value={order.id} />
-          <div className="grid gap-3 md:grid-cols-2">
-            <label className="grid gap-1 text-sm">
-              <span className="font-medium">LINE 暱稱</span>
-              <input name="lineCommunityName" defaultValue={order.line_community_name} required />
-            </label>
-            <label className="grid gap-1 text-sm">
-              <span className="font-medium">商品</span>
-              <input name="productName" defaultValue={order.product_name} required />
-            </label>
-            <label className="grid gap-1 text-sm">
-              <span className="font-medium">外觀備註</span>
-              <input name="appearanceNotes" defaultValue={order.appearance_notes || ""} />
-            </label>
-            <div className="grid grid-cols-3 gap-2">
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium">數量</span>
-                <input inputMode="numeric" name="quantity" defaultValue={order.quantity} required />
-              </label>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium">JPY</span>
-                <input inputMode="numeric" name="originalPriceJpy" defaultValue={order.original_price_jpy ?? ""} />
-              </label>
-              <label className="grid gap-1 text-sm">
-                <span className="font-medium">TWD</span>
-                <input inputMode="numeric" name="salePriceTwd" defaultValue={order.sale_price_twd} required />
-              </label>
-            </div>
-          </div>
-          <div className="flex flex-wrap items-center gap-3 text-sm">
-            <label className="inline-flex items-center gap-2">
-              <input name="customerConfirmed" type="checkbox" defaultChecked={order.customer_confirmed} />
-              <span>{order.customer_exists ? "客戶名單已有此暱稱" : "確認未知暱稱仍可合併"}</span>
-            </label>
-            <label className="inline-flex items-center gap-2">
-              <input name="isExcluded" type="checkbox" defaultChecked={order.is_excluded} />
-              <span>排除不合併</span>
-            </label>
-            <input className="min-w-56 flex-1" name="exclusionReason" placeholder="排除原因（排除時必填）" defaultValue={order.exclusion_reason || ""} />
-            <Button size="sm" type="submit" variant="outline">儲存訂單</Button>
-          </div>
-        </form>
+        <StagingReviewedOrderEditor action={editReviewedStagingOrderAction} order={order} successHref={`${batchHref}&notice=order-saved`} />
       </Surface>
 
       {order.photos?.length ? (
-        <Surface>
-          <form action={editReviewedStagingOrderPhotosAction} className="grid gap-3">
-            <input name="reviewedOrderId" type="hidden" value={order.id} />
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <div>
-                <h3 className="font-semibold">最終訂單照片</h3>
-                <p className="mt-1 text-sm text-muted-foreground">只會合併勾選的照片；來源 storage key 仍由後端保留。</p>
-              </div>
-              <Button size="sm" type="submit" variant="outline">儲存照片選擇</Button>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {order.photos.map((photo: any) => (
-                <div className="grid gap-2 rounded-xl border bg-background p-3" key={photo.id}>
-                  {photo.signed_url ? (
-                    <a href={photo.signed_url} rel="noreferrer" target="_blank">
-                      <img alt={photo.label || photo.photo_role || "訂單照片"} className="aspect-square w-full rounded-lg border object-cover" loading="lazy" src={photo.signed_url} />
-                    </a>
-                  ) : (
-                    <div className="grid aspect-square place-items-center rounded-lg border bg-muted text-xs text-muted-foreground">照片網址暫不可用</div>
-                  )}
-                  <input name="photoId" type="hidden" value={photo.id} />
-                  <label className="inline-flex items-center gap-2 text-sm font-medium">
-                    <input name="includePhoto" type="checkbox" value={photo.id} defaultChecked={photo.include_in_merge} />
-                    <span>合併這張照片</span>
-                  </label>
-                  <label className="grid gap-1 text-sm">
-                    <span className="text-xs text-muted-foreground">{photo.photo_role} · #{photo.sort_order}</span>
-                    <input name={`photoLabel:${photo.id}`} placeholder="照片標籤" defaultValue={photo.label || ""} />
-                  </label>
-                </div>
-              ))}
-            </div>
-          </form>
-        </Surface>
+        <StagingReviewedOrderPhotosEditor action={editReviewedStagingOrderPhotosAction} order={order} successHref={`${batchHref}&notice=photos-saved`} />
       ) : (
         <EmptyPanel title="沒有可選照片" body="這筆 staging 訂單目前沒有可供正式訂單使用的來源照片。" />
       )}
@@ -2219,6 +2146,21 @@ function normalizeAdminView(value?: string) {
     return value || "home";
   }
   return "home";
+}
+
+function mergeNoticeBody(value: string) {
+  switch (value) {
+    case "order-saved":
+      return "訂單資料已儲存完成，已返回審核批次。若有修改內容，請重新核准。";
+    case "photos-saved":
+      return "照片選取已儲存完成，已返回審核批次。若有修改內容，請重新核准。";
+    case "approved":
+      return "這個審核批次已核准完成，現在可以執行合併至正式訂單。";
+    case "merged":
+      return "這個批次已完成合併，訂單與照片已寫入正式資料。";
+    default:
+      return "操作已完成。";
+  }
 }
 
 function normalizeLiveSection(value?: string): LiveSection {

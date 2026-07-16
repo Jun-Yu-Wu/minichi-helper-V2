@@ -19,10 +19,29 @@ function databaseConfig() {
   if (!connectionString) {
     throw new Error("SUPABASE_DB_URL or DATABASE_URL is required.");
   }
-  return {
-    connectionString,
-    ssl: process.env.SUPABASE_DB_SSL === "0" ? false : { rejectUnauthorized: false },
-  };
+  const sslMode = optionalEnv("SUPABASE_DB_SSL", "require").toLowerCase();
+  if (["0", "false", "disable"].includes(sslMode)) {
+    if (process.env.NODE_ENV === "production") {
+      throw new Error("Database TLS cannot be disabled in production.");
+    }
+    return { connectionString, ssl: false };
+  }
+  if (sslMode === "verify-full") {
+    return {
+      connectionString,
+      ssl: {
+        ca: requiredEnv("SUPABASE_DB_SSL_CA"),
+        rejectUnauthorized: true,
+      },
+    };
+  }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "Production database connections require SUPABASE_DB_SSL=verify-full and SUPABASE_DB_SSL_CA.",
+    );
+  }
+  // Local compatibility mode. Production must use verify-full above.
+  return { connectionString, ssl: { rejectUnauthorized: false } };
 }
 
 function authServerConfig() {
@@ -57,6 +76,18 @@ function r2Config() {
   };
 }
 
+function uploadConfig() {
+  return {
+    allowedContentTypes: new Set([
+      "image/gif",
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+    ]),
+    maxBytes: optionalNumberEnv("MINICHI_UPLOAD_MAX_BYTES", 8 * 1024 * 1024, { min: 1 }),
+  };
+}
+
 function adminEmails() {
   return new Set(
     String(process.env.MINICHI_ADMIN_EMAILS || "")
@@ -71,4 +102,5 @@ module.exports = {
   authServerConfig,
   databaseConfig,
   r2Config,
+  uploadConfig,
 };

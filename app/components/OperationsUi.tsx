@@ -74,6 +74,7 @@ export function StatusBadge({
 }) {
   return (
     <span
+      aria-label={typeof children === "string" ? children : undefined}
       className={cn(
         "inline-flex min-h-7 items-center rounded-full border px-2.5 py-1 text-xs font-semibold",
         toneClasses[tone],
@@ -92,7 +93,7 @@ export function EmptyState({
   title: string;
 }) {
   return (
-    <div className="rounded-xl border border-dashed bg-card p-5 text-sm shadow-sm">
+    <div aria-live="polite" className="rounded-xl border border-dashed bg-card p-5 text-sm shadow-sm" role="status">
       <p className="font-semibold text-foreground">{title}</p>
       <p className="mt-1 leading-6 text-muted-foreground">{body}</p>
     </div>

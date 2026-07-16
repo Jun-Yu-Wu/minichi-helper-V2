@@ -28,16 +28,14 @@ export async function createServerSupabaseClient() {
       async getUser() {
         const accessToken = cookieStore.get(ACCESS_COOKIE)?.value;
         if (!accessToken) return { data: { user: null }, error: null };
-        const current = await client.auth.getClaims(accessToken);
-        if (!current.error && current.data?.claims?.sub) {
+        // getUser() performs a server-side Auth check. Do not use getClaims()
+        // here as the only guard: locally valid JWTs can outlive a logout or
+        // account deactivation until their expiry time.
+        const current = await client.auth.getUser(accessToken);
+        if (!current.error && current.data?.user?.id) {
           return {
             data: {
-              user: {
-                id: String(current.data.claims.sub),
-                email: current.data.claims.email
-                  ? String(current.data.claims.email)
-                  : undefined,
-              },
+              user: current.data.user,
             },
             error: null,
           };

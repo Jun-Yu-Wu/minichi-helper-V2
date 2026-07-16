@@ -4,6 +4,7 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import { ArrowLeft, Camera, Check, ChevronLeft, ChevronRight, PackageCheck, RefreshCw, ShoppingBag, X } from "lucide-react";
 
 import { EmptyState, InsightBanner, StatusBadge, Surface } from "../components/OperationsUi";
+import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
 
@@ -152,6 +153,7 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
         allPhotosLoading={allPhotosLoading}
         onBack={closeTask}
         onLoadAllPhotos={loadAllTaskPhotos}
+        onRefresh={() => openTask(activeTaskId)}
         onTaskUpdated={updateActiveTask}
       />
     );
@@ -170,7 +172,7 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
             <div className="h-20 animate-pulse rounded-xl bg-muted" />
           </div>
         ) : listError ? (
-          <p className="text-sm text-destructive">{listError}</p>
+          <RetryableError message={listError} onRetry={() => loadTasks(undefined, true)} />
         ) : (
           <div className="rounded-xl border border-dashed bg-card p-5 text-sm shadow-sm">
             <p className="font-semibold text-foreground">目前沒有採買任務</p>
@@ -208,7 +210,7 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
         返回連線
       </Button>
       {listError ? (
-        <p className="text-sm text-destructive">{listError}</p>
+        <RetryableError message={listError} onRetry={() => loadTasks(undefined, true)} />
       ) : null}
       <div className="grid gap-4">
         {taskGroups.map((group) => (
@@ -299,6 +301,7 @@ function PurchaseTaskDetail({
   loading,
   onBack,
   onLoadAllPhotos,
+  onRefresh,
   task,
   onTaskUpdated,
 }: {
@@ -308,6 +311,7 @@ function PurchaseTaskDetail({
   loading: boolean;
   onBack: () => void;
   onLoadAllPhotos: () => void;
+  onRefresh: () => void;
   onTaskUpdated: (task: any) => void;
   task: any | null;
 }) {
@@ -335,7 +339,7 @@ function PurchaseTaskDetail({
           <div className="h-28 animate-pulse rounded-lg bg-muted" />
         </div>
       ) : error ? (
-        <p className="text-sm text-destructive">{error}</p>
+        <RetryableError message={error} onRetry={onRefresh} />
       ) : task ? (
         <>
           {isCanceled ? (
@@ -640,6 +644,7 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
         body: JSON.stringify({
           clientPhotoId: photo.clientPhotoId,
           contentType: photo.contentType,
+          byteSize: photo.byteSize,
           fileName: photo.originalFilename,
           purchaseTaskId: task.id,
           uploadPurpose: "purchase_face_check",

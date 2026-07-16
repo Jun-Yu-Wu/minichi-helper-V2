@@ -7,10 +7,15 @@ const { loadLocalEnv } = require("../src/server/load-local-env");
 
 loadLocalEnv(path.join(__dirname, ".."));
 
+const acceptancePassword = String(process.env.CODEX_ACCEPTANCE_PASSWORD || "").trim();
+if (!acceptancePassword) {
+  throw new Error("CODEX_ACCEPTANCE_PASSWORD must be set outside the repository before running this script.");
+}
+
 const ACCOUNT = {
   displayName: "Codex 驗收小幫手",
   email: process.env.CODEX_ACCEPTANCE_EMAIL || "codex.acceptance@minichi.test",
-  password: process.env.CODEX_ACCEPTANCE_PASSWORD || "MinichiCodex1224!",
+  password: acceptancePassword,
   region: "Tokyo",
 };
 
@@ -109,7 +114,6 @@ async function main() {
         helperProfile,
         login: {
           email: ACCOUNT.email,
-          password: ACCOUNT.password,
         },
       },
       null,

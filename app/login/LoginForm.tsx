@@ -16,7 +16,7 @@ export function LoginForm() {
   useEffect(() => {
     if (!state.ok) return;
     const next = searchParams.get("next");
-    router.push(next && next.startsWith("/") ? next : "/helper");
+    router.push(next && next.startsWith("/") && !next.startsWith("//") ? next : "/helper");
   }, [router, searchParams, state.ok]);
 
   return (

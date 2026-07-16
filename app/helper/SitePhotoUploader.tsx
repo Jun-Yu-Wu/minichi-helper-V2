@@ -280,6 +280,7 @@ export function SitePhotoUploader({
       body: JSON.stringify({
         clientPhotoId: photo.clientPhotoId,
         contentType: photo.contentType,
+        byteSize: photo.byteSize,
         fileName: photo.originalFilename,
         tripId,
       }),

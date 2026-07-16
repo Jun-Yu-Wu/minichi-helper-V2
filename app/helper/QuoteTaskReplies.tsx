@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowLeft, Camera, CheckCircle2, ChevronLeft, ChevronRight, Pencil, RefreshCw, X } from "lucide-react";
 
 import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
+import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
 
 type UploadStatus = "selected" | "uploading" | "uploaded" | "failed";
@@ -196,13 +197,7 @@ function QuoteTaskList({
           <div className="h-24 animate-pulse rounded-lg bg-muted" />
         </div>
       ) : error ? (
-        <div className="grid gap-2">
-          <p className="text-sm text-destructive">{error}</p>
-          <Button className="w-fit" size="sm" type="button" variant="outline" onClick={onRefresh}>
-            <RefreshCw className="size-4" />
-            重新載入
-          </Button>
-        </div>
+        <RetryableError message={error} onRetry={onRefresh} />
       ) : !tasks.length ? (
         <EmptyState title="目前沒有細圖／報價任務" body="管理員發布任務後會顯示在這裡。" />
       ) : (
@@ -336,13 +331,7 @@ function QuoteTaskDetail({
           <div className="h-24 animate-pulse rounded-lg bg-muted" />
         </div>
       ) : error ? (
-        <div className="grid gap-2">
-          <p className="text-sm text-destructive">{error}</p>
-          <Button className="w-fit" size="sm" type="button" variant="outline" onClick={onRefresh}>
-            <RefreshCw className="size-4" />
-            重新載入
-          </Button>
-        </div>
+        <RetryableError message={error} onRetry={onRefresh} />
       ) : currentPhoto ? (
         <>
           <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2">
@@ -536,6 +525,7 @@ function QuotePhotoReplyForm({
         body: JSON.stringify({
           clientPhotoId: detailPhoto.clientPhotoId,
           contentType: detailPhoto.contentType,
+          byteSize: detailPhoto.byteSize,
           fileName: detailPhoto.originalFilename,
           quoteTaskPhotoId: photo.id,
           uploadPurpose: "quote_detail_reply",

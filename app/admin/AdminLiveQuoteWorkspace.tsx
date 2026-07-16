@@ -6,6 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "../components/ui/button";
 import { StatusBadge } from "../components/OperationsUi";
+import { RetryableError } from "../components/RetryableState";
 import { cn } from "../../src/lib/utils";
 import { QuickPublishPurchaseForm } from "./AdminForms";
 
@@ -55,7 +56,10 @@ export function AdminLiveQuoteWorkspace({
   const [loadingTasks, setLoadingTasks] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [message, setMessage] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [tripsRefreshNonce, setTripsRefreshNonce] = useState(0);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const [detailRefreshNonce, setDetailRefreshNonce] = useState(0);
 
   const selectedTrip = trips.find((trip) => trip.id === selectedTripId);
   const pendingTasks = tasks.filter((task) => !isQuoteTaskComplete(task));
@@ -77,11 +81,12 @@ export function AdminLiveQuoteWorkspace({
         if (!response.ok) throw new Error(data.error || "載入失敗");
         if (!canceled) {
           setTrips(data.trips || []);
+          setLoadError("");
           setLoadingTrips(false);
         }
       } catch (error) {
         if (!canceled) {
-          setMessage(error instanceof Error ? error.message : "載入失敗");
+          setLoadError(error instanceof Error ? error.message : "即時行程載入失敗。");
           setLoadingTrips(false);
         }
       }
@@ -93,7 +98,7 @@ export function AdminLiveQuoteWorkspace({
       canceled = true;
       if (timer) clearInterval(timer);
     };
-  }, []);
+  }, [tripsRefreshNonce]);
 
   useEffect(() => {
     if (!selectedTripId) {
@@ -117,9 +122,10 @@ export function AdminLiveQuoteWorkspace({
         if (!response.ok) throw new Error(data.error || "載入失敗");
         if (!canceled) {
           setTasks(data.tasks || []);
+          setLoadError("");
         }
       } catch (error) {
-        if (!canceled) setMessage(error instanceof Error ? error.message : "載入失敗");
+        if (!canceled) setLoadError(error instanceof Error ? error.message : "詢價任務載入失敗。");
       } finally {
         if (!canceled) setLoadingTasks(false);
       }
@@ -152,7 +158,7 @@ export function AdminLiveQuoteWorkspace({
           setSelectedPhotoIds(new Set());
         }
       } catch (error) {
-        if (!canceled) setMessage(error instanceof Error ? error.message : "載入失敗");
+        if (!canceled) setLoadError(error instanceof Error ? error.message : "詢價任務明細載入失敗。");
       } finally {
         if (!canceled) setLoadingDetail(false);
       }
@@ -162,7 +168,7 @@ export function AdminLiveQuoteWorkspace({
     return () => {
       canceled = true;
     };
-  }, [activeTaskId, selectedTripId]);
+  }, [activeTaskId, detailRefreshNonce, selectedTripId]);
 
   function selectTrip(tripId: string) {
     setSelectedTripId(tripId);
@@ -320,7 +326,20 @@ export function AdminLiveQuoteWorkspace({
         </nav>
       ) : null}
 
-      {message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
+      {loadError ? (
+        <RetryableError
+          message={loadError}
+          onRetry={() => {
+            if (activeTaskId) setDetailRefreshNonce((value) => value + 1);
+            else if (selectedTripId) setRefreshNonce((value) => value + 1);
+            else {
+              setLoadingTrips(true);
+              setTripsRefreshNonce((value) => value + 1);
+            }
+          }}
+        />
+      ) : null}
+      {message ? <p aria-live="polite" className="text-sm text-muted-foreground" role="status">{message}</p> : null}
 
       {selectedTripId && !activeTaskId ? (
         <QuoteTaskList

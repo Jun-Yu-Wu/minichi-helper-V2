@@ -79,7 +79,8 @@ test("lists customer nickname suggestions from the Supabase main customer master
 
   assert.deepEqual(nicknames, ["小明", "阿美"]);
   assert.match(queries[0].sql, /from main\.customers/);
-  assert.match(queries[0].sql, /order by line_community_name asc/);
+  assert.match(queries[0].sql, /distinct on \(lower\(btrim\(line_community_name\)\)\)/);
+  assert.match(queries[0].sql, /order by lower\(btrim\(line_community_name\)\)/);
 });
 
 test("customer nickname typeahead searches a bounded subset instead of hydrating the full master", async () => {
@@ -94,7 +95,7 @@ test("customer nickname typeahead searches a bounded subset instead of hydrating
   const nicknames = await service.searchCustomerNicknames(database, "小明", 8);
 
   assert.deepEqual(nicknames, ["小明東京"]);
-  assert.match(queries[0].sql, /position\(lower\(\$1\)/);
+  assert.match(queries[0].sql, /position\(lower\(btrim\(\$1\)\)/);
   assert.match(queries[0].sql, /limit \$2/);
   assert.deepEqual(queries[0].params, ["小明", 8]);
   assert.deepEqual(await service.searchCustomerNicknames(database, ""), []);
@@ -735,6 +736,8 @@ test("helper site photo P0 read model authorizes and lists summaries in one quer
   assert.match(queries[0].sql, /hp\.auth_user_id = \$1/);
   assert.match(queries[0].sql, /t\.id = \$2::uuid/);
   assert.match(queries[0].sql, /t\.status = 'active'/);
+  assert.match(queries[0].sql, /b\.trip_id = permitted\.trip_id/);
+  assert.doesNotMatch(queries[0].sql, /left join ranked_batches b on true/);
   assert.doesNotMatch(queries[0].sql, /storage_key|jsonb_agg/);
   assert.deepEqual(queries[0].params, [
     "00000000-0000-0000-0000-000000000009",
@@ -2677,7 +2680,7 @@ test("staging merge approval blocks unconfirmed unknown customers", async () => 
         status: "ended",
       }],
     },
-    { rows: [{ count: 1 }] },
+    { rows: [{ id: "order-1", line_community_name: "小明", product_name: "測試商品" }] },
   ]);
 
   await assert.rejects(
@@ -2687,7 +2690,7 @@ test("staging merge approval blocks unconfirmed unknown customers", async () => 
         expectedVersion: 3,
         mergeJobId: "merge-1",
       }),
-    /Unknown customer/,
+    /以下訂單的客戶暱稱尚未特別確認：.*小明.*測試商品/,
   );
 });
 
@@ -2731,11 +2734,57 @@ test("reviewed staging photo edits update labels, include flags, and revoke appr
   });
 
   assert.equal(
-    queries.some((query) => String(query.sql).includes("include_in_merge = $3")),
+    queries.some((query) => String(query.sql).includes("jsonb_to_recordset($2::jsonb)")),
     true,
   );
   assert.equal(
     queries.some((query) => String(query.sql).includes("set status = 'pending_review'")),
+    true,
+  );
+});
+
+test("admin can select only the reviewed staging orders to merge", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [{
+          id: "merge-1",
+          status: "pending_review",
+          trip_id: "trip-1",
+          version: 4,
+        }],
+      },
+      {
+        rows: [{ total_count: 2, selected_count: 1 }],
+      },
+      { rows: [{ id: "order-2" }], rowCount: 1 },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const result = await service.setReviewedStagingOrderSelection(database, {
+    actorUserId: "admin-1",
+    exclusionReason: "客戶取消其中一筆",
+    expectedVersion: 4,
+    mergeJobId: "merge-1",
+    selectedOrderIds: ["order-1", "order-1"],
+  });
+
+  assert.deepEqual(result, {
+    approvalRevoked: false,
+    changedCount: 1,
+    excludedCount: 1,
+    mergeJobId: "merge-1",
+    selectedCount: 1,
+  });
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("is_excluded = not (id = any($2::uuid[]))")),
+    true,
+  );
+  assert.equal(
+    queries.some((query) => query.params?.includes("admin_reviewed_staging_order_selection_changed")),
     true,
   );
 });

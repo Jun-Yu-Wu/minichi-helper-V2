@@ -1,6 +1,9 @@
+import crypto from "node:crypto";
+
 import { NextResponse } from "next/server";
 
 import adminAuthorization from "../../../../src/server/admin-authorization";
+import config from "../../../../src/server/config";
 import database from "../../../../src/server/database";
 import { getCurrentUser } from "../../../../src/server/current-session";
 import { createR2ObjectStore } from "../../../../src/server/r2-object-store";
@@ -23,14 +26,24 @@ export async function POST(request: Request) {
     const evidenceType = String(body.evidenceType || "").trim();
     const quoteTaskPhotoId = String(body.quoteTaskPhotoId || "").trim();
     const uploadPurpose = String(body.uploadPurpose || "site_photo").trim();
-    const contentType = String(body.contentType || "").trim();
+    const contentType = String(body.contentType || "").trim().toLowerCase();
     const fileName = String(body.fileName || "").trim();
     const clientPhotoId = String(body.clientPhotoId || "").trim();
+    const byteSize = body.byteSize == null || body.byteSize === ""
+      ? null
+      : Number(body.byteSize);
     if (!contentType || !clientPhotoId) {
       return NextResponse.json({ error: "缺少上傳資訊。" }, { status: 400 });
     }
-    if (!contentType.startsWith("image/")) {
+    const uploadConfig = config.uploadConfig();
+    if (!uploadConfig.allowedContentTypes.has(contentType.toLowerCase())) {
       return NextResponse.json({ error: "目前只支援圖片上傳。" }, { status: 400 });
+    }
+    if (byteSize != null && (!Number.isInteger(byteSize) || byteSize < 0)) {
+      return NextResponse.json({ error: "圖片大小格式不正確。" }, { status: 400 });
+    }
+    if (byteSize != null && byteSize > uploadConfig.maxBytes) {
+      return NextResponse.json({ error: "圖片超過大小限制。" }, { status: 413 });
     }
 
     let storageKeyTripId = tripId;
@@ -97,16 +110,20 @@ export async function POST(request: Request) {
     const authorizedAt = performance.now();
 
     const r2Store = createR2ObjectStore();
+    // The browser-provided id remains application metadata. Never use it as
+    // the durable object name: object names must be server-generated so a
+    // client cannot choose a predictable path or overwrite another upload.
+    const objectId = crypto.randomUUID();
     const storageKey = uploadPurpose === "admin_quote_task_photo"
       ? buildAdminTaskPhotoKey({
-          clientPhotoId,
+          clientPhotoId: objectId,
           contentType,
           fileName,
           tripId: storageKeyTripId,
         })
       : uploadPurpose === "quote_detail_reply"
         ? buildQuoteReplyPhotoKey({
-            clientPhotoId,
+            clientPhotoId: objectId,
             contentType,
             fileName,
             quoteTaskPhotoId,
@@ -114,7 +131,7 @@ export async function POST(request: Request) {
           })
         : uploadPurpose === "purchase_face_check"
           ? buildPurchaseFaceCheckPhotoKey({
-              clientPhotoId,
+              clientPhotoId: objectId,
               contentType,
               fileName,
               purchaseTaskId,
@@ -122,7 +139,7 @@ export async function POST(request: Request) {
             })
           : uploadPurpose === "settlement_evidence"
             ? buildSettlementEvidenceKey({
-                clientPhotoId,
+                clientPhotoId: objectId,
                 contentType,
                 evidenceType,
                 fileName,
@@ -131,13 +148,13 @@ export async function POST(request: Request) {
               })
             : uploadPurpose === "admin_rebuy_reference"
               ? buildAdminRebuyReferencePhotoKey({
-                  clientPhotoId,
+                  clientPhotoId: objectId,
                   contentType,
                   fileName,
                 })
-            : uploadPurpose === "rebuy_report"
+              : uploadPurpose === "rebuy_report"
               ? buildRebuyReportPhotoKey({
-                  clientPhotoId,
+                  clientPhotoId: objectId,
                   contentType,
                   fileName,
                   rebuyTaskId,
@@ -145,7 +162,7 @@ export async function POST(request: Request) {
         : r2Store.buildSitePhotoKey({
             contentType,
             fileName,
-            photoId: clientPhotoId,
+            photoId: objectId,
             tripId,
           });
     const uploadUrl = await r2Store.signedPutUrl(storageKey, contentType);
@@ -184,7 +201,7 @@ function buildAdminRebuyReferencePhotoKey({
   contentType: string;
   fileName: string;
 }) {
-  const extension = extensionFromFile(fileName) || extensionFromContentType(contentType);
+  const extension = extensionFromContentType(contentType);
   return [
     "helper-app",
     "rebuy",
@@ -204,7 +221,7 @@ function buildRebuyReportPhotoKey({
   fileName: string;
   rebuyTaskId: string;
 }) {
-  const extension = extensionFromFile(fileName) || extensionFromContentType(contentType);
+  const extension = extensionFromContentType(contentType);
   return [
     "helper-app",
     "rebuy",
@@ -229,7 +246,7 @@ function buildSettlementEvidenceKey({
   settlementId: string;
   tripId: string;
 }) {
-  const extension = extensionFromFile(fileName) || extensionFromContentType(contentType);
+  const extension = extensionFromContentType(contentType);
   return [
     "helper-app",
     tripId,
@@ -253,7 +270,7 @@ function buildPurchaseFaceCheckPhotoKey({
   purchaseTaskId: string;
   tripId: string;
 }) {
-  const extension = extensionFromFile(fileName) || extensionFromContentType(contentType);
+  const extension = extensionFromContentType(contentType);
   return [
     "helper-app",
     tripId,
@@ -274,7 +291,7 @@ function buildAdminTaskPhotoKey({
   fileName: string;
   tripId: string;
 }) {
-  const extension = extensionFromFile(fileName) || extensionFromContentType(contentType);
+  const extension = extensionFromContentType(contentType);
   return [
     "helper-app",
     tripId,
@@ -296,7 +313,7 @@ function buildQuoteReplyPhotoKey({
   quoteTaskPhotoId: string;
   tripId: string;
 }) {
-  const extension = extensionFromFile(fileName) || extensionFromContentType(contentType);
+  const extension = extensionFromContentType(contentType);
   return [
     "helper-app",
     tripId,
@@ -306,12 +323,8 @@ function buildQuoteReplyPhotoKey({
   ].join("/");
 }
 
-function extensionFromFile(fileName: string) {
-  const match = fileName.toLowerCase().match(/\.[a-z0-9]+$/);
-  return match ? match[0] : "";
-}
-
 function extensionFromContentType(contentType: string) {
+  if (contentType === "image/gif") return ".gif";
   if (contentType === "image/png") return ".png";
   if (contentType === "image/webp") return ".webp";
   return ".jpg";

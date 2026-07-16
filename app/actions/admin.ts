@@ -9,6 +9,8 @@ import { createR2ObjectStore } from "../../src/server/r2-object-store";
 import { createServerSupabaseClient } from "../../src/server/supabase";
 
 export type AdminActionResult = {
+  approvalRevoked?: boolean;
+  changedCount?: number;
   error?: string;
   ok?: true;
   settlement?: any;
@@ -318,20 +320,29 @@ export async function reviewWarehouseProofAction(formData: FormData) {
   revalidatePath("/admin");
 }
 
-export async function prepareStagingReviewAction(formData: FormData) {
+export async function prepareStagingReviewAction(formData: FormData): Promise<AdminActionResult> {
+  const startedAt = performance.now();
   try {
     const admin = await requireAdmin();
+    const authenticatedAt = performance.now();
     await service.prepareStagingReview(database.getDatabasePool(), {
       actorUserId: admin.user.id,
       tripId: formText(formData, "tripId"),
     });
+    const completedAt = performance.now();
+    console.info("admin_staging_review_prepared", JSON.stringify({
+      authMs: Math.round(authenticatedAt - startedAt),
+      dbMs: Math.round(completedAt - authenticatedAt),
+      totalMs: Math.round(completedAt - startedAt),
+    }));
     revalidatePath("/admin");
+    return { ok: true };
   } catch (error) {
-    console.error("Prepare staging review action failed", error);
+    return actionError(error);
   }
 }
 
-export async function editReviewedStagingOrderAction(formData: FormData) {
+export async function editReviewedStagingOrderAction(formData: FormData): Promise<AdminActionResult> {
   try {
     const admin = await requireAdmin();
     await service.editReviewedStagingOrder(database.getDatabasePool(), {
@@ -348,12 +359,13 @@ export async function editReviewedStagingOrderAction(formData: FormData) {
       salePriceTwd: formText(formData, "salePriceTwd"),
     });
     revalidatePath("/admin");
+    return { ok: true };
   } catch (error) {
-    console.error("Edit reviewed staging order action failed", error);
+    return actionError(error);
   }
 }
 
-export async function editReviewedStagingOrderPhotosAction(formData: FormData) {
+export async function editReviewedStagingOrderPhotosAction(formData: FormData): Promise<AdminActionResult> {
   try {
     const admin = await requireAdmin();
     const photoIds = formData.getAll("photoId").map((value) => String(value));
@@ -368,26 +380,36 @@ export async function editReviewedStagingOrderPhotosAction(formData: FormData) {
       reviewedOrderId: formText(formData, "reviewedOrderId"),
     });
     revalidatePath("/admin");
+    return { ok: true };
   } catch (error) {
-    console.error("Edit reviewed staging order photos action failed", error);
+    return actionError(error);
   }
 }
 
-export async function approveStagingMergeJobAction(formData: FormData) {
+export async function approveStagingMergeJobAction(formData: FormData): Promise<AdminActionResult> {
+  const startedAt = performance.now();
   try {
     const admin = await requireAdmin();
+    const authenticatedAt = performance.now();
     await service.approveStagingMergeJob(database.getDatabasePool(), {
       actorUserId: admin.user.id,
       expectedVersion: formVersion(formData),
       mergeJobId: formText(formData, "mergeJobId"),
     });
+    const completedAt = performance.now();
+    console.info("admin_staging_merge_approved", JSON.stringify({
+      authMs: Math.round(authenticatedAt - startedAt),
+      dbMs: Math.round(completedAt - authenticatedAt),
+      totalMs: Math.round(completedAt - startedAt),
+    }));
     revalidatePath("/admin");
+    return { ok: true };
   } catch (error) {
-    console.error("Approve staging merge action failed", error);
+    return actionError(error);
   }
 }
 
-export async function rejectStagingMergeJobAction(formData: FormData) {
+export async function rejectStagingMergeJobAction(formData: FormData): Promise<AdminActionResult> {
   try {
     const admin = await requireAdmin();
     await service.rejectStagingMergeJob(database.getDatabasePool(), {
@@ -396,14 +418,17 @@ export async function rejectStagingMergeJobAction(formData: FormData) {
       rejectionNote: formText(formData, "rejectionNote"),
     });
     revalidatePath("/admin");
+    return { ok: true };
   } catch (error) {
-    console.error("Reject staging merge action failed", error);
+    return actionError(error);
   }
 }
 
-export async function mergeApprovedStagingJobAction(formData: FormData) {
+export async function mergeApprovedStagingJobAction(formData: FormData): Promise<AdminActionResult> {
+  const startedAt = performance.now();
   try {
     const admin = await requireAdmin();
+    const authenticatedAt = performance.now();
     await service.mergeApprovedStagingJob(database.getDatabasePool(), {
       actorUserId: admin.user.id,
       expectedVersion: formVersion(formData),
@@ -411,9 +436,49 @@ export async function mergeApprovedStagingJobAction(formData: FormData) {
       mergeJobId: formText(formData, "mergeJobId"),
       r2Store: createR2ObjectStore(),
     });
+    const completedAt = performance.now();
+    console.info("admin_staging_merge_completed", JSON.stringify({
+      authMs: Math.round(authenticatedAt - startedAt),
+      dbMs: Math.round(completedAt - authenticatedAt),
+      totalMs: Math.round(completedAt - startedAt),
+    }));
     revalidatePath("/admin");
+    return { ok: true };
   } catch (error) {
-    console.error("Merge staging job action failed", error);
+    return actionError(error);
+  }
+}
+
+export async function setReviewedStagingOrderSelectionAction(
+  formData: FormData,
+): Promise<AdminActionResult> {
+  const startedAt = performance.now();
+  try {
+    const admin = await requireAdmin();
+    const authenticatedAt = performance.now();
+    const result = await service.setReviewedStagingOrderSelection(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      exclusionReason: formText(formData, "exclusionReason"),
+      expectedVersion: formVersion(formData),
+      mergeJobId: formText(formData, "mergeJobId"),
+      selectedOrderIds: formData.getAll("selectedOrderId").map((value) => String(value)),
+    });
+    const completedAt = performance.now();
+    console.info("admin_staging_order_selection_saved", JSON.stringify({
+      authMs: Math.round(authenticatedAt - startedAt),
+      changedCount: result.changedCount,
+      dbMs: Math.round(completedAt - authenticatedAt),
+      mergeJobId: result.mergeJobId,
+      totalMs: Math.round(completedAt - startedAt),
+    }));
+    revalidatePath("/admin");
+    return {
+      approvalRevoked: result.approvalRevoked,
+      changedCount: result.changedCount,
+      ok: true,
+    };
+  } catch (error) {
+    return actionError(error);
   }
 }
 

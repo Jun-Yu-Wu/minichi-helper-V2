@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 
 import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
+import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
 
 type RebuyUploadPhoto = {
@@ -46,13 +47,21 @@ export function RebuyTasks({
   const [activeTask, setActiveTask] = useState<any | null>(selectedTaskId ? tasks[0] || null : null);
   const [detailError, setDetailError] = useState("");
   const [detailLoading, setDetailLoading] = useState(false);
+  const [listError, setListError] = useState("");
 
   async function reloadTasks() {
-    const response = await fetch("/api/helper/rebuy-tasks", { cache: "no-store" });
-    const body = await response.json();
-    if (!response.ok) throw new Error(body.error || "補買列表載入失敗。");
-    setTaskList(body.tasks || []);
-    return body.tasks || [];
+    setListError("");
+    try {
+      const response = await fetch("/api/helper/rebuy-tasks", { cache: "no-store" });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "補買列表載入失敗。");
+      setTaskList(body.tasks || []);
+      return body.tasks || [];
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "補買列表載入失敗。";
+      setListError(message);
+      throw error;
+    }
   }
 
   async function openTask(taskId: string) {
@@ -94,11 +103,8 @@ export function RebuyTasks({
             </div>
           </Surface>
         ) : detailError ? (
-          <Surface className="grid gap-2">
-            <p className="text-sm text-destructive">{detailError}</p>
-            <Button className="w-fit" size="sm" type="button" variant="outline" onClick={() => openTask(activeTaskId)}>
-              重新載入
-            </Button>
+          <Surface>
+            <RetryableError message={detailError} onRetry={() => openTask(activeTaskId)} />
           </Surface>
         ) : task ? (
           <RebuyTaskDetail task={task} onTaskChanged={(updatedTask) => {
@@ -152,6 +158,7 @@ export function RebuyTasks({
           {currentSection === "public" ? publicOpen.length : activeMine}
         </StatusBadge>
       </div>
+      {listError ? <RetryableError message={listError} onRetry={() => void reloadTasks()} /> : null}
       {currentSection === "mine" && readyToCheckout ? (
         <RebuyCheckoutButton readyToCheckout={readyToCheckout} onCheckedOut={reloadTasks} />
       ) : null}
@@ -628,6 +635,7 @@ async function uploadRebuyReportPhoto(photo: RebuyUploadPhoto, rebuyTaskId: stri
     body: JSON.stringify({
       clientPhotoId: photo.clientPhotoId,
       contentType: photo.contentType,
+      byteSize: photo.byteSize,
       fileName: photo.originalFilename,
       rebuyTaskId,
       uploadPurpose: "rebuy_report",

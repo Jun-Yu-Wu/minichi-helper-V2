@@ -6,6 +6,7 @@ import { useEffect, useState, useTransition } from "react";
 
 import { reviewFaceCheckPurchaseAction } from "../actions/admin";
 import { InsightBanner, StatusBadge } from "../components/OperationsUi";
+import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
 import { cn } from "../../src/lib/utils";
 
@@ -50,7 +51,10 @@ export function AdminLivePurchaseWorkspace({
   const [allPhotosLoading, setAllPhotosLoading] = useState(false);
   const [allPhotosLoaded, setAllPhotosLoaded] = useState(false);
   const [message, setMessage] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [tripsRefreshNonce, setTripsRefreshNonce] = useState(0);
   const [refreshNonce, setRefreshNonce] = useState(0);
+  const [detailRefreshNonce, setDetailRefreshNonce] = useState(0);
   const [reviewPending, startReviewTransition] = useTransition();
 
   const selectedTrip = trips.find((trip) => trip.id === selectedTripId);
@@ -67,11 +71,12 @@ export function AdminLivePurchaseWorkspace({
         if (!response.ok) throw new Error(data.error || "載入失敗");
         if (!canceled) {
           setTrips(data.trips || []);
+          setLoadError("");
           setLoadingTrips(false);
         }
       } catch (error) {
         if (!canceled) {
-          setMessage(error instanceof Error ? error.message : "載入失敗");
+          setLoadError(error instanceof Error ? error.message : "即時行程載入失敗。");
           setLoadingTrips(false);
         }
       }
@@ -83,7 +88,7 @@ export function AdminLivePurchaseWorkspace({
       canceled = true;
       if (timer) clearInterval(timer);
     };
-  }, []);
+  }, [tripsRefreshNonce]);
 
   useEffect(() => {
     if (!selectedTripId) {
@@ -105,9 +110,12 @@ export function AdminLivePurchaseWorkspace({
         );
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "載入失敗");
-        if (!canceled) setTasks(data.tasks || []);
+        if (!canceled) {
+          setTasks(data.tasks || []);
+          setLoadError("");
+        }
       } catch (error) {
-        if (!canceled) setMessage(error instanceof Error ? error.message : "載入失敗");
+        if (!canceled) setLoadError(error instanceof Error ? error.message : "採買任務載入失敗。");
       } finally {
         if (!canceled) setLoadingTasks(false);
       }
@@ -135,9 +143,12 @@ export function AdminLivePurchaseWorkspace({
         );
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "載入失敗");
-        if (!canceled) setActiveTask(data.task || null);
+        if (!canceled) {
+          setActiveTask(data.task || null);
+          setLoadError("");
+        }
       } catch (error) {
-        if (!canceled) setMessage(error instanceof Error ? error.message : "載入失敗");
+        if (!canceled) setLoadError(error instanceof Error ? error.message : "採買任務明細載入失敗。");
       } finally {
         if (!canceled) setLoadingDetail(false);
       }
@@ -147,7 +158,7 @@ export function AdminLivePurchaseWorkspace({
     return () => {
       canceled = true;
     };
-  }, [activeTaskId, selectedTripId]);
+  }, [activeTaskId, detailRefreshNonce, selectedTripId]);
 
   function selectTrip(tripId: string) {
     setSelectedTripId(tripId);
@@ -186,9 +197,10 @@ export function AdminLivePurchaseWorkspace({
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "載入失敗");
       setActiveTask(data.task || null);
+      setLoadError("");
       setAllPhotosLoaded(true);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "載入失敗");
+      setLoadError(error instanceof Error ? error.message : "採買照片載入失敗。");
     } finally {
       setAllPhotosLoading(false);
     }
@@ -204,14 +216,19 @@ export function AdminLivePurchaseWorkspace({
       action === "approve" ? "Approved from live return" : "Retake requested from live return",
     );
     startReviewTransition(async () => {
-      await reviewFaceCheckPurchaseAction(formData);
-      setRefreshNonce((value) => value + 1);
-      const response = await fetch(
-        `/api/admin/live/purchase-tasks/${encodeURIComponent(activeTaskId)}?tripId=${encodeURIComponent(selectedTripId)}`,
-        { cache: "no-store" },
-      );
-      const data = await response.json();
-      if (response.ok) setActiveTask(data.task || null);
+      try {
+        await reviewFaceCheckPurchaseAction(formData);
+        setRefreshNonce((value) => value + 1);
+        const response = await fetch(
+          `/api/admin/live/purchase-tasks/${encodeURIComponent(activeTaskId)}?tripId=${encodeURIComponent(selectedTripId)}`,
+          { cache: "no-store" },
+        );
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "審核結果載入失敗。");
+        setActiveTask(data.task || null);
+      } catch (error) {
+        setLoadError(error instanceof Error ? error.message : "審核操作失敗，請重試。");
+      }
     });
   }
 
@@ -286,7 +303,20 @@ export function AdminLivePurchaseWorkspace({
         </nav>
       ) : null}
 
-      {message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
+      {loadError ? (
+        <RetryableError
+          message={loadError}
+          onRetry={() => {
+            if (activeTaskId) setDetailRefreshNonce((value) => value + 1);
+            else if (selectedTripId) setRefreshNonce((value) => value + 1);
+            else {
+              setLoadingTrips(true);
+              setTripsRefreshNonce((value) => value + 1);
+            }
+          }}
+        />
+      ) : null}
+      {message ? <p aria-live="polite" className="text-sm text-muted-foreground" role="status">{message}</p> : null}
 
       {selectedTripId && !activeTaskId ? (
         <PurchaseTaskList

@@ -198,10 +198,10 @@ async function loadAdminDashboardSummary(database) {
 
 async function listCustomerNicknames(database) {
   const result = await database.query(
-    `select line_community_name
+    `select distinct on (lower(btrim(line_community_name))) line_community_name
      from main.customers
      where nullif(btrim(line_community_name), '') is not null
-     order by line_community_name asc`,
+     order by lower(btrim(line_community_name)), line_community_name asc`,
   );
   return result.rows.map((row) => row.line_community_name);
 }
@@ -211,12 +211,13 @@ async function searchCustomerNicknames(database, input, limit = 8) {
   if (!query) return [];
   const normalizedLimit = Math.min(Math.max(Number(limit) || 8, 1), 20);
   const result = await database.query(
-    `select line_community_name
+    `select distinct on (lower(btrim(line_community_name))) line_community_name
      from main.customers
      where nullif(btrim(line_community_name), '') is not null
-       and position(lower($1) in lower(line_community_name)) > 0
+       and position(lower(btrim($1)) in lower(btrim(line_community_name))) > 0
      order by
-       case when lower(line_community_name) like lower($1) || '%' then 0 else 1 end,
+       lower(btrim(line_community_name)),
+       case when lower(btrim(line_community_name)) like lower(btrim($1)) || '%' then 0 else 1 end,
        line_community_name asc
      limit $2`,
     [query, normalizedLimit],
@@ -956,6 +957,20 @@ async function listStagingMergeJobs(
               where ${reviewedOrderWhere.join(" and ")}
             ), '[]'::jsonb)`
     : `'[]'::jsonb`;
+  const unknownCustomerExpression = mergeJobId
+    ? `coalesce((
+         select jsonb_agg(jsonb_build_object(
+           'id', rso.id,
+           'line_community_name', rso.line_community_name,
+           'product_name', rso.product_name
+         ) order by rso.created_at asc)
+         from helper_app.reviewed_staging_orders rso
+         where rso.merge_job_id = mj.id
+           and rso.is_excluded = false
+           and rso.customer_exists = false
+           and rso.customer_confirmed = false
+       ), '[]'::jsonb)`
+    : `'[]'::jsonb`;
   const result = await database.query(
     `select mj.*, t.trip_name, t.business_date, t.timezone, t.status as trip_status,
             hp.display_name as helper_display_name,
@@ -966,6 +981,7 @@ async function listStagingMergeJobs(
              from helper_app.reviewed_staging_order_photos rsop
              join helper_app.reviewed_staging_orders rso on rso.id = rsop.reviewed_order_id
              where rso.merge_job_id = mj.id and rsop.include_in_merge = true) as selected_photo_count,
+            ${unknownCustomerExpression} as unknown_customers,
             ${reviewedOrderColumns} as reviewed_orders
      from helper_app.staging_merge_jobs mj
      join helper_app.trips t on t.id = mj.trip_id
@@ -1245,7 +1261,9 @@ async function listAuthorizedHelperSitePhotoBatchSummaries(
             b.id, b.note, b.status, b.created_at, b.updated_at,
             b.batch_number, b.photo_count
      from authorized_trip permitted
-     left join ranked_batches b on true
+     left join ranked_batches b
+       on b.trip_id = permitted.trip_id
+      and b.helper_id = permitted.helper_id
      order by b.created_at desc nulls last, b.id desc nulls last`,
     [authUserId, tripId],
   );
@@ -2896,7 +2914,7 @@ async function prepareStagingReview(database, input) {
     );
     const job = jobResult.rows[0];
     if (["approved", "merging", "merged"].includes(job.status)) {
-      return getStagingMergeJobById(client, job.id);
+      return job;
     }
 
     await client.query(
@@ -2913,7 +2931,7 @@ async function prepareStagingReview(database, input) {
               sop.source_rebuy_task_id,
               exists (
                 select 1 from main.customers c
-                where c.line_community_name = sop.line_community_name
+                where lower(btrim(c.line_community_name)) = lower(btrim(sop.line_community_name))
               )
        from helper_app.staging_order_previews sop
        where sop.trip_id = $2
@@ -2939,7 +2957,7 @@ async function prepareStagingReview(database, input) {
       before_state: {},
       trip_id: trip.id,
     });
-    return getStagingMergeJobById(client, job.id);
+    return job;
   });
 }
 
@@ -2968,7 +2986,8 @@ async function editReviewedStagingOrder(database, input) {
            exclusion_reason = $9,
            customer_confirmed = $10,
            customer_exists = exists (
-             select 1 from main.customers c where c.line_community_name = $2
+             select 1 from main.customers c
+             where lower(btrim(c.line_community_name)) = lower(btrim($2))
            ),
            version = version + 1,
            updated_at = now()
@@ -3022,13 +3041,28 @@ async function editReviewedStagingOrderPhotos(database, input) {
       if (!existingIds.has(photoId)) {
         throw new HelperAppServiceError("invalid_input", "Reviewed staging photo does not belong to this order.");
       }
+    }
+    if (photos.length) {
       await client.query(
-        `update helper_app.reviewed_staging_order_photos
-         set label = $2,
-             include_in_merge = $3,
+        `update helper_app.reviewed_staging_order_photos target
+         set label = source.label,
+             include_in_merge = source.include_in_merge,
              updated_at = now()
-         where id = $1`,
-        [photoId, String(photo.label || "").trim(), Boolean(photo.includeInMerge)],
+         from jsonb_to_recordset($2::jsonb) as source(
+           id uuid,
+           label text,
+           include_in_merge boolean
+         )
+         where target.id = source.id
+           and target.reviewed_order_id = $1`,
+        [
+          current.id,
+          JSON.stringify(photos.map((photo) => ({
+            id: requiredText(photo.id, "photoId"),
+            label: String(photo.label || "").trim(),
+            include_in_merge: Boolean(photo.includeInMerge),
+          }))),
+        ],
       );
     }
     await revokeMergeApprovalForEdit(client, job);
@@ -3040,7 +3074,88 @@ async function editReviewedStagingOrderPhotos(database, input) {
       before_state: { status: job.status },
       trip_id: current.trip_id,
     });
-    return getStagingMergeJobById(client, job.id);
+    return { mergeJobId: job.id };
+  });
+}
+
+async function setReviewedStagingOrderSelection(database, input) {
+  const mergeJobId = requiredText(input.mergeJobId, "mergeJobId");
+  const expectedVersion = Number(requiredText(input.expectedVersion, "expectedVersion"));
+  const selectedOrderIds = Array.from(new Set(
+    (Array.isArray(input.selectedOrderIds) ? input.selectedOrderIds : [])
+      .map((id) => String(id || "").trim())
+      .filter(Boolean),
+  ));
+  const exclusionReason = optionalText(input.exclusionReason);
+
+  return withTransaction(database, async (client) => {
+    const job = await lockStagingMergeJob(client, mergeJobId);
+    if (Number(job.version) !== expectedVersion) {
+      throw new HelperAppServiceError("version_conflict", "審核批次已更新，請重新載入後再選取。");
+    }
+    if (["merging", "merged"].includes(job.status)) {
+      throw new HelperAppServiceError("invalid_status", "這個審核批次已進入合併流程，不能再修改選取。");
+    }
+    const counts = await client.query(
+      `select count(*)::int as total_count,
+              count(*) filter (where id = any($2::uuid[]))::int as selected_count
+       from helper_app.reviewed_staging_orders
+       where merge_job_id = $1`,
+      [job.id, selectedOrderIds],
+    );
+    const totalCount = Number(counts.rows[0]?.total_count || 0);
+    const selectedCount = Number(counts.rows[0]?.selected_count || 0);
+    if (selectedCount !== selectedOrderIds.length) {
+      throw new HelperAppServiceError("invalid_input", "選取的訂單不屬於這個審核批次。");
+    }
+    if (selectedOrderIds.length < totalCount && !exclusionReason) {
+      throw new HelperAppServiceError("invalid_input", "未選取的訂單需要填寫排除原因。");
+    }
+    const updated = await client.query(
+      `update helper_app.reviewed_staging_orders
+       set is_excluded = not (id = any($2::uuid[])),
+           exclusion_reason = case
+             when id = any($2::uuid[]) then null
+             else $3
+           end,
+           version = version + 1,
+           updated_at = now()
+       where merge_job_id = $1
+         and (
+           is_excluded is distinct from not (id = any($2::uuid[]))
+           or exclusion_reason is distinct from case
+             when id = any($2::uuid[]) then null
+             else $3
+           end
+         )
+       returning id`,
+      [job.id, selectedOrderIds, exclusionReason],
+    );
+    const changedCount = updated.rowCount ?? updated.rows.length;
+    const approvalRevoked = job.status === "approved" && changedCount > 0;
+    if (approvalRevoked) await revokeMergeApprovalForEdit(client, job);
+    if (changedCount > 0) {
+      await insertAuditEvent(client, {
+        action: "admin_reviewed_staging_order_selection_changed",
+        actor_role: "admin",
+        actor_user_id: input.actorUserId || null,
+        after_state: {
+          excludedCount: totalCount - selectedOrderIds.length,
+          selectedCount: selectedOrderIds.length,
+          mergeJobId: job.id,
+        },
+        before_state: { status: job.status },
+        reason: exclusionReason,
+        trip_id: job.trip_id,
+      });
+    }
+    return {
+      approvalRevoked,
+      changedCount,
+      excludedCount: totalCount - selectedOrderIds.length,
+      mergeJobId: job.id,
+      selectedCount: selectedOrderIds.length,
+    };
   });
 }
 
@@ -3060,16 +3175,26 @@ async function approveStagingMergeJob(database, input) {
       throw new HelperAppServiceError("trip_not_ended", "Only ended trips can be approved for merge.");
     }
     const blocking = await client.query(
-      `select count(*)::int as count
+      `select id, line_community_name, product_name
        from helper_app.reviewed_staging_orders
        where merge_job_id = $1
          and is_excluded = false
          and customer_exists = false
-         and customer_confirmed = false`,
+         and customer_confirmed = false
+       order by created_at asc
+       limit 20`,
       [job.id],
     );
-    if (Number(blocking.rows[0]?.count || 0) > 0) {
-      throw new HelperAppServiceError("unknown_customer", "Unknown customer nicknames must be explicitly confirmed before approval.");
+    if (blocking.rows.length > 0) {
+      const labels = blocking.rows
+        .slice(0, 5)
+        .map((row) => `「${row.line_community_name}」／${row.product_name}`)
+        .join("、");
+      const more = blocking.rows.length > 5 ? ` 等 ${blocking.rows.length} 筆` : "";
+      throw new HelperAppServiceError(
+        "unknown_customer",
+        `以下訂單的客戶暱稱尚未特別確認：${labels}${more}。請逐筆確認「仍允許合併」或排除後再核准。`,
+      );
     }
     const snapshot = await buildReviewedSnapshot(client, job.id);
     const result = await client.query(
@@ -3155,10 +3280,74 @@ async function mergeApprovedStagingJob(database, input) {
        where id = $1`,
       [job.id, idempotencyKey],
     );
+    const orderRows = (snapshot.orders || []).map((order) => {
+      const orderId = deterministicId("helper_order", job.id, order.reviewedOrderId);
+      mainOrderIds.push(orderId);
+      return {
+        appearance_notes: order.appearanceNotes || "",
+        helper_id: order.helperId,
+        line_community_name: order.lineCommunityName,
+        merge_job_id: job.id,
+        notes: order.customerConfirmed && !order.customerExists
+          ? "Unknown customer explicitly confirmed during helper staging review."
+          : null,
+        order_date: snapshot.trip?.business_date,
+        order_id: orderId,
+        price_jpy: order.originalPriceJpy || 0,
+        price_twd: order.salePriceTwd,
+        product_name: order.productName,
+        quantity: order.quantity,
+        receivable_total_twd: order.quantity * order.salePriceTwd,
+        source_purchase_task_id: order.purchaseTaskId,
+        source_quote_photo_id: order.sourceQuoteTaskPhotoId,
+        source_quote_task_id: order.sourceQuoteTaskId,
+        source_rebuy_task_id: order.sourceRebuyTaskId,
+        source_trip: snapshot.trip?.trip_name || "",
+        staging_order_id: order.reviewedOrderId,
+        total_price: order.quantity * order.salePriceTwd,
+        trip_id: job.trip_id,
+      };
+    });
+    const sourceLinkRows = orderRows.map((order, index) => {
+      const sourceOrder = snapshot.orders[index];
+      return {
+        detail: { stagingOrderPreviewId: sourceOrder.stagingOrderPreviewId },
+        helper_id: order.helper_id,
+        merge_job_id: job.id,
+        order_id: order.order_id,
+        source_link_id: deterministicId("helper_source", job.id, sourceOrder.reviewedOrderId),
+        source_purchase_task_id: order.source_purchase_task_id,
+        source_quote_photo_id: order.source_quote_photo_id,
+        source_quote_task_id: order.source_quote_task_id,
+        source_rebuy_task_id: order.source_rebuy_task_id,
+        staging_order_id: order.staging_order_id,
+        trip_id: job.trip_id,
+      };
+    });
+    const photoRows = [];
     for (const order of snapshot.orders || []) {
       const orderId = deterministicId("helper_order", job.id, order.reviewedOrderId);
-      const sourceLinkId = deterministicId("helper_source", job.id, order.reviewedOrderId);
-      mainOrderIds.push(orderId);
+      for (const photo of order.photos || []) {
+        const photoId = deterministicId("helper_photo", job.id, order.reviewedOrderId, photo.id);
+        photoRows.push({
+          final_storage_key: deterministicMainPhotoKey({
+            mergeJobId: job.id,
+            orderId,
+            photoId,
+            sourceStorageKey: photo.storageKey,
+          }),
+          label: photo.label || "",
+          order_id: orderId,
+          photo_id: photoId,
+          photo_role: photo.photoRole,
+          source_photo_id: photo.sourcePurchaseTaskPhotoId,
+          source_task_id: order.purchaseTaskId,
+          source_storage_key: photo.storageKey,
+          staging_order_photo_id: photo.id,
+        });
+      }
+    }
+    if (orderRows.length) {
       await client.query(
         `insert into main.orders
            (order_id, staging_order_id, merge_job_id, source_purchase_task_id,
@@ -3167,9 +3356,22 @@ async function mergeApprovedStagingJob(database, input) {
             appearance_notes, quantity, price_jpy, price_twd, total_price,
             search_keywords, source_trip, order_status, source_type,
             receivable_total_twd, processing_status, notes)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::date, $11, $12,
-                 $13, $14, $15, $16, $17, '', $18, '商品訂購成功',
-                 'helper_merge', $17, '商品訂購成功', $19)
+         select order_id, staging_order_id, merge_job_id, source_purchase_task_id,
+                source_quote_task_id, source_quote_photo_id, source_rebuy_task_id,
+                trip_id, helper_id, order_date, line_community_name, product_name,
+                appearance_notes, quantity, price_jpy, price_twd, total_price,
+                '', source_trip, '商品訂購成功', 'helper_merge',
+                receivable_total_twd, '商品訂購成功', notes
+         from jsonb_to_recordset($1::jsonb) as input(
+           order_id text, staging_order_id text, merge_job_id text,
+           source_purchase_task_id text, source_quote_task_id text,
+           source_quote_photo_id text, source_rebuy_task_id text,
+           trip_id text, helper_id text, order_date date,
+           line_community_name text, product_name text, appearance_notes text,
+           quantity integer, price_jpy integer, price_twd integer,
+           total_price integer, source_trip text,
+           receivable_total_twd integer, notes text
+         )
          on conflict (order_id) do update
          set line_community_name = excluded.line_community_name,
              product_name = excluded.product_name,
@@ -3180,92 +3382,66 @@ async function mergeApprovedStagingJob(database, input) {
              total_price = excluded.total_price,
              receivable_total_twd = excluded.receivable_total_twd,
              updated_at = now()`,
-        [
-          orderId,
-          order.reviewedOrderId,
-          job.id,
-          order.purchaseTaskId,
-          order.sourceQuoteTaskId,
-          order.sourceQuoteTaskPhotoId,
-          order.sourceRebuyTaskId,
-          job.trip_id,
-          order.helperId,
-          snapshot.trip?.business_date,
-          order.lineCommunityName,
-          order.productName,
-          order.appearanceNotes,
-          order.quantity,
-          order.originalPriceJpy || 0,
-          order.salePriceTwd,
-          order.quantity * order.salePriceTwd,
-          snapshot.trip?.trip_name || "",
-          order.customerConfirmed && !order.customerExists ? "Unknown customer explicitly confirmed during helper staging review." : null,
-        ],
+        [JSON.stringify(orderRows)],
       );
       await client.query(
         `insert into main.order_source_links
            (source_link_id, order_id, source_type, staging_order_id, merge_job_id,
             source_purchase_task_id, source_quote_task_id, source_quote_photo_id,
             source_rebuy_task_id, trip_id, helper_id, detail)
-         values ($1, $2, 'helper_merge', $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb)
+         select source_link_id, order_id, 'helper_merge', staging_order_id,
+                merge_job_id, source_purchase_task_id, source_quote_task_id,
+                source_quote_photo_id, source_rebuy_task_id, trip_id, helper_id,
+                detail
+         from jsonb_to_recordset($1::jsonb) as input(
+           source_link_id text, order_id text, staging_order_id text,
+           merge_job_id text, source_purchase_task_id text,
+           source_quote_task_id text, source_quote_photo_id text,
+           source_rebuy_task_id text, trip_id text, helper_id text,
+           detail jsonb
+         )
          on conflict (order_id) do update
          set detail = excluded.detail, updated_at = now()`,
-        [
-          sourceLinkId,
-          orderId,
-          order.reviewedOrderId,
-          job.id,
-          order.purchaseTaskId,
-          order.sourceQuoteTaskId,
-          order.sourceQuoteTaskPhotoId,
-          order.sourceRebuyTaskId,
-          job.trip_id,
-          order.helperId,
-          JSON.stringify({ stagingOrderPreviewId: order.stagingOrderPreviewId }),
-        ],
+        [JSON.stringify(sourceLinkRows)],
       );
-      for (const photo of order.photos || []) {
-        const photoId = deterministicId("helper_photo", job.id, order.reviewedOrderId, photo.id);
-        const finalStorageKey = deterministicMainPhotoKey({
-          mergeJobId: job.id,
-          orderId,
-          photoId,
-          sourceStorageKey: photo.storageKey,
-        });
-        if (r2Store) {
-          await r2Store.copyObject(photo.storageKey, finalStorageKey);
-          await client.query(
-            `insert into audit.merge_object_copies
-               (merge_job_id, order_photo_id, source_key, destination_key, action)
-             values ($1, $2, $3, $4, 'copied')
-             on conflict (merge_job_id, order_photo_id, destination_key) do nothing`,
-            [job.id, photoId, photo.storageKey, finalStorageKey],
-          );
-        }
-        await client.query(
-          `insert into main.order_photos
-             (order_photo_id, order_id, staging_order_photo_id, photo_type,
-              staging_storage_key, storage_key, url, source_task_id, source_photo_id,
-              uploaded_by, label, original_name, content_type)
-           values ($1, $2, $3, $4, $5, $6, '', $7, $8, 'helper_app', $9, null, null)
-           on conflict (order_photo_id) do update
-           set storage_key = excluded.storage_key,
-               staging_storage_key = excluded.staging_storage_key,
-               label = excluded.label,
-               updated_at = now()`,
-          [
-            photoId,
-            orderId,
-            photo.id,
-            photo.photoRole,
-            photo.storageKey,
-            finalStorageKey,
-            order.purchaseTaskId,
-            photo.sourcePurchaseTaskPhotoId,
-            photo.label || "",
-          ],
-        );
-      }
+    }
+    if (photoRows.length && r2Store) {
+      await Promise.all(photoRows.map((photo) => r2Store.copyObject(
+        photo.source_storage_key,
+        photo.final_storage_key,
+      )));
+      await client.query(
+        `insert into audit.merge_object_copies
+           (merge_job_id, order_photo_id, source_key, destination_key, action)
+         select $1, photo_id, source_storage_key, final_storage_key, 'copied'
+         from jsonb_to_recordset($2::jsonb) as input(
+           photo_id text, source_storage_key text, final_storage_key text
+         )
+         on conflict (merge_job_id, order_photo_id, destination_key) do nothing`,
+        [job.id, JSON.stringify(photoRows)],
+      );
+    }
+    if (photoRows.length) {
+      await client.query(
+        `insert into main.order_photos
+           (order_photo_id, order_id, staging_order_photo_id, photo_type,
+            staging_storage_key, storage_key, url, source_task_id, source_photo_id,
+            uploaded_by, label, original_name, content_type)
+         select photo_id, order_id, staging_order_photo_id, photo_role,
+                source_storage_key, final_storage_key, '', source_task_id,
+                source_photo_id, 'helper_app', label, null, null
+         from jsonb_to_recordset($1::jsonb) as input(
+           photo_id text, order_id text, staging_order_photo_id text,
+           photo_role text, source_storage_key text, final_storage_key text,
+           source_task_id text, source_photo_id text, label text
+         )
+         on conflict (order_photo_id) do update
+         set storage_key = excluded.storage_key,
+             staging_storage_key = excluded.staging_storage_key,
+             label = excluded.label,
+             updated_at = now()`,
+        [JSON.stringify(photoRows)],
+      );
     }
     const result = await client.query(
       `update helper_app.staging_merge_jobs
@@ -5025,6 +5201,7 @@ module.exports = {
   searchCustomerNicknames,
   reviewSettlement,
   rejectStagingMergeJob,
+  setReviewedStagingOrderSelection,
   setSettlementExchangeRate,
   reviewWarehouseProof,
   reviewFaceCheckPurchaseTask,

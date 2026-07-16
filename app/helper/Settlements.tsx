@@ -453,6 +453,7 @@ async function uploadSettlementEvidencePhoto({
       body: JSON.stringify({
         clientPhotoId: photo.clientPhotoId,
         contentType: photo.contentType,
+        byteSize: photo.byteSize,
         evidenceType,
         fileName: photo.originalFilename,
         settlementId,

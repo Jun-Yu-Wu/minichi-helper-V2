@@ -7,7 +7,7 @@ helper login for every visual walkthrough.
 ## Login
 
 - Email: `codex.acceptance@minichi.test`
-- Password: `MinichiCodex1224!`
+- Password: supplied through the local `CODEX_ACCEPTANCE_PASSWORD` environment variable; it is intentionally not documented or printed by the script.
 - Display name: `Codex 驗收小幫手`
 - Role: helper profile in `helper_app.helper_profiles`
 - Region: `Tokyo`
@@ -20,13 +20,14 @@ multiple helpers, inactive helpers, or disposable isolation data.
 Run this command from `minichi_helper_system/` to create or repair the account:
 
 ```bash
+export CODEX_ACCEPTANCE_PASSWORD='use-a-new-random-password-here'
 npm run acceptance:ensure-codex-account
 ```
 
 The script is idempotent:
 
 - If the Supabase Auth user does not exist, it creates and confirms the user.
-- If the user already exists, it refreshes the fixed password and metadata.
+- If the user already exists, it refreshes the environment-provided password and metadata.
 - It upserts an active helper profile bound to the Auth user id.
 
 The account is intentionally not an automated-test fixture and should not be

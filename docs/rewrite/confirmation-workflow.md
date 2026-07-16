@@ -64,6 +64,29 @@ front-end loading strategy pass:
   role-based walkthrough checklist for helper and admin pages. Real production
   hardening, full dress rehearsal, and launch-readiness testing are Slice 9.
 
+#### Slice 8 follow-up Batch 12 implementation pass on 2026-07-13
+
+The first Batch 12 implementation pass completed the cross-system state and
+recoverability baseline without expanding business scope:
+
+- Admin, helper, and login routes have role-specific loading skeletons; the
+  application has a clear not-found page and keeps the existing error boundary.
+- Shared retryable error presentation uses `role="alert"` and live status
+  semantics. Server Action button forms keep failures in place and expose a
+  retry action instead of losing the user's current workflow context.
+- Helper quote/detail, purchase, rebuy, and admin live photo/quote/purchase
+  workspaces expose scoped list/detail retry actions. Polling and selected
+  detail refreshes remain scoped to the current trip/task and do not sign extra
+  media.
+- `prefers-reduced-motion` is respected globally. Existing mobile tap targets,
+  private R2 `storage_key` durability, selected-detail-only signed URLs, and
+  staging/main boundaries are unchanged.
+
+This is an implementation pass, not yet the final Batch 12 product acceptance.
+Authenticated mobile/desktop walkthrough still needs to verify retry behavior,
+keyboard focus, reduced-motion presentation, and real warm route/mutation timing
+with the fixed helper/admin acceptance accounts.
+
 #### Slice 8 follow-up batches confirmed on 2026-07-02
 
 The detailed Slice 8 follow-up is split into twelve user-reviewed batches. Each

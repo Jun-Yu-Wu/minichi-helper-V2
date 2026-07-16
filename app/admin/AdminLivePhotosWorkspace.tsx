@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "../components/ui/button";
+import { RetryableError } from "../components/RetryableState";
 import { cn } from "../../src/lib/utils";
 
 type Trip = {
@@ -43,6 +44,8 @@ export function AdminLivePhotosWorkspace({
   const [loadingTrips, setLoadingTrips] = useState(true);
   const [loadingPhotos, setLoadingPhotos] = useState(false);
   const [message, setMessage] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [tripsRefreshNonce, setTripsRefreshNonce] = useState(0);
   const [photoRefreshNonce, setPhotoRefreshNonce] = useState(0);
 
   const batchNames = useMemo(() => buildBatchNames(batches), [batches]);
@@ -66,11 +69,12 @@ export function AdminLivePhotosWorkspace({
         if (!response.ok) throw new Error(data.error || "載入失敗");
         if (!canceled) {
           setTrips(data.trips || []);
+          setLoadError("");
           setLoadingTrips(false);
         }
       } catch (error) {
         if (!canceled) {
-          setMessage(error instanceof Error ? error.message : "載入失敗");
+          setLoadError(error instanceof Error ? error.message : "即時行程載入失敗。");
           setLoadingTrips(false);
         }
       }
@@ -82,7 +86,7 @@ export function AdminLivePhotosWorkspace({
       canceled = true;
       if (timer) clearInterval(timer);
     };
-  }, []);
+  }, [tripsRefreshNonce]);
 
   useEffect(() => {
     if (!selectedTripId) {
@@ -105,6 +109,7 @@ export function AdminLivePhotosWorkspace({
         if (!response.ok) throw new Error(data.error || "載入失敗");
         if (!canceled) {
           setBatches(data.batches || []);
+          setLoadError("");
           setSelectedPhotoIds((current) => {
             const available = new Set(
               (data.batches || []).flatMap((batch: SitePhotoBatch) =>
@@ -115,7 +120,7 @@ export function AdminLivePhotosWorkspace({
           });
         }
       } catch (error) {
-        if (!canceled) setMessage(error instanceof Error ? error.message : "載入失敗");
+        if (!canceled) setLoadError(error instanceof Error ? error.message : "現場照片載入失敗。");
       } finally {
         if (!canceled) setLoadingPhotos(false);
       }
@@ -325,7 +330,19 @@ export function AdminLivePhotosWorkspace({
         </div>
       ) : null}
 
-      {message ? <p className="text-sm text-muted-foreground">{message}</p> : null}
+      {loadError ? (
+        <RetryableError
+          message={loadError}
+          onRetry={() => {
+            if (selectedTripId) setPhotoRefreshNonce((value) => value + 1);
+            else {
+              setLoadingTrips(true);
+              setTripsRefreshNonce((value) => value + 1);
+            }
+          }}
+        />
+      ) : null}
+      {message ? <p aria-live="polite" className="text-sm text-muted-foreground" role="status">{message}</p> : null}
 
       {selectedTripId ? (
         loadingPhotos && !batches.length ? (

@@ -1249,6 +1249,7 @@ async function uploadAdminTaskPhoto(photo: AdminTaskUploadPhoto, tripId: string)
     body: JSON.stringify({
       clientPhotoId: photo.clientPhotoId,
       contentType: photo.contentType,
+      byteSize: photo.byteSize,
       fileName: photo.originalFilename,
       tripId,
       uploadPurpose: "admin_quote_task_photo",
@@ -1272,6 +1273,7 @@ async function uploadAdminRebuyReferencePhoto(photo: AdminTaskUploadPhoto) {
     body: JSON.stringify({
       clientPhotoId: photo.clientPhotoId,
       contentType: photo.contentType,
+      byteSize: photo.byteSize,
       fileName: photo.originalFilename,
       uploadPurpose: "admin_rebuy_reference",
     }),
