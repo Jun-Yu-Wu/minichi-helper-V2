@@ -14,7 +14,10 @@ function loadLocalEnv(rootDir = process.cwd()) {
       const key = trimmed.slice(0, equalsIndex).trim();
       const rawValue = trimmed.slice(equalsIndex + 1).trim();
       if (process.env[key]) continue;
-      process.env[key] = rawValue.replace(/^['"]|['"]$/g, "");
+      process.env[key] = rawValue
+        .replace(/^['"]|['"]$/g, "")
+        .replace(/\\n/g, "\n")
+        .replace(/\\r/g, "\r");
     }
   }
 }

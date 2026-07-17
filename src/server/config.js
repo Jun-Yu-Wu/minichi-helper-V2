@@ -2,9 +2,11 @@ const path = require("node:path");
 
 const { loadLocalEnv } = require("./load-local-env");
 
-const appRoot = process.cwd();
+// Resolve the clean helper app root from this module instead of process.cwd().
+// This prevents starting the app from the repository root from accidentally
+// loading the legacy parent .env file.
+const appRoot = path.resolve(__dirname, "../..");
 loadLocalEnv(appRoot);
-loadLocalEnv(path.resolve(appRoot, ".."));
 
 function requiredEnv(name) {
   const value = String(process.env[name] || "").trim();
