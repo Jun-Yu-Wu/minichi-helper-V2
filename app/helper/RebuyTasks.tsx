@@ -3,7 +3,6 @@
 import type React from "react";
 import { useEffect, useRef, useState } from "react";
 import {
-  ArrowLeft,
   CheckCircle2,
   ChevronRight,
   ImageUp,
@@ -13,6 +12,7 @@ import {
 } from "lucide-react";
 
 import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
+import { BackButton } from "../components/BackButton";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
 
@@ -91,10 +91,7 @@ export function RebuyTasks({
     const task = activeTask;
     return (
       <section className="grid gap-4">
-        <Button className="w-fit" size="sm" type="button" variant="ghost" onClick={closeTask}>
-          <ArrowLeft className="mr-2 size-4" />
-          返回補買列表
-        </Button>
+        <BackButton label="返回補買列表" onClick={closeTask} type="button" />
         {detailLoading && !task ? (
           <Surface className="grid gap-3">
             <div className="grid gap-3" aria-label="正在載入補買任務" role="status">
@@ -146,10 +143,11 @@ export function RebuyTasks({
 
   return (
     <Surface className="grid gap-4">
-      <Button className="w-fit" size="sm" type="button" variant="ghost" onClick={() => setCurrentSection(undefined)}>
-        <ArrowLeft className="mr-2 size-4" />
-        返回補買區
-      </Button>
+      <BackButton
+        label="返回補買區"
+        onClick={() => setCurrentSection(undefined)}
+        type="button"
+      />
       <div className="flex items-start justify-between gap-3">
         <h5 className="text-xl font-semibold tracking-tight">
           {currentSection === "public" ? "公共補買" : "我的補買"}

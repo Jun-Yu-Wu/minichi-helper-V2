@@ -5,8 +5,10 @@ import { useCallback, useEffect, useState } from "react";
 import { ChevronRight, RefreshCw } from "lucide-react";
 
 import { EmptyState, InsightBanner } from "../components/OperationsUi";
+import { BackButton } from "../components/BackButton";
 import { Button } from "../components/ui/button";
 import { SitePhotoUploader } from "./SitePhotoUploader";
+import { useTripSectionNavigation } from "./TripSectionSwitcher";
 
 type BatchSummary = {
   batch_number: number;
@@ -17,6 +19,7 @@ type BatchSummary = {
 };
 
 export function SitePhotoWorkspace({ tripId }: { tripId: string }) {
+  const navigation = useTripSectionNavigation();
   const [batches, setBatches] = useState<BatchSummary[]>([]);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -54,6 +57,12 @@ export function SitePhotoWorkspace({ tripId }: { tripId: string }) {
 
   return (
     <section className="grid gap-4 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
+      <BackButton
+        label="返回連線"
+        onClick={() => navigation?.openWork()}
+        type="button"
+        variant="outline"
+      />
       <div>
         <p className="text-xs font-semibold uppercase text-muted-foreground">區塊一</p>
         <h5 className="mt-1 text-xl font-semibold tracking-tight">現場大圖</h5>

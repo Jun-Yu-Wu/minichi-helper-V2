@@ -1,5 +1,6 @@
 import Link from "next/link";
 
+import { BackLink } from "./BackButton";
 import { Button } from "./ui/button";
 
 export function AuthRequired({
@@ -22,12 +23,7 @@ export function AuthRequired({
         <Button asChild size="lg">
           <Link href={`/login?next=${encodeURIComponent(next)}`}>前往登入</Link>
         </Button>
-        <Link
-          className="inline-flex min-h-11 items-center justify-center text-center text-sm font-medium text-muted-foreground hover:text-foreground"
-          href="/"
-        >
-          返回系統入口
-        </Link>
+        <BackLink href="/" label="返回系統入口" />
       </div>
     </main>
   );

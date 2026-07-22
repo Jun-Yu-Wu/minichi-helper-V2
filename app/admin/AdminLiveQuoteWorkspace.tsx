@@ -1,10 +1,11 @@
 "use client";
 
-import { ArrowLeft, Check, Download, RefreshCw, Share2, X } from "lucide-react";
+import { Check, Download, RefreshCw, Share2, X } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "../components/ui/button";
+import { BackButton } from "../components/BackButton";
 import { StatusBadge } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { cn } from "../../src/lib/utils";
@@ -317,10 +318,7 @@ export function AdminLiveQuoteWorkspace({
 
       {selectedTripId && activeTaskId ? (
         <section className="grid gap-4">
-          <Button className="w-fit" size="sm" type="button" variant="ghost" onClick={closeTask}>
-            <ArrowLeft className="size-4" />
-            回任務列表
-          </Button>
+          <BackButton label="返回任務列表" onClick={closeTask} type="button" />
 
           {loadingDetail && !activeTask ? (
             <div className="grid gap-3">

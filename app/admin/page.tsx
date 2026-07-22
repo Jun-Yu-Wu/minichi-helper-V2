@@ -1,7 +1,6 @@
 import Link from "next/link";
 import type React from "react";
 import {
-  ArrowLeft,
   CalendarDays,
   Camera,
   ChevronRight,
@@ -30,6 +29,7 @@ import {
   setReviewedStagingOrderSelectionAction,
 } from "../actions/admin";
 import { ActionButtonForm } from "../components/ActionButtonForm";
+import { BackLink } from "../components/BackButton";
 import { ServerActionForm } from "../components/ServerActionForm";
 import { SettlementAmountHero } from "../components/SettlementUi";
 import {
@@ -290,12 +290,7 @@ function AdminCheckout({
     return (
       <section className="grid gap-4">
         <div className="flex items-center justify-between gap-3">
-          <Button asChild size="sm" variant="ghost">
-            <Link href="/admin?view=checkout">
-              <ArrowLeft className="mr-2 size-4" />
-              返回結帳
-            </Link>
-          </Button>
+          <BackLink href="/admin?view=checkout" label="返回結帳" />
           {settlement ? (
             <StatusBadge tone={adminSettlementTone(settlement)}>
               {adminSettlementBadgeLabel(settlement)}
@@ -777,14 +772,7 @@ function AdminRebuyList({
 }
 
 function RebuyBackButton({ href, label }: { href: string; label: string }) {
-  return (
-    <Button asChild className="w-fit" size="sm" variant="ghost">
-      <Link href={href}>
-        <ArrowLeft className="mr-2 size-4" />
-        {label}
-      </Link>
-    </Button>
-  );
+  return <BackLink href={href} label={label} />;
 }
 
 function helperRebuyHref(helperId: string) {
@@ -1455,12 +1443,7 @@ function StagingMergeJobDetail({ job, selectedOrderId }: { job: any; selectedOrd
   return (
     <section className="grid gap-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <Button asChild size="sm" variant="ghost">
-          <Link href="/admin?view=merge">
-            <ArrowLeft className="mr-2 size-4" />
-            返回批次清單
-          </Link>
-        </Button>
+        {!selectedOrderId ? <BackLink href="/admin?view=merge" label="返回批次清單" /> : null}
         <StatusBadge tone={mergeStatusTone(job.status)}>{mergeStatusLabel(job.status)}</StatusBadge>
       </div>
       <Surface className="grid gap-4">
@@ -1556,12 +1539,10 @@ function StagingReviewedOrderDetail({ job, order }: { job: any; order: any }) {
   const batchHref = `/admin?view=merge&mergeJobId=${encodeURIComponent(job.id)}`;
   return (
     <section className="grid gap-4">
-      <Button asChild className="w-fit" size="sm" variant="ghost">
-        <Link href={`/admin?view=merge&mergeJobId=${encodeURIComponent(job.id)}`}>
-          <ArrowLeft className="mr-2 size-4" />
-          返回訂單清單
-        </Link>
-      </Button>
+      <BackLink
+        href={`/admin?view=merge&mergeJobId=${encodeURIComponent(job.id)}`}
+        label="返回訂單清單"
+      />
       <Surface className="grid gap-4">
         <div className="flex flex-wrap items-center gap-2">
           <StatusBadge tone={order.is_excluded ? "neutral" : "green"}>

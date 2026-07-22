@@ -1,6 +1,4 @@
-import Link from "next/link";
-
-import { Button } from "./components/ui/button";
+import { BackLink } from "./components/BackButton";
 
 export default function NotFound() {
   return (
@@ -11,9 +9,7 @@ export default function NotFound() {
         <p className="text-sm leading-6 text-muted-foreground">
           這個連結可能已失效，或工作內容已經被更新。請回到入口重新選擇工作台。
         </p>
-        <Button asChild className="mt-1">
-          <Link href="/">返回系統入口</Link>
-        </Button>
+        <BackLink className="mt-1" href="/" label="返回系統入口" />
       </section>
     </main>
   );

@@ -2,7 +2,6 @@ import Link from "next/link";
 import type React from "react";
 import {
   AlertCircle,
-  ArrowLeft,
   CalendarDays,
   CreditCard,
   MapPin,
@@ -17,6 +16,7 @@ import {
   departTripAction,
 } from "../actions/helper";
 import { ActionButtonForm } from "../components/ActionButtonForm";
+import { BackLink } from "../components/BackButton";
 import {
   EmptyState,
   InsightBanner,
@@ -191,9 +191,7 @@ function HelperSettlements({
     return (
       <section className="grid gap-4">
         <div className="flex items-center justify-between gap-3">
-          <Button asChild size="sm" variant="ghost">
-            <Link href="/helper?view=settlement">返回結帳</Link>
-          </Button>
+          <BackLink href="/helper?view=settlement" label="返回結帳" />
           <StatusBadge tone={selectedSettlement.status === "completed" ? "green" : "blue"}>
             {settlementStageLabel(selectedSettlement)}
           </StatusBadge>
@@ -325,9 +323,7 @@ function HelperWarehouse({ selectedSettlementId, settlements }: { selectedSettle
   if (selectedSettlement) {
     return (
       <section className="grid gap-4">
-        <Button asChild className="w-fit" size="sm" variant="ghost">
-          <Link href="/helper?view=warehouse">返回集運回報</Link>
-        </Button>
+        <BackLink href="/helper?view=warehouse" label="返回集運回報" />
         <SectionHeader eyebrow="集運回報" title={selectedSettlement.trip_name} />
         <InsightBanner body="請上傳商品送去集運的照片，送出後會交由管理員審核。" title="回報送去集運的照片" tone="amber" />
         <WarehouseProofForm settlement={selectedSettlement} />
@@ -616,17 +612,12 @@ function TripDetail({
 
 function ReturnToTripsButton() {
   return (
-    <Button
-      asChild
-      className="w-fit justify-start border-border/80 bg-background px-2.5 text-xs shadow-sm"
-      size="sm"
+    <BackLink
+      className="border-border/80 bg-background shadow-sm"
+      href="/helper?view=trips"
+      label="返回行程列表"
       variant="outline"
-    >
-      <Link href="/helper?view=trips">
-        <ArrowLeft className="size-4" />
-        返回行程列表
-      </Link>
-    </Button>
+    />
   );
 }
 
@@ -735,7 +726,6 @@ function TripWorkspace({
         chrome={chrome}
         connection={connectionPanel}
         detail={purchasePanel}
-        hideBackInDetail
         hideChromeInDetail
         hideNavInDetail
         initialSection="overview"
@@ -754,7 +744,6 @@ function TripWorkspace({
         chrome={chrome}
         connection={connectionPanel}
         detail={purchasePanel}
-        hideBackInDetail
         hideChromeInDetail
         hideNavInDetail
         initialSection="work"
@@ -788,7 +777,6 @@ function TripWorkspace({
       chrome={chrome}
       connection={connectionPanel}
       detail={detailPanel}
-      hideBackInDetail={panel === "purchase"}
       hideChromeInDetail={panel === "site" || panel === "quote" || panel === "purchase"}
       hideNavInDetail={panel === "purchase"}
       initialSection={panel === "quote" ? "quote" : "detail"}
@@ -933,12 +921,12 @@ function SitePhotoBatchDetail({
 }) {
   return (
     <div className="grid gap-3">
-      <Button asChild className="w-fit" size="sm" variant="outline">
-        <Link href={`/helper?tripId=${tripId}&panel=site`}>
-          <ArrowLeft className="size-4" />
-          返回批次列表
-        </Link>
-      </Button>
+      <BackLink
+        className="border-border/80 bg-background shadow-sm"
+        href={`/helper?tripId=${tripId}&panel=site`}
+        label="返回批次列表"
+        variant="outline"
+      />
       {batch ? (
         <>
           <div>

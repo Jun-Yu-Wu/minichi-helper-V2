@@ -1,6 +1,7 @@
 "use client";
 
 import { useActionState, useState } from "react";
+import { X } from "lucide-react";
 
 import { endTripAction, type HelperActionResult } from "../actions/helper";
 import { Button } from "../components/ui/button";
@@ -42,13 +43,15 @@ export function EndTripForm({
       <p className="text-sm font-semibold text-destructive">確認要結束這趟行程？</p>
       <div className="grid gap-3">
         <Button
-          className="w-fit justify-self-start"
+          aria-label="取消結束行程"
+          className="justify-self-start"
           disabled={pending}
           onClick={() => setConfirming(false)}
+          title="取消結束行程"
           type="button"
           variant="outline"
         >
-          返回上一頁
+          <X aria-hidden="true" className="size-5" />
         </Button>
         <Button
           className="mx-auto w-fit"

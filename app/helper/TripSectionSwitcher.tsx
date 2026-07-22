@@ -2,7 +2,7 @@
 
 import type { ReactNode } from "react";
 import { createContext, useContext, useState } from "react";
-import { ArrowLeft, Camera, CheckCircle2 } from "lucide-react";
+import { Camera, CheckCircle2 } from "lucide-react";
 
 import { Button } from "../components/ui/button";
 
@@ -23,7 +23,6 @@ export function TripSectionSwitcher({
   chrome,
   connection,
   detail,
-  hideBackInDetail = false,
   hideChromeInDetail = false,
   hideNavInDetail = false,
   initialSection,
@@ -35,7 +34,6 @@ export function TripSectionSwitcher({
   chrome: ReactNode;
   connection: ReactNode;
   detail?: ReactNode;
-  hideBackInDetail?: boolean;
   hideChromeInDetail?: boolean;
   hideNavInDetail?: boolean;
   initialSection: TripSection;
@@ -78,18 +76,6 @@ export function TripSectionSwitcher({
             : chrome}
         {["detail", "quote", "site"].includes(activeSection) ? (
           <div className="grid gap-4">
-            {hideBackInDetail && activeSection === "detail" ? null : (
-              <Button
-                className="w-fit justify-start px-2.5 text-xs"
-                onClick={() => setActiveSection("work")}
-                size="sm"
-                type="button"
-                variant="outline"
-              >
-                <ArrowLeft className="size-4" />
-                返回連線
-              </Button>
-            )}
             {activeSection === "site"
               ? site
               : activeSection === "quote"

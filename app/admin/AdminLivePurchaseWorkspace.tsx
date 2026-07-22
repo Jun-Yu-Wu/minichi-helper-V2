@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useState, useTransition } from "react";
 
@@ -8,6 +8,7 @@ import { reviewFaceCheckPurchaseAction } from "../actions/admin";
 import { InsightBanner, StatusBadge } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
+import { BackButton } from "../components/BackButton";
 import { cn } from "../../src/lib/utils";
 import { useAdminLiveTrips, type AdminLiveTrip } from "./useAdminLiveTrips";
 
@@ -293,10 +294,7 @@ export function AdminLivePurchaseWorkspace({
 
       {selectedTripId && activeTaskId ? (
         <section className="grid gap-4">
-          <Button className="w-fit" size="sm" type="button" variant="ghost" onClick={closeTask}>
-            <ArrowLeft className="size-4" />
-            回任務列表
-          </Button>
+          <BackButton label="返回任務列表" onClick={closeTask} type="button" />
 
           {loadingDetail && !activeTask ? (
             <div className="grid gap-3">

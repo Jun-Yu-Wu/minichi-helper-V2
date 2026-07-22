@@ -2,11 +2,13 @@
 
 import type { FormEvent } from "react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Camera, CheckCircle2, ChevronLeft, ChevronRight, Pencil, RefreshCw, X } from "lucide-react";
+import { Camera, CheckCircle2, ChevronLeft, ChevronRight, Pencil, RefreshCw, X } from "lucide-react";
 
+import { BackButton } from "../components/BackButton";
 import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
+import { useTripSectionNavigation } from "./TripSectionSwitcher";
 
 type UploadStatus = "selected" | "uploading" | "uploaded" | "failed";
 
@@ -24,6 +26,7 @@ type DetailPhoto = {
 };
 
 export function QuoteTaskWorkspace({ tripId }: { tripId: string }) {
+  const navigation = useTripSectionNavigation();
   const [tasks, setTasks] = useState<any[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeTask, setActiveTask] = useState<any | null>(null);
@@ -147,7 +150,6 @@ export function QuoteTaskWorkspace({ tripId }: { tripId: string }) {
         onBack={closeTask}
         onPhotoIndexChange={setPhotoIndex}
         onRefresh={() => loadTask(activeTaskId)}
-        onReturnToList={closeTask}
         onSubmitted={handleReplySubmitted}
       />
     );
@@ -158,6 +160,7 @@ export function QuoteTaskWorkspace({ tripId }: { tripId: string }) {
       error={listError}
       loading={listLoading}
       tasks={tasks}
+      onBack={() => navigation?.openWork()}
       onOpenTask={openTask}
       onRefresh={() => loadTasks()}
     />
@@ -167,12 +170,14 @@ export function QuoteTaskWorkspace({ tripId }: { tripId: string }) {
 function QuoteTaskList({
   error,
   loading,
+  onBack,
   onOpenTask,
   onRefresh,
   tasks,
 }: {
   error: string;
   loading: boolean;
+  onBack: () => void;
   onOpenTask: (taskId: string) => void;
   onRefresh: () => void;
   tasks: any[];
@@ -183,6 +188,7 @@ function QuoteTaskList({
 
   return (
     <Surface className="grid gap-4">
+      <BackButton label="返回連線" onClick={onBack} type="button" variant="outline" />
       <div className="flex items-start justify-between gap-3">
         <div>
           <h5 className="text-xl font-semibold tracking-tight">報價／細圖</h5>
@@ -283,7 +289,6 @@ function QuoteTaskDetail({
   onBack,
   onPhotoIndexChange,
   onRefresh,
-  onReturnToList,
   onSubmitted,
   photoIndex,
   task,
@@ -294,7 +299,6 @@ function QuoteTaskDetail({
   onBack: () => void;
   onPhotoIndexChange: (index: number) => void;
   onRefresh: () => void;
-  onReturnToList: () => void;
   onSubmitted: (photoId: string, replyPatch?: any) => void;
   photoIndex: number;
   task: any | null;
@@ -306,10 +310,7 @@ function QuoteTaskDetail({
 
   return (
     <Surface className="grid gap-4">
-      <Button className="w-fit" size="sm" type="button" variant="ghost" onClick={onBack}>
-        <ArrowLeft className="size-4" />
-        回任務列表
-      </Button>
+      <BackButton label="返回任務列表" onClick={onBack} type="button" />
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-xs font-semibold uppercase text-muted-foreground">
@@ -363,7 +364,6 @@ function QuoteTaskDetail({
             key={currentPhoto.id}
             photo={currentPhoto}
             taskType={task.task_type}
-            onReturnToList={onReturnToList}
             onSubmitted={onSubmitted}
           />
         </>
@@ -413,12 +413,10 @@ function firstUnrepliedPhotoIndex(photos: any[]) {
 }
 
 function QuotePhotoReplyForm({
-  onReturnToList,
   onSubmitted,
   photo,
   taskType,
 }: {
-  onReturnToList: () => void;
   onSubmitted?: (photoId: string, replyPatch?: any) => void;
   photo: any;
   taskType: string;
@@ -684,9 +682,6 @@ function QuotePhotoReplyForm({
               <p className="mt-1 text-emerald-900/80">管理員現在可以看到這張照片的回覆。</p>
             </div>
           </div>
-          <Button className="w-full" type="button" onClick={onReturnToList}>
-            回到報價／細圖
-          </Button>
         </div>
       ) : null}
 

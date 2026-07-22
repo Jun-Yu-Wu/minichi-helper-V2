@@ -1,8 +1,9 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, Camera, Check, ChevronLeft, ChevronRight, PackageCheck, RefreshCw, ShoppingBag, X } from "lucide-react";
+import { Camera, Check, ChevronLeft, ChevronRight, PackageCheck, RefreshCw, ShoppingBag, X } from "lucide-react";
 
+import { BackButton } from "../components/BackButton";
 import { EmptyState, InsightBanner, StatusBadge, Surface } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
@@ -162,10 +163,12 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
   if (!tasks.length) {
     return (
       <Surface className="grid gap-4">
-        <Button className="w-fit justify-start px-2.5 text-xs" size="sm" type="button" variant="outline" onClick={() => navigation?.openWork()}>
-          <ArrowLeft className="size-4" />
-          返回連線
-        </Button>
+        <BackButton
+          label="返回連線"
+          onClick={() => navigation?.openWork()}
+          type="button"
+          variant="outline"
+        />
         {listLoading ? (
           <div className="grid gap-2" aria-label="正在載入採買任務" role="status">
             <div className="h-20 animate-pulse rounded-xl bg-muted" />
@@ -205,10 +208,7 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
   ];
   return (
     <Surface className="grid gap-4">
-      <Button className="w-fit justify-start px-2.5 text-xs" size="sm" type="button" variant="outline" onClick={() => navigation?.openWork()}>
-        <ArrowLeft className="size-4" />
-        返回連線
-      </Button>
+      <BackButton label="返回連線" onClick={() => navigation?.openWork()} type="button" variant="outline" />
       {listError ? (
         <RetryableError message={listError} onRetry={() => loadTasks(undefined, true)} />
       ) : null}
@@ -329,10 +329,7 @@ function PurchaseTaskDetail({
   const isCanceled = task ? isCanceledTask(task) : false;
   return (
     <Surface className="grid gap-3">
-      <Button className="w-fit px-2.5 text-xs" size="sm" type="button" variant="ghost" onClick={onBack}>
-        <ArrowLeft className="size-4" />
-        回任務列表
-      </Button>
+      <BackButton label="返回任務列表" onClick={onBack} type="button" />
       {loading && !task ? (
         <div className="grid gap-3" role="status" aria-label="正在載入採買任務">
           <div className="aspect-square animate-pulse rounded-lg bg-muted" />

@@ -1,6 +1,6 @@
 import { Suspense } from "react";
-import Link from "next/link";
 
+import { BackLink } from "../components/BackButton";
 import { LoginForm } from "./LoginForm";
 
 export default function LoginPage() {
@@ -24,12 +24,7 @@ export default function LoginPage() {
         >
           <LoginForm />
         </Suspense>
-        <Link
-          className="inline-flex min-h-11 items-center justify-center text-center text-sm font-medium text-muted-foreground hover:text-foreground"
-          href="/"
-        >
-          返回系統入口
-        </Link>
+        <BackLink href="/" label="返回系統入口" />
       </div>
     </main>
   );
