@@ -1275,28 +1275,93 @@ async function listAuthorizedHelperSitePhotoBatchSummaries(
               (row_number() over (
                 partition by b.trip_id
                 order by b.created_at asc, b.id asc
-              ))::int as batch_number,
-              (select count(*)::int
-               from helper_app.site_photos p
-               where p.batch_id = b.id) as photo_count
+              ))::int as batch_number
        from helper_app.site_photo_batches b
        join authorized_trip permitted
          on permitted.trip_id = b.trip_id
         and permitted.helper_id = b.helper_id
+     ),
+     photo_counts as (
+       select p.batch_id, count(*)::int as photo_count
+       from helper_app.site_photos p
+       join authorized_trip permitted on permitted.trip_id = p.trip_id
+       group by p.batch_id
      )
      select permitted.trip_id, permitted.helper_id,
             b.id, b.note, b.status, b.created_at, b.updated_at,
-            b.batch_number, b.photo_count
+            b.batch_number, coalesce(pc.photo_count, 0)::int as photo_count
      from authorized_trip permitted
      left join ranked_batches b
        on b.trip_id = permitted.trip_id
       and b.helper_id = permitted.helper_id
+     left join photo_counts pc on pc.batch_id = b.id
      order by b.created_at desc nulls last, b.id desc nulls last`,
     [authUserId, tripId],
   );
   return {
     authorized: result.rows.length > 0,
     batches: result.rows.filter((row) => row.id),
+  };
+}
+
+async function getAuthorizedHelperSitePhotoBatchDetail(
+  database,
+  { authUserId, batchId, tripId },
+) {
+  const result = await database.query(
+    `with authorized_batch as (
+       select b.*
+       from helper_app.site_photo_batches b
+       join helper_app.trips t on t.id = b.trip_id
+       join helper_app.helper_profiles hp
+         on hp.id = b.helper_id
+        and hp.id = t.assigned_helper_id
+       where b.id = $1::uuid
+         and b.trip_id = $2::uuid
+         and hp.auth_user_id = $3
+         and hp.is_active = true
+         and t.status = 'active'
+     ),
+     ranked_batches as (
+       select source.id,
+              (row_number() over (
+                partition by source.trip_id
+                order by source.created_at asc, source.id asc
+              ))::int as batch_number
+       from helper_app.site_photo_batches source
+       join authorized_batch selected on selected.trip_id = source.trip_id
+     )
+     select b.id, b.trip_id, b.helper_id, b.note, b.status,
+            b.created_at, b.updated_at, ranked.batch_number,
+            count(p.id)::int as photo_count,
+            coalesce(
+              jsonb_agg(
+                jsonb_build_object(
+                  'id', p.id,
+                  'client_photo_id', p.client_photo_id,
+                  'storage_key', p.storage_key,
+                  'original_filename', p.original_filename,
+                  'content_type', p.content_type,
+                  'byte_size', p.byte_size,
+                  'sort_order', p.sort_order,
+                  'saved_by_admin', p.saved_by_admin,
+                  'saved_at', p.saved_at,
+                  'created_at', p.created_at
+                )
+                order by p.sort_order asc
+              ) filter (where p.id is not null),
+              '[]'::jsonb
+            ) as photos
+     from authorized_batch b
+     join ranked_batches ranked on ranked.id = b.id
+     left join helper_app.site_photos p on p.batch_id = b.id
+     group by b.id, b.trip_id, b.helper_id, b.note, b.status,
+              b.created_at, b.updated_at, ranked.batch_number`,
+    [batchId, tripId, authUserId],
+  );
+  return {
+    authorized: result.rows.length > 0,
+    batch: result.rows[0] || null,
   };
 }
 
@@ -1319,6 +1384,11 @@ async function listHelperSitePhotoBatchDetail(
                 order by source.created_at asc, source.id asc
               ))::int as batch_number
        from helper_app.site_photo_batches source
+       where source.trip_id = (
+         select selected.trip_id
+         from helper_app.site_photo_batches selected
+         where selected.id = $1
+       )
      )
      select b.id, b.trip_id, b.helper_id, b.note, b.status,
             b.created_at, b.updated_at, b.batch_number,
@@ -5288,6 +5358,7 @@ module.exports = {
   listRebuyTasks,
   listSettlements,
   listAuthorizedHelperSitePhotoBatchSummaries,
+  getAuthorizedHelperSitePhotoBatchDetail,
   listSitePhotoBatches,
   listSitePhotoBatchSummaries,
   listStagingMergeJobs,

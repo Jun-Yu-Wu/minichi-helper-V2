@@ -37,6 +37,7 @@ import { ConnectionPanel } from "./ConnectionPanel";
 import { OptimisticTripGroup } from "./OptimisticTripGroup";
 import { QuoteTaskWorkspace } from "./QuoteTaskReplies";
 import { RebuyTasks } from "./RebuyTasks";
+import { SitePhotoBatchDetail } from "./SitePhotoBatchDetail";
 import { SitePhotoWorkspace } from "./SitePhotoWorkspace";
 import { SettlementPrecheckForm, WarehouseProofForm } from "./Settlements";
 import { SettlementAutoRefresh } from "./SettlementAutoRefresh";
@@ -128,11 +129,6 @@ export default async function HelperPage({
   const selectedTripCanBeOpened = Boolean(
     selectedTrip && !["ended", "canceled"].includes(selectedTrip.status),
   );
-  const shouldSignTripMedia = Boolean(selectedTrip?.status === "active");
-  const signedBatchesByTripId =
-    shouldSignTripMedia && panel === "site" && Boolean(params.batchId)
-      ? await signBatchesByTripId(unsignedBatchesByTripId)
-      : unsignedBatchesByTripId;
   const shouldSignSettlementMedia =
     (view === "settlement" && Boolean(params.settlementId)) ||
     view === "warehouse";
@@ -151,7 +147,7 @@ export default async function HelperPage({
 
   return selectedTrip ? (
     <TripDetail
-      batches={signedBatchesByTripId[selectedTrip.id] || []}
+      batches={unsignedBatchesByTripId[selectedTrip.id] || []}
       selectedBatchId={params.batchId}
       canOperate={selectedTripCanBeOpened}
       panel={panel}
@@ -723,7 +719,7 @@ function TripWorkspace({
   const workChrome = <ReturnToTripsButton />;
   const purchasePanel = <PurchaseTasks tripId={trip.id} />;
   const quotePanel = <QuoteTaskWorkspace tripId={trip.id} />;
-  const sitePanel = <SitePhotoWorkspace tripId={trip.id} />;
+  const sitePanel = <SitePhotoWorkspace initialBatches={batches} tripId={trip.id} />;
 
   if (panel === "overview") {
     return (
@@ -765,10 +761,7 @@ function TripWorkspace({
     panel === "site" ? (
       selectedBatchId ? (
         <WorkspaceBlock eyebrow="區塊一" title="現場大圖">
-          <SitePhotoBatchDetail
-            batch={batches.find((batch) => batch.id === selectedBatchId)}
-            tripId={trip.id}
-          />
+          <SitePhotoBatchDetail batchId={selectedBatchId} tripId={trip.id} />
         </WorkspaceBlock>
       ) : (
         sitePanel
@@ -783,7 +776,7 @@ function TripWorkspace({
       connection={connectionPanel}
       detail={detailPanel}
       hideChromeInDetail={panel === "site" || panel === "quote" || panel === "purchase"}
-      hideNavInDetail={panel === "purchase"}
+      hideNavInDetail={panel === "purchase" || panel === "site"}
       initialSection={panel === "quote" ? "quote" : "detail"}
       key={panel}
       overview={overviewPanel}
@@ -917,55 +910,6 @@ function CompactStatusLine({
   );
 }
 
-function SitePhotoBatchDetail({
-  batch,
-  tripId,
-}: {
-  batch?: any;
-  tripId: string;
-}) {
-  return (
-    <div className="grid gap-3">
-      <BackLink
-        className="border-border/80 bg-background shadow-sm"
-        href={`/helper?tripId=${tripId}&panel=site`}
-        label="返回批次列表"
-        variant="outline"
-      />
-      {batch ? (
-        <>
-          <div>
-            <h6 className="font-semibold">{sitePhotoBatchName(batch)}</h6>
-            <p className="mt-1 text-xs text-muted-foreground">
-              {formatBatchTime(batch.created_at)} · {Number(batch.photo_count || 0)} 張照片
-            </p>
-          </div>
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
-            {(batch.photos || []).map((photo: any) => (
-              <a key={photo.id} href={photo.signed_url} target="_blank" rel="noreferrer">
-                <img
-                  alt={photo.original_filename || "site photo"}
-                  className="aspect-square w-full rounded-md object-cover"
-                  loading="lazy"
-                  src={photo.signed_url}
-                />
-              </a>
-            ))}
-          </div>
-        </>
-      ) : (
-        <EmptyState title="找不到這個照片批次" body="批次可能已被移除，請返回列表重新選擇。" />
-      )}
-    </div>
-  );
-}
-
-function sitePhotoBatchName(batch: any) {
-  const note = String(batch.note || "").trim();
-  if (note) return note;
-  return `批次${chineseBatchNumber(Number(batch.batch_number || 1))}`;
-}
-
 function chineseBatchNumber(value: number) {
   const digits = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
   if (value <= 10) return value === 10 ? "十" : digits[value] || String(value);
@@ -975,10 +919,6 @@ function chineseBatchNumber(value: number) {
     return `${digits[Math.floor(value / 10)]}十${remainder ? digits[remainder] : ""}`;
   }
   return String(value);
-}
-
-function formatBatchTime(value: string) {
-  return new Date(value).toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
 }
 
 function HomeShortcut({
@@ -1144,17 +1084,6 @@ function helperSettlementNextStep(status: string) {
   return steps[status] || "查看最新結帳狀態與下一步。";
 }
 
-async function signBatchesByTripId(batchesByTripId: Record<string, any[]>) {
-  const batches = Object.values(batchesByTripId).flat();
-  if (!batches.length) return {};
-  const signed = await service.attachSignedPhotoUrls(batches, createR2ObjectStore());
-  return signed.reduce((groups: Record<string, any[]>, batch: any) => {
-    if (!groups[batch.trip_id]) groups[batch.trip_id] = [];
-    groups[batch.trip_id].push(batch);
-    return groups;
-  }, {});
-}
-
 async function signPurchaseTasksByTripId(purchaseTasksByTripId: Record<string, any[]>) {
   const tasks = Object.values(purchaseTasksByTripId).flat();
   if (!tasks.length) return {};
@@ -1245,10 +1174,10 @@ function helperWorkspaceSections(
 ) {
   if (hasSelectedTrip) {
     return [
-      ...(["overview", "work", "site", "quote", "purchase"].includes(panel)
+      ...(["overview", "work", "quote", "purchase"].includes(panel)
         ? ["tripSummaries"]
         : []),
-      ...(panel === "site" && hasSelectedBatch ? ["sitePhotoBatches"] : []),
+      ...(panel === "site" && !hasSelectedBatch ? ["sitePhotoBatches"] : []),
     ];
   }
   if (view === "settlement" || view === "warehouse") return ["settlements"];

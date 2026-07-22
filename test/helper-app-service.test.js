@@ -772,6 +772,41 @@ test("helper site photo P0 read model authorizes and lists summaries in one quer
   ]);
 });
 
+test("helper site photo detail read model scopes ranking to the selected trip", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return {
+        rows: [{
+          batch_number: 3,
+          id: "batch-3",
+          photo_count: 2,
+          photos: [{ storage_key: "site/photo.jpg" }],
+        }],
+      };
+    },
+  };
+
+  const result = await service.getAuthorizedHelperSitePhotoBatchDetail(database, {
+    authUserId: "user-1",
+    batchId: "00000000-0000-0000-0000-000000000003",
+    tripId: "00000000-0000-0000-0000-000000000001",
+  });
+
+  assert.equal(queries.length, 1);
+  assert.equal(result.authorized, true);
+  assert.equal(result.batch.photo_count, 2);
+  assert.match(queries[0].sql, /with authorized_batch as/);
+  assert.match(queries[0].sql, /join authorized_batch selected on selected\.trip_id = source\.trip_id/);
+  assert.match(queries[0].sql, /jsonb_agg/);
+  assert.deepEqual(queries[0].params, [
+    "00000000-0000-0000-0000-000000000003",
+    "00000000-0000-0000-0000-000000000001",
+    "user-1",
+  ]);
+});
+
 test("helper site photo detail loads photos only for the selected owned batch", async () => {
   const queries = [];
   const database = {

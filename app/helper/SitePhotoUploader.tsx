@@ -22,32 +22,13 @@ import {
 import { BackButton } from "../components/BackButton";
 import { InsightBanner, StatusBadge } from "../components/OperationsUi";
 import { Button } from "../components/ui/button";
-
-type BatchStatus = "uploading" | "ready" | "submitting" | "completed" | "failed";
-type PhotoUploadStatus = "pending" | "uploading" | "uploaded" | "failed";
-
-type SelectedPhoto = {
-  byteSize: number;
-  clientPhotoId: string;
-  contentType: string;
-  error?: string;
-  file: File;
-  objectUrl: string;
-  originalFilename: string;
-  sortOrder: number;
-  storageKey?: string;
-  uploadError?: string;
-  uploadStatus: PhotoUploadStatus;
-};
-
-type LocalBatch = {
-  error?: string;
-  errorStage?: "submit" | "upload";
-  id: string;
-  note: string;
-  photos: SelectedPhoto[];
-  status: BatchStatus;
-};
+import {
+  type BatchStatus,
+  type LocalBatch,
+  type PhotoUploadStatus,
+  type SelectedPhoto,
+  useSitePhotoUploadStore,
+} from "./SitePhotoUploadStore";
 
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 const MAX_IMAGE_EDGE = 2400;
@@ -62,9 +43,11 @@ export function SitePhotoUploader({
   onDetailOpenChange?: (open: boolean) => void;
   tripId: string;
 }) {
-  const [note, setNote] = useState("");
-  const [photos, setPhotos] = useState<SelectedPhoto[]>([]);
-  const [batches, setBatches] = useState<LocalBatch[]>([]);
+  const { sessions, updateSession } = useSitePhotoUploadStore();
+  const savedSession = sessions[tripId];
+  const [note, setNote] = useState(() => savedSession?.note || "");
+  const [photos, setPhotos] = useState<SelectedPhoto[]>(() => savedSession?.photos || []);
+  const [batches, setBatches] = useState<LocalBatch[]>(() => savedSession?.batches || []);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [isPreparing, setIsPreparing] = useState(false);
   const photosRef = useRef<SelectedPhoto[]>([]);
@@ -73,17 +56,8 @@ export function SitePhotoUploader({
   useEffect(() => {
     photosRef.current = photos;
     batchesRef.current = batches;
-  }, [batches, photos]);
-
-  useEffect(
-    () => () => {
-      for (const photo of photosRef.current) URL.revokeObjectURL(photo.objectUrl);
-      for (const batch of batchesRef.current) {
-        for (const photo of batch.photos) URL.revokeObjectURL(photo.objectUrl);
-      }
-    },
-    [],
-  );
+    updateSession(tripId, { batches, note, photos });
+  }, [batches, note, photos, tripId, updateSession]);
 
   async function addFiles(files: FileList | null) {
     if (!files?.length) return;

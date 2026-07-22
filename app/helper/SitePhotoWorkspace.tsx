@@ -18,16 +18,22 @@ type BatchSummary = {
   photo_count: number;
 };
 
-export function SitePhotoWorkspace({ tripId }: { tripId: string }) {
+export function SitePhotoWorkspace({
+  initialBatches,
+  tripId,
+}: {
+  initialBatches?: BatchSummary[];
+  tripId: string;
+}) {
   const navigation = useTripSectionNavigation();
-  const [batches, setBatches] = useState<BatchSummary[]>([]);
+  const [batches, setBatches] = useState<BatchSummary[]>(initialBatches || []);
   const [error, setError] = useState("");
   const [localBatchDetailOpen, setLocalBatchDetailOpen] = useState(false);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(initialBatches === undefined);
 
-  const loadBatches = useCallback(async (signal?: AbortSignal) => {
+  const loadBatches = useCallback(async (signal?: AbortSignal, showLoading = true) => {
     setError("");
-    setLoading(true);
+    if (showLoading) setLoading(true);
     try {
       const response = await fetch(
         `/api/helper/trips/${encodeURIComponent(tripId)}/site-photo-batches`,
@@ -46,15 +52,16 @@ export function SitePhotoWorkspace({ tripId }: { tripId: string }) {
         loadError instanceof Error ? loadError.message : "無法載入照片批次。",
       );
     } finally {
-      if (!signal?.aborted) setLoading(false);
+      if (!signal?.aborted && showLoading) setLoading(false);
     }
   }, [tripId]);
 
   useEffect(() => {
+    if (initialBatches !== undefined) return undefined;
     const controller = new AbortController();
     void loadBatches(controller.signal);
     return () => controller.abort();
-  }, [loadBatches]);
+  }, [initialBatches, loadBatches]);
 
   return (
     <section className="grid gap-4 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
@@ -71,7 +78,7 @@ export function SitePhotoWorkspace({ tripId }: { tripId: string }) {
         <h5 className="mt-1 text-xl font-semibold tracking-tight">現場大圖</h5>
       </div>
       <SitePhotoUploader
-        onBatchSubmitted={() => loadBatches()}
+        onBatchSubmitted={() => void loadBatches(undefined, false)}
         onDetailOpenChange={setLocalBatchDetailOpen}
         tripId={tripId}
       />
