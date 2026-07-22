@@ -7,13 +7,9 @@ import { useEffect, useMemo, useState } from "react";
 import { Button } from "../components/ui/button";
 import { RetryableError } from "../components/RetryableState";
 import { cn } from "../../src/lib/utils";
+import { useAdminLiveTrips, type AdminLiveTrip } from "./useAdminLiveTrips";
 
-type Trip = {
-  helper_display_name?: string | null;
-  id: string;
-  status: string;
-  trip_name: string;
-};
+type Trip = AdminLiveTrip;
 
 type SitePhoto = {
   id: string;
@@ -33,19 +29,19 @@ const REFRESH_MS = 8000;
 
 export function AdminLivePhotosWorkspace({
   initialTripId,
+  initialTrips,
 }: {
   initialTripId?: string;
+  initialTrips?: Trip[];
 }) {
-  const [trips, setTrips] = useState<Trip[]>([]);
+  const { loadTrips: refreshTrips, loadingTrips, trips, tripsError } = useAdminLiveTrips(initialTrips);
   const [selectedTripId, setSelectedTripId] = useState(initialTripId || "");
   const [batches, setBatches] = useState<SitePhotoBatch[]>([]);
   const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<string>>(new Set());
   const [previewPhoto, setPreviewPhoto] = useState<SitePhoto | null>(null);
-  const [loadingTrips, setLoadingTrips] = useState(true);
   const [loadingPhotos, setLoadingPhotos] = useState(false);
   const [message, setMessage] = useState("");
   const [loadError, setLoadError] = useState("");
-  const [tripsRefreshNonce, setTripsRefreshNonce] = useState(0);
   const [photoRefreshNonce, setPhotoRefreshNonce] = useState(0);
 
   const batchNames = useMemo(() => buildBatchNames(batches), [batches]);
@@ -57,36 +53,6 @@ export function AdminLivePhotosWorkspace({
     () => allPhotos.filter((photo) => selectedPhotoIds.has(photo.id)),
     [allPhotos, selectedPhotoIds],
   );
-
-  useEffect(() => {
-    let canceled = false;
-    let timer: ReturnType<typeof setInterval> | undefined;
-
-    async function loadTrips() {
-      try {
-        const response = await fetch("/api/admin/live/trips", { cache: "no-store" });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "載入失敗");
-        if (!canceled) {
-          setTrips(data.trips || []);
-          setLoadError("");
-          setLoadingTrips(false);
-        }
-      } catch (error) {
-        if (!canceled) {
-          setLoadError(error instanceof Error ? error.message : "即時行程載入失敗。");
-          setLoadingTrips(false);
-        }
-      }
-    }
-
-    loadTrips();
-    timer = setInterval(loadTrips, REFRESH_MS);
-    return () => {
-      canceled = true;
-      if (timer) clearInterval(timer);
-    };
-  }, [tripsRefreshNonce]);
 
   useEffect(() => {
     if (!selectedTripId) {
@@ -137,11 +103,11 @@ export function AdminLivePhotosWorkspace({
   function selectTrip(tripId: string) {
     setSelectedTripId(tripId);
     setSelectedPhotoIds(new Set());
-    window.history.replaceState(
-      null,
-      "",
-      `/admin?view=live&liveTripId=${encodeURIComponent(tripId)}`,
-    );
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", "live");
+    url.searchParams.set("liveTripId", tripId);
+    url.searchParams.set("liveSection", "photos");
+    window.history.replaceState(window.history.state, "", url.toString());
   }
 
   function togglePhoto(photoId: string) {
@@ -330,15 +296,12 @@ export function AdminLivePhotosWorkspace({
         </div>
       ) : null}
 
-      {loadError ? (
+      {loadError || tripsError ? (
         <RetryableError
-          message={loadError}
+          message={loadError || tripsError}
           onRetry={() => {
             if (selectedTripId) setPhotoRefreshNonce((value) => value + 1);
-            else {
-              setLoadingTrips(true);
-              setTripsRefreshNonce((value) => value + 1);
-            }
+            else void refreshTrips();
           }}
         />
       ) : null}

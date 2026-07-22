@@ -9,13 +9,9 @@ import { StatusBadge } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { cn } from "../../src/lib/utils";
 import { QuickPublishPurchaseForm } from "./AdminForms";
+import { useAdminLiveTrips, type AdminLiveTrip } from "./useAdminLiveTrips";
 
-type Trip = {
-  helper_display_name?: string | null;
-  id: string;
-  status: string;
-  trip_name: string;
-};
+type Trip = AdminLiveTrip;
 
 type QuoteTaskSummary = {
   converted_photo_count: number;
@@ -43,21 +39,21 @@ const REFRESH_MS = 8000;
 
 export function AdminLiveQuoteWorkspace({
   initialTripId,
+  initialTrips,
 }: {
   initialTripId?: string;
+  initialTrips?: Trip[];
 }) {
-  const [trips, setTrips] = useState<Trip[]>([]);
+  const { loadTrips: refreshTrips, loadingTrips, trips, tripsError } = useAdminLiveTrips(initialTrips);
   const [selectedTripId, setSelectedTripId] = useState(initialTripId || "");
   const [tasks, setTasks] = useState<QuoteTaskSummary[]>([]);
   const [activeTaskId, setActiveTaskId] = useState("");
   const [activeTask, setActiveTask] = useState<any | null>(null);
   const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<string>>(new Set());
-  const [loadingTrips, setLoadingTrips] = useState(true);
   const [loadingTasks, setLoadingTasks] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [message, setMessage] = useState("");
   const [loadError, setLoadError] = useState("");
-  const [tripsRefreshNonce, setTripsRefreshNonce] = useState(0);
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [detailRefreshNonce, setDetailRefreshNonce] = useState(0);
 
@@ -69,36 +65,6 @@ export function AdminLiveQuoteWorkspace({
     () => allDetailPhotos.filter((photo) => selectedPhotoIds.has(photo.id)),
     [allDetailPhotos, selectedPhotoIds],
   );
-
-  useEffect(() => {
-    let canceled = false;
-    let timer: ReturnType<typeof setInterval> | undefined;
-
-    async function loadTrips() {
-      try {
-        const response = await fetch("/api/admin/live/trips", { cache: "no-store" });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "載入失敗");
-        if (!canceled) {
-          setTrips(data.trips || []);
-          setLoadError("");
-          setLoadingTrips(false);
-        }
-      } catch (error) {
-        if (!canceled) {
-          setLoadError(error instanceof Error ? error.message : "即時行程載入失敗。");
-          setLoadingTrips(false);
-        }
-      }
-    }
-
-    loadTrips();
-    timer = setInterval(loadTrips, REFRESH_MS);
-    return () => {
-      canceled = true;
-      if (timer) clearInterval(timer);
-    };
-  }, [tripsRefreshNonce]);
 
   useEffect(() => {
     if (!selectedTripId) {
@@ -175,11 +141,11 @@ export function AdminLiveQuoteWorkspace({
     setActiveTaskId("");
     setActiveTask(null);
     setSelectedPhotoIds(new Set());
-    window.history.replaceState(
-      null,
-      "",
-      `/admin?view=live&liveTripId=${encodeURIComponent(tripId)}&liveSection=quote`,
-    );
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", "live");
+    url.searchParams.set("liveTripId", tripId);
+    url.searchParams.set("liveSection", "quote");
+    window.history.replaceState(window.history.state, "", url.toString());
   }
 
   function openTask(taskId: string) {
@@ -326,16 +292,13 @@ export function AdminLiveQuoteWorkspace({
         </nav>
       ) : null}
 
-      {loadError ? (
+      {loadError || tripsError ? (
         <RetryableError
-          message={loadError}
+          message={loadError || tripsError}
           onRetry={() => {
             if (activeTaskId) setDetailRefreshNonce((value) => value + 1);
             else if (selectedTripId) setRefreshNonce((value) => value + 1);
-            else {
-              setLoadingTrips(true);
-              setTripsRefreshNonce((value) => value + 1);
-            }
+            else void refreshTrips();
           }}
         />
       ) : null}

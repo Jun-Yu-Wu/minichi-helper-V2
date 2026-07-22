@@ -245,6 +245,7 @@ const HELPER_WORKSPACE_SECTIONS = [
  *   settlementStatuses?: string[] | null,
  *   rebuyIncludePhotos?: boolean,
  *   rebuyTaskIds?: string[] | null,
+ *   loadTrips?: boolean,
  *   sitePhotoBatchId?: string | null,
  *   tripIds?: string[] | null,
  *   tripStatuses?: string[] | null
@@ -258,6 +259,7 @@ async function getHelperWorkspace(database, authUserId, now = new Date(), option
     settlementStatuses = null,
     rebuyIncludePhotos = true,
     rebuyTaskIds = null,
+    loadTrips = true,
     sitePhotoBatchId = null,
     tripIds = null,
     tripStatuses = null,
@@ -279,30 +281,9 @@ async function getHelperWorkspace(database, authUserId, now = new Date(), option
     };
   }
 
-  const tripParams = [profile.id];
-  const tripConditions = ["assigned_helper_id = $1"];
-  if (tripIds) {
-    tripParams.push(tripIds);
-    tripConditions.push(`id = any($${tripParams.length}::uuid[])`);
-  }
-  if (tripStatuses) {
-    if (tripStatuses.length === 0) {
-      tripConditions.push("false");
-    } else {
-      tripParams.push(tripStatuses);
-      tripConditions.push(`status = any($${tripParams.length}::text[])`);
-    }
-  }
-  const tripsResult = await database.query(
-    `select id, trip_name, business_date, scheduled_time, location, timezone,
-            assigned_helper_id, status, departed_at, arrived_at,
-            admin_activated_at, ended_at, canceled_at, version, created_at,
-            updated_at
-     from helper_app.trips
-     where ${tripConditions.join(" and ")}
-     order by business_date asc, scheduled_time nulls last, created_at asc`,
-    tripParams,
-  );
+  const tripsResult = loadTrips
+    ? await loadAssignedHelperTrips(database, profile.id, { tripIds, tripStatuses })
+    : { rows: [] };
   const assignedTripIds = new Set(tripsResult.rows.map((trip) => trip.id));
   const workflowTripIds = tripIds
     ? tripIds.filter((tripId) => assignedTripIds.has(tripId))
@@ -381,6 +362,37 @@ async function getHelperWorkspace(database, authUserId, now = new Date(), option
       tripSummaries.map((summary) => [summary.trip_id, summary]),
     ),
   };
+}
+
+async function loadAssignedHelperTrips(
+  database,
+  helperId,
+  { tripIds = null, tripStatuses = null } = {},
+) {
+  const tripParams = [helperId];
+  const tripConditions = ["assigned_helper_id = $1"];
+  if (tripIds) {
+    tripParams.push(tripIds);
+    tripConditions.push(`id = any($${tripParams.length}::uuid[])`);
+  }
+  if (tripStatuses) {
+    if (tripStatuses.length === 0) {
+      tripConditions.push("false");
+    } else {
+      tripParams.push(tripStatuses);
+      tripConditions.push(`status = any($${tripParams.length}::text[])`);
+    }
+  }
+  return database.query(
+    `select id, trip_name, business_date, scheduled_time, location, timezone,
+            assigned_helper_id, status, departed_at, arrived_at,
+            admin_activated_at, ended_at, canceled_at, version, created_at,
+            updated_at
+     from helper_app.trips
+     where ${tripConditions.join(" and ")}
+     order by business_date asc, scheduled_time nulls last, created_at asc`,
+    tripParams,
+  );
 }
 
 async function listHelperTripSummaries(

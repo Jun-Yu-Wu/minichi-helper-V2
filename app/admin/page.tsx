@@ -114,7 +114,7 @@ export default async function AdminPage({
           ? [params.checkoutSettlementId]
           : null,
       settlementIncludeDetails:
-        activeView === "checkout" ? Boolean(params.checkoutSettlementId) : true,
+        activeView === "checkout" ? Boolean(params.checkoutSettlementId) : false,
       rebuyIncludePhotos: activeView === "rebuy" ? Boolean(params.rebuyTaskId) : true,
       rebuyTaskIds: activeView === "rebuy" && params.rebuyTaskId ? [params.rebuyTaskId] : null,
       rebuyVisibility:
@@ -153,6 +153,14 @@ export default async function AdminPage({
               : []
             : null,
     });
+  const activeLiveTrips = dashboard.trips
+    .filter((trip: any) => trip.status === "active")
+    .map((trip: any) => ({
+      helper_display_name: trip.helper_display_name,
+      id: trip.id,
+      status: trip.status,
+      trip_name: trip.trip_name,
+    }));
   const purchaseTasks = dashboard.purchaseTasks;
   const settlements = activeView === "checkout" && params.checkoutSettlementId && dashboard.settlements.length
     ? await service.attachSignedSettlementUrls(
@@ -204,15 +212,24 @@ export default async function AdminPage({
     </AdminSection>
   ) : activeView === "live" && liveSection === "photos" ? (
     <AdminSection icon={<Radio className="size-5" />} title="即時回傳">
-      <AdminLivePhotosWorkspace initialTripId={params.liveTripId} />
+      <AdminLivePhotosWorkspace
+        initialTripId={params.liveTripId}
+        initialTrips={activeLiveTrips}
+      />
     </AdminSection>
   ) : activeView === "live" && liveSection === "quote" ? (
     <AdminSection icon={<Radio className="size-5" />} title="即時回傳">
-      <AdminLiveQuoteWorkspace initialTripId={params.liveTripId} />
+      <AdminLiveQuoteWorkspace
+        initialTripId={params.liveTripId}
+        initialTrips={activeLiveTrips}
+      />
     </AdminSection>
   ) : activeView === "live" && liveSection === "purchase" ? (
     <AdminSection icon={<Radio className="size-5" />} title="即時回傳">
-      <AdminLivePurchaseWorkspace initialTripId={params.liveTripId} />
+      <AdminLivePurchaseWorkspace
+        initialTripId={params.liveTripId}
+        initialTrips={activeLiveTrips}
+      />
     </AdminSection>
   ) : activeView === "live" ? (
     <AdminLiveReturn
@@ -2179,9 +2196,9 @@ function adminDashboardSections(
   liveSection: LiveSection = "photos",
 ) {
   const liveSectionMap: Record<LiveSection, string[]> = {
-    photos: [],
-    purchase: [],
-    quote: [],
+    photos: ["trips"],
+    purchase: ["trips"],
+    quote: ["trips"],
     staging: ["trips", "stagingOrderPreviews"],
   };
   const sectionsByView: Record<string, string[]> = {

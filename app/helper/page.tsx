@@ -84,6 +84,7 @@ export default async function HelperPage({
         Boolean(params.tripId),
         Boolean(params.batchId),
       ),
+      loadTrips: view === "home" || view === "trips" || Boolean(params.tripId),
       settlementIds:
         view === "settlement" && params.settlementId
           ? [params.settlementId]
@@ -93,7 +94,9 @@ export default async function HelperPage({
       settlementIncludeDetails:
         view === "settlement"
           ? Boolean(params.settlementId)
-          : view === "warehouse",
+          : view === "warehouse"
+            ? Boolean(params.warehouseSettlementId)
+            : false,
       settlementStatuses:
         view === "warehouse"
           ? ["warehouse_pending"]

@@ -9,13 +9,9 @@ import { InsightBanner, StatusBadge } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
 import { cn } from "../../src/lib/utils";
+import { useAdminLiveTrips, type AdminLiveTrip } from "./useAdminLiveTrips";
 
-type Trip = {
-  helper_display_name?: string | null;
-  id: string;
-  status: string;
-  trip_name: string;
-};
+type Trip = AdminLiveTrip;
 
 type PurchaseTaskSummary = {
   completed_quantity?: number | null;
@@ -37,58 +33,28 @@ const REFRESH_MS = 8000;
 
 export function AdminLivePurchaseWorkspace({
   initialTripId,
+  initialTrips,
 }: {
   initialTripId?: string;
+  initialTrips?: Trip[];
 }) {
-  const [trips, setTrips] = useState<Trip[]>([]);
+  const { loadTrips: refreshTrips, loadingTrips, trips, tripsError } = useAdminLiveTrips(initialTrips);
   const [selectedTripId, setSelectedTripId] = useState(initialTripId || "");
   const [tasks, setTasks] = useState<PurchaseTaskSummary[]>([]);
   const [activeTaskId, setActiveTaskId] = useState("");
   const [activeTask, setActiveTask] = useState<any | null>(null);
-  const [loadingTrips, setLoadingTrips] = useState(true);
   const [loadingTasks, setLoadingTasks] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [allPhotosLoading, setAllPhotosLoading] = useState(false);
   const [allPhotosLoaded, setAllPhotosLoaded] = useState(false);
   const [message, setMessage] = useState("");
   const [loadError, setLoadError] = useState("");
-  const [tripsRefreshNonce, setTripsRefreshNonce] = useState(0);
   const [refreshNonce, setRefreshNonce] = useState(0);
   const [detailRefreshNonce, setDetailRefreshNonce] = useState(0);
   const [reviewPending, startReviewTransition] = useTransition();
 
   const selectedTrip = trips.find((trip) => trip.id === selectedTripId);
   const lanes = purchaseLanes(tasks);
-
-  useEffect(() => {
-    let canceled = false;
-    let timer: ReturnType<typeof setInterval> | undefined;
-
-    async function loadTrips() {
-      try {
-        const response = await fetch("/api/admin/live/trips", { cache: "no-store" });
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "載入失敗");
-        if (!canceled) {
-          setTrips(data.trips || []);
-          setLoadError("");
-          setLoadingTrips(false);
-        }
-      } catch (error) {
-        if (!canceled) {
-          setLoadError(error instanceof Error ? error.message : "即時行程載入失敗。");
-          setLoadingTrips(false);
-        }
-      }
-    }
-
-    loadTrips();
-    timer = setInterval(loadTrips, REFRESH_MS);
-    return () => {
-      canceled = true;
-      if (timer) clearInterval(timer);
-    };
-  }, [tripsRefreshNonce]);
 
   useEffect(() => {
     if (!selectedTripId) {
@@ -164,11 +130,11 @@ export function AdminLivePurchaseWorkspace({
     setSelectedTripId(tripId);
     setActiveTaskId("");
     setActiveTask(null);
-    window.history.replaceState(
-      null,
-      "",
-      `/admin?view=live&liveTripId=${encodeURIComponent(tripId)}&liveSection=purchase`,
-    );
+    const url = new URL(window.location.href);
+    url.searchParams.set("view", "live");
+    url.searchParams.set("liveTripId", tripId);
+    url.searchParams.set("liveSection", "purchase");
+    window.history.replaceState(window.history.state, "", url.toString());
   }
 
   function openTask(taskId: string) {
@@ -303,16 +269,13 @@ export function AdminLivePurchaseWorkspace({
         </nav>
       ) : null}
 
-      {loadError ? (
+      {loadError || tripsError ? (
         <RetryableError
-          message={loadError}
+          message={loadError || tripsError}
           onRetry={() => {
             if (activeTaskId) setDetailRefreshNonce((value) => value + 1);
             else if (selectedTripId) setRefreshNonce((value) => value + 1);
-            else {
-              setLoadingTrips(true);
-              setTripsRefreshNonce((value) => value + 1);
-            }
+            else void refreshTrips();
           }}
         />
       ) : null}

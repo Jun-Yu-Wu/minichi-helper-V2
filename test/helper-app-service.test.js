@@ -554,6 +554,33 @@ test("helper workspace skips workflow reads that are not needed by the current v
   assert.deepEqual(workspace.sitePhotoBatchesByTripId, {});
 });
 
+test("helper workspace can skip trip reads for settlement-only views", async () => {
+  const queries = [];
+  const database = {
+    async query(sql) {
+      queries.push(sql);
+      if (sql.includes("from helper_app.helper_profiles")) {
+        return { rows: [{ id: "helper-1", is_active: true }] };
+      }
+      if (sql.includes("from helper_app.settlements")) {
+        return { rows: [] };
+      }
+      throw new Error(`Unexpected query: ${sql}`);
+    },
+  };
+
+  await service.getHelperWorkspace(
+    database,
+    "user-1",
+    new Date("2026-07-02T00:00:00.000Z"),
+    { sections: ["settlements"], loadTrips: false },
+  );
+
+  assert.equal(queries.length, 2);
+  assert.equal(queries.some((sql) => sql.includes("from helper_app.trips")), false);
+  assert.equal(queries.some((sql) => sql.includes("from helper_app.settlements")), true);
+});
+
 test("helper workspace scopes the trip read and runs selected workflow reads concurrently", async () => {
   const queries = [];
   let activeWorkflowQueries = 0;

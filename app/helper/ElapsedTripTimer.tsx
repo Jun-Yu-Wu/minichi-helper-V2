@@ -21,11 +21,11 @@ export function ElapsedTripTimer({ startedAt }: { startedAt: string }) {
   const started = new Date(startedAt).getTime();
   return (
     <div className="rounded-lg border bg-background p-3">
-      <p className="text-xs font-semibold text-muted-foreground">出發後已計時</p>
+      <p className="text-xs font-semibold text-muted-foreground">行程時間</p>
       <p className="mt-1 font-mono text-2xl font-semibold tracking-tight">
         {formatElapsed(now - started)}
       </p>
-      <p className="mt-1 text-xs text-muted-foreground">工時計算從標記出發開始。</p>
+      <p className="mt-1 text-xs text-muted-foreground">從出發後開始計時。</p>
     </div>
   );
 }

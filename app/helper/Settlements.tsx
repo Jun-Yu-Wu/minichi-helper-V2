@@ -42,8 +42,7 @@ export function SettlementPrecheckForm({ settlement }: { settlement: any }) {
 
   useEffect(() => {
     if (!state.ok) return;
-    router.refresh();
-    router.push("/helper?view=settlement");
+    router.replace("/helper?view=settlement");
   }, [router, state.ok]);
 
   async function submitAfterUploads(event: FormEvent<HTMLFormElement>) {
@@ -156,8 +155,7 @@ export function WarehouseProofForm({ settlement }: { settlement: any }) {
 
   useEffect(() => {
     if (!state.ok) return;
-    router.refresh();
-    router.push("/helper?view=settlement");
+    router.replace("/helper?view=settlement");
   }, [router, state.ok]);
 
   async function submitAfterUpload(event: FormEvent<HTMLFormElement>) {
