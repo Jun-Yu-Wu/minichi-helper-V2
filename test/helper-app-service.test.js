@@ -1362,7 +1362,7 @@ test("all admin quote task types accept uploaded photos as task evidence", async
       String(query.sql).includes("insert into helper_app.media_objects"),
     );
     assert.ok(mediaQuery);
-    assert.equal(mediaQuery.params[0], storageKey);
+    assert.deepEqual(mediaQuery.params[0], [storageKey]);
     const taskPhotoQuery = queries.find((query) =>
       String(query.sql).includes("insert into helper_app.quote_task_photos"),
     );
@@ -2839,6 +2839,7 @@ test("approved staging merge writes main order, source link, and selected photos
         }],
       },
       { rows: [] },
+      { rows: [{ id: "merge-1", status: "merging", merge_idempotency_key: "merge-key-1" }] },
       { rows: [] },
       { rows: [] },
       { rows: [] },

@@ -395,72 +395,87 @@ async function listHelperTripSummaries(
     conditions.push(`t.id = any($${params.length}::uuid[])`);
   }
   const result = await database.query(
-    `select t.id as trip_id,
-            (select count(*)::int
-             from helper_app.site_photo_batches b
-             where b.trip_id = t.id) as site_photo_batch_count,
-            (select count(*)::int
-             from helper_app.quote_tasks qt
-             where qt.trip_id = t.id) as quote_task_count,
-            (select count(*)::int
-             from (
-               select qt.id
-               from helper_app.quote_tasks qt
-               left join helper_app.quote_task_photos qtp on qtp.quote_task_id = qt.id
-               where qt.trip_id = t.id
-               group by qt.id, qt.status
-               having qt.status = 'completed'
-                  or (
-                    count(qtp.id) > 0
-                    and count(qtp.id) = count(qtp.id) filter (
-                      where qtp.reply_status in ('replied', 'converted_to_purchase')
-                    )
-                  )
-             ) completed_quote_tasks) as completed_quote_task_count,
-            (select count(*)::int
-             from (
-               select qt.id
-               from helper_app.quote_tasks qt
-               left join helper_app.quote_task_photos qtp on qtp.quote_task_id = qt.id
-               where qt.trip_id = t.id
-               group by qt.id, qt.status
-               having not (
-                 qt.status = 'completed'
-                 or (
-                   count(qtp.id) > 0
-                   and count(qtp.id) = count(qtp.id) filter (
-                     where qtp.reply_status in ('replied', 'converted_to_purchase')
-                   )
-                 )
-               )
-             ) unfinished_quote_tasks) as unfinished_quote_task_count,
-            (select count(*)::int
-             from helper_app.quote_tasks qt
-             where qt.trip_id = t.id
-               and qt.status <> 'completed') as open_quote_task_count,
-            (select count(*)::int
-             from helper_app.quote_task_photos qtp
-             join helper_app.quote_tasks qt on qt.id = qtp.quote_task_id
-             where qt.trip_id = t.id) as quote_photo_count,
-            (select count(*)::int
-             from helper_app.quote_task_photos qtp
-             join helper_app.quote_tasks qt on qt.id = qtp.quote_task_id
-             where qt.trip_id = t.id
-               and qtp.reply_status in ('replied', 'converted_to_purchase')) as replied_quote_photo_count,
-            (select count(*)::int
-             from helper_app.quote_task_photos qtp
-             join helper_app.quote_tasks qt on qt.id = qtp.quote_task_id
-             where qt.trip_id = t.id
-               and qtp.reply_status in ('open', 'needs_review')) as unfinished_quote_photo_count,
-            (select count(*)::int
-             from helper_app.purchase_tasks pt
-             where pt.trip_id = t.id) as purchase_task_count,
-            (select count(*)::int
-             from helper_app.purchase_tasks pt
-             where pt.trip_id = t.id
-               and pt.status not in ('completed', 'canceled', 'unavailable', 'not_found')) as unfinished_purchase_count
-     from helper_app.trips t
-     where ${conditions.join(" and ")}`,
+    `with scoped_trips as (
+       select t.id
+       from helper_app.trips t
+       where ${conditions.join(" and ")}
+     ),
+     site_photo_counts as (
+       select b.trip_id, count(*)::int as site_photo_batch_count
+       from helper_app.site_photo_batches b
+       join scoped_trips st on st.id = b.trip_id
+       group by b.trip_id
+     ),
+     quote_task_photo_stats as (
+       select qt.id,
+              qt.trip_id,
+              qt.status,
+              count(qtp.id)::int as photo_count,
+              count(qtp.id) filter (
+                where qtp.reply_status in ('replied', 'converted_to_purchase')
+              )::int as replied_photo_count
+       from helper_app.quote_tasks qt
+       join scoped_trips st on st.id = qt.trip_id
+       left join helper_app.quote_task_photos qtp on qtp.quote_task_id = qt.id
+       group by qt.id, qt.trip_id, qt.status
+     ),
+     quote_task_counts as (
+       select trip_id,
+              count(*)::int as quote_task_count,
+              count(*) filter (where status <> 'completed')::int as open_quote_task_count,
+              count(*) filter (
+                where status = 'completed'
+                   or (photo_count > 0 and photo_count = replied_photo_count)
+              )::int as completed_quote_task_count,
+              count(*) filter (
+                where not (
+                  status = 'completed'
+                  or (photo_count > 0 and photo_count = replied_photo_count)
+                )
+              )::int as unfinished_quote_task_count
+       from quote_task_photo_stats
+       group by trip_id
+     ),
+     quote_photo_counts as (
+       select qt.trip_id,
+              count(qtp.id)::int as quote_photo_count,
+              count(qtp.id) filter (
+                where qtp.reply_status in ('replied', 'converted_to_purchase')
+              )::int as replied_quote_photo_count,
+              count(qtp.id) filter (
+                where qtp.reply_status in ('open', 'needs_review')
+              )::int as unfinished_quote_photo_count
+       from helper_app.quote_tasks qt
+       join scoped_trips st on st.id = qt.trip_id
+       left join helper_app.quote_task_photos qtp on qtp.quote_task_id = qt.id
+       group by qt.trip_id
+     ),
+     purchase_counts as (
+       select pt.trip_id,
+              count(*)::int as purchase_task_count,
+              count(*) filter (
+                where pt.status not in ('completed', 'canceled', 'unavailable', 'not_found')
+              )::int as unfinished_purchase_count
+       from helper_app.purchase_tasks pt
+       join scoped_trips st on st.id = pt.trip_id
+       group by pt.trip_id
+     )
+     select st.id as trip_id,
+            coalesce(spc.site_photo_batch_count, 0)::int as site_photo_batch_count,
+            coalesce(qtc.quote_task_count, 0)::int as quote_task_count,
+            coalesce(qtc.completed_quote_task_count, 0)::int as completed_quote_task_count,
+            coalesce(qtc.unfinished_quote_task_count, 0)::int as unfinished_quote_task_count,
+            coalesce(qtc.open_quote_task_count, 0)::int as open_quote_task_count,
+            coalesce(qpc.quote_photo_count, 0)::int as quote_photo_count,
+            coalesce(qpc.replied_quote_photo_count, 0)::int as replied_quote_photo_count,
+            coalesce(qpc.unfinished_quote_photo_count, 0)::int as unfinished_quote_photo_count,
+            coalesce(pc.purchase_task_count, 0)::int as purchase_task_count,
+            coalesce(pc.unfinished_purchase_count, 0)::int as unfinished_purchase_count
+     from scoped_trips st
+     left join site_photo_counts spc on spc.trip_id = st.id
+     left join quote_task_counts qtc on qtc.trip_id = st.id
+     left join quote_photo_counts qpc on qpc.trip_id = st.id
+     left join purchase_counts pc on pc.trip_id = st.id`,
     params,
   );
   return result.rows;
@@ -1668,42 +1683,12 @@ async function submitSitePhotoBatch(database, { authUserId, note, photos, submis
     );
     const batch = batchResult.rows[0];
 
-    for (const photo of normalized.photos) {
-      await client.query(
-        `insert into helper_app.media_objects
-           (storage_key, media_kind, retention_status, original_filename,
-            content_type, byte_size, uploaded_by_helper_id)
-         values ($1, 'site_photo', 'temporary_work_media', $2, $3, $4, $5)
-         on conflict (storage_key) do update
-         set original_filename = coalesce(excluded.original_filename, helper_app.media_objects.original_filename),
-             content_type = coalesce(excluded.content_type, helper_app.media_objects.content_type),
-             byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)`,
-        [
-          photo.storageKey,
-          photo.originalFilename,
-          photo.contentType,
-          photo.byteSize,
-          helper.id,
-        ],
-      );
-      await client.query(
-        `insert into helper_app.site_photos
-           (batch_id, trip_id, helper_id, client_photo_id, storage_key,
-            original_filename, content_type, byte_size, sort_order)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-        [
-          batch.id,
-          trip.id,
-          helper.id,
-          photo.clientPhotoId,
-          photo.storageKey,
-          photo.originalFilename,
-          photo.contentType,
-          photo.byteSize,
-          photo.sortOrder,
-        ],
-      );
-    }
+    await insertSitePhotoBatchRows(client, {
+      batchId: batch.id,
+      helperId: helper.id,
+      photos: normalized.photos,
+      tripId: trip.id,
+    });
 
     await insertAuditEvent(client, {
       action: "helper_site_photo_batch_submitted",
@@ -1794,51 +1779,25 @@ async function createQuoteTask(
     );
     const task = taskResult.rows[0];
 
-    for (const [index, photo] of taskPhotos.entries()) {
-      if (normalized.uploadedPhotos.length > 0) {
-        await client.query(
-          `insert into helper_app.media_objects
-             (storage_key, media_kind, retention_status, original_filename, content_type, byte_size)
-           values ($1, 'quote_task_photo', 'task_evidence', $2, $3, $4)
-           on conflict (storage_key) do update
-           set media_kind = 'quote_task_photo',
-               retention_status = 'task_evidence',
-               original_filename = excluded.original_filename,
-               content_type = excluded.content_type,
-               byte_size = excluded.byte_size`,
-          [
-            photo.storageKey,
-            photo.originalFilename,
-            photo.contentType,
-            photo.byteSize,
-          ],
-        );
-      } else {
-        await client.query(
-          `update helper_app.media_objects
-           set media_kind = 'quote_task_photo',
-               retention_status = 'task_evidence'
-           where storage_key = $1`,
-          [photo.storageKey],
-        );
-      }
+    if (normalized.uploadedPhotos.length > 0) {
+      await upsertQuoteTaskMediaBatch(client, taskPhotos);
+    } else {
       await client.query(
-        `insert into helper_app.quote_task_photos
-           (quote_task_id, trip_id, helper_id, source_site_photo_id, storage_key,
-            product_name, instruction, sort_order)
-         values ($1, $2, $3, $4, $5, $6, $7, $8)`,
-        [
-          task.id,
-          trip.id,
-          trip.assigned_helper_id,
-          photo.sourceSitePhotoId,
-          photo.storageKey,
-          normalized.productName,
-          normalized.instruction,
-          index,
-        ],
+        `update helper_app.media_objects
+         set media_kind = 'quote_task_photo',
+             retention_status = 'task_evidence'
+         where storage_key = any($1::text[])`,
+        [taskPhotos.map((photo) => photo.storageKey)],
       );
     }
+    await insertQuoteTaskPhotosBatch(client, {
+      instruction: normalized.instruction,
+      photos: taskPhotos,
+      productName: normalized.productName,
+      taskId: task.id,
+      tripId: trip.id,
+      helperId: trip.assigned_helper_id,
+    });
 
     await insertAuditEvent(client, {
       action: "admin_quote_task_created",
@@ -2011,16 +1970,13 @@ async function createRebuyTask(database, input) {
       ],
     );
     const task = result.rows[0];
-    for (const [index, photo] of referencePhotos.entries()) {
-      await upsertRebuyPhoto(client, {
-        helperId: assignedHelperId,
-        mediaKind: "rebuy_reference_photo",
-        photoRole: "reference",
-        rebuyTaskId: task.id,
-        sortOrder: index,
-        ...photo,
-      });
-    }
+    await upsertRebuyPhotosBatch(client, {
+      helperId: assignedHelperId,
+      mediaKind: "rebuy_reference_photo",
+      photos: referencePhotos,
+      photoRole: "reference",
+      rebuyTaskId: task.id,
+    });
     await insertAuditEvent(client, {
       action: "admin_rebuy_task_created",
       actor_role: "admin",
@@ -2160,16 +2116,13 @@ async function reportRebuyTask(database, input) {
     if (!normalized.reportPhotos.length && !normalized.reportPhotosOmitted) {
       throw new HelperAppServiceError("invalid_input", "Confirm when report photos are omitted.");
     }
-    for (const [index, photo] of normalized.reportPhotos.entries()) {
-      await upsertRebuyPhoto(client, {
-        helperId: helper.id,
-        mediaKind: "rebuy_report_photo",
-        photoRole: "report",
-        rebuyTaskId: task.id,
-        sortOrder: index,
-        ...photo,
-      });
-    }
+    await upsertRebuyPhotosBatch(client, {
+      helperId: helper.id,
+      mediaKind: "rebuy_report_photo",
+      photos: normalized.reportPhotos,
+      photoRole: "report",
+      rebuyTaskId: task.id,
+    });
     const result = await client.query(
       `update helper_app.rebuy_tasks
        set status = 'reported',
@@ -3263,90 +3216,174 @@ async function mergeApprovedStagingJob(database, input) {
   const expectedVersion = Number(requiredText(input.expectedVersion, "expectedVersion"));
   const idempotencyKey = requiredText(input.idempotencyKey, "idempotencyKey");
   const r2Store = input.r2Store || null;
-  return withTransaction(database, async (client) => {
+  const preparation = await withTransaction(database, async (client) => {
     const job = await lockStagingMergeJob(client, mergeJobId);
-    if (job.status === "merged" && job.merge_idempotency_key === idempotencyKey) return job;
-    if (job.status !== "approved") {
+    if (job.status === "merged" && job.merge_idempotency_key === idempotencyKey) {
+      return { alreadyMerged: true, job };
+    }
+    if (!["approved", "failed", "merging"].includes(job.status)) {
       throw new HelperAppServiceError("invalid_status", "Only approved staging batches can be merged.");
     }
-    if (Number(job.version) !== expectedVersion) {
+    if (job.status !== "approved" && job.merge_idempotency_key !== idempotencyKey) {
+      throw new HelperAppServiceError("merge_conflict", "Staging merge is already being processed with another key.");
+    }
+    if (job.status === "approved" && Number(job.version) !== expectedVersion) {
       throw new HelperAppServiceError("version_conflict", "Approved staging batch changed. Please refresh.");
     }
     const snapshot = job.approved_snapshot || await buildReviewedSnapshot(client, job.id);
-    const mainOrderIds = [];
     await client.query(
       `update helper_app.staging_merge_jobs
-       set status = 'merging', merge_idempotency_key = $2, updated_at = now()
-       where id = $1`,
+       set status = 'merging',
+           merge_idempotency_key = $2,
+           last_error = null,
+           updated_at = now()
+       where id = $1
+         and status in ('approved', 'failed', 'merging')`,
       [job.id, idempotencyKey],
     );
-    const orderRows = (snapshot.orders || []).map((order) => {
-      const orderId = deterministicId("helper_order", job.id, order.reviewedOrderId);
-      mainOrderIds.push(orderId);
-      return {
-        appearance_notes: order.appearanceNotes || "",
-        helper_id: order.helperId,
-        line_community_name: order.lineCommunityName,
-        merge_job_id: job.id,
-        notes: order.customerConfirmed && !order.customerExists
-          ? "Unknown customer explicitly confirmed during helper staging review."
-          : null,
-        order_date: snapshot.trip?.business_date,
-        order_id: orderId,
-        price_jpy: order.originalPriceJpy || 0,
-        price_twd: order.salePriceTwd,
-        product_name: order.productName,
-        quantity: order.quantity,
-        receivable_total_twd: order.quantity * order.salePriceTwd,
-        source_purchase_task_id: order.purchaseTaskId,
-        source_quote_photo_id: order.sourceQuoteTaskPhotoId,
-        source_quote_task_id: order.sourceQuoteTaskId,
-        source_rebuy_task_id: order.sourceRebuyTaskId,
-        source_trip: snapshot.trip?.trip_name || "",
-        staging_order_id: order.reviewedOrderId,
-        total_price: order.quantity * order.salePriceTwd,
-        trip_id: job.trip_id,
-      };
-    });
-    const sourceLinkRows = orderRows.map((order, index) => {
-      const sourceOrder = snapshot.orders[index];
-      return {
-        detail: { stagingOrderPreviewId: sourceOrder.stagingOrderPreviewId },
-        helper_id: order.helper_id,
-        merge_job_id: job.id,
-        order_id: order.order_id,
-        source_link_id: deterministicId("helper_source", job.id, sourceOrder.reviewedOrderId),
-        source_purchase_task_id: order.source_purchase_task_id,
-        source_quote_photo_id: order.source_quote_photo_id,
-        source_quote_task_id: order.source_quote_task_id,
-        source_rebuy_task_id: order.source_rebuy_task_id,
-        staging_order_id: order.staging_order_id,
-        trip_id: job.trip_id,
-      };
-    });
-    const photoRows = [];
-    for (const order of snapshot.orders || []) {
-      const orderId = deterministicId("helper_order", job.id, order.reviewedOrderId);
-      for (const photo of order.photos || []) {
-        const photoId = deterministicId("helper_photo", job.id, order.reviewedOrderId, photo.id);
-        photoRows.push({
-          final_storage_key: deterministicMainPhotoKey({
-            mergeJobId: job.id,
-            orderId,
-            photoId,
-            sourceStorageKey: photo.storageKey,
-          }),
-          label: photo.label || "",
-          order_id: orderId,
-          photo_id: photoId,
-          photo_role: photo.photoRole,
-          source_photo_id: photo.sourcePurchaseTaskPhotoId,
-          source_task_id: order.purchaseTaskId,
-          source_storage_key: photo.storageKey,
-          staging_order_photo_id: photo.id,
-        });
-      }
+    return { alreadyMerged: false, job, snapshot };
+  });
+  if (preparation.alreadyMerged) return preparation.job;
+
+  const { job, snapshot } = preparation;
+  const { mainOrderIds, orderRows, photoRows, sourceLinkRows } = buildMergeRows(job, snapshot);
+  try {
+    if (photoRows.length && r2Store) {
+      await Promise.all(photoRows.map((photo) => r2Store.copyObject(
+        photo.source_storage_key,
+        photo.final_storage_key,
+      )));
     }
+
+    return await withTransaction(database, async (client) => {
+      const currentJob = await lockStagingMergeJob(client, job.id);
+      if (currentJob.status === "merged" && currentJob.merge_idempotency_key === idempotencyKey) {
+        return currentJob;
+      }
+      if (currentJob.status !== "merging" || currentJob.merge_idempotency_key !== idempotencyKey) {
+        throw new HelperAppServiceError("merge_conflict", "Staging merge is already being processed with another key.");
+      }
+      await writeMergeRows(client, {
+        copyAuditRows: r2Store ? photoRows : [],
+        job,
+        orderRows,
+        photoRows,
+        sourceLinkRows,
+      });
+      const result = await client.query(
+        `update helper_app.staging_merge_jobs
+         set status = 'merged',
+             version = version + 1,
+             main_order_ids = $2::jsonb,
+             merged_by_user_id = $3,
+             merged_at = now(),
+             recovery_until = now() + interval '7 days',
+             last_error = null,
+             updated_at = now()
+         where id = $1
+         returning *`,
+        [job.id, JSON.stringify(mainOrderIds), input.actorUserId || null],
+      );
+      await insertAuditEvent(client, {
+        action: "admin_staging_merge_completed",
+        actor_role: "admin",
+        actor_user_id: input.actorUserId || null,
+        after_state: { mainOrderIds, mergeJobId: job.id },
+        before_state: { status: job.status },
+        trip_id: job.trip_id,
+      });
+      return result.rows[0];
+    });
+  } catch (error) {
+    await withTransaction(database, async (client) => {
+      await client.query(
+        `update helper_app.staging_merge_jobs
+         set status = 'failed',
+             last_error = $2,
+             updated_at = now()
+         where id = $1
+           and status = 'merging'
+           and merge_idempotency_key = $3`,
+        [job.id, String(error.message || error).slice(0, 2000), idempotencyKey],
+      );
+    }).catch(() => {});
+    throw error;
+  }
+}
+
+function buildMergeRows(job, snapshot) {
+  const mainOrderIds = [];
+  const orderRows = (snapshot.orders || []).map((order) => {
+    const orderId = deterministicId("helper_order", job.id, order.reviewedOrderId);
+    mainOrderIds.push(orderId);
+    return {
+      appearance_notes: order.appearanceNotes || "",
+      helper_id: order.helperId,
+      line_community_name: order.lineCommunityName,
+      merge_job_id: job.id,
+      notes: order.customerConfirmed && !order.customerExists
+        ? "Unknown customer explicitly confirmed during helper staging review."
+        : null,
+      order_date: snapshot.trip?.business_date,
+      order_id: orderId,
+      price_jpy: order.originalPriceJpy || 0,
+      price_twd: order.salePriceTwd,
+      product_name: order.productName,
+      quantity: order.quantity,
+      receivable_total_twd: order.quantity * order.salePriceTwd,
+      source_purchase_task_id: order.purchaseTaskId,
+      source_quote_photo_id: order.sourceQuoteTaskPhotoId,
+      source_quote_task_id: order.sourceQuoteTaskId,
+      source_rebuy_task_id: order.sourceRebuyTaskId,
+      source_trip: snapshot.trip?.trip_name || "",
+      staging_order_id: order.reviewedOrderId,
+      total_price: order.quantity * order.salePriceTwd,
+      trip_id: job.trip_id,
+    };
+  });
+  const sourceLinkRows = orderRows.map((order, index) => {
+    const sourceOrder = snapshot.orders[index];
+    return {
+      detail: { stagingOrderPreviewId: sourceOrder.stagingOrderPreviewId },
+      helper_id: order.helper_id,
+      merge_job_id: job.id,
+      order_id: order.order_id,
+      source_link_id: deterministicId("helper_source", job.id, sourceOrder.reviewedOrderId),
+      source_purchase_task_id: order.source_purchase_task_id,
+      source_quote_photo_id: order.source_quote_photo_id,
+      source_quote_task_id: order.source_quote_task_id,
+      source_rebuy_task_id: order.source_rebuy_task_id,
+      staging_order_id: order.staging_order_id,
+      trip_id: job.trip_id,
+    };
+  });
+  const photoRows = [];
+  for (const order of snapshot.orders || []) {
+    const orderId = deterministicId("helper_order", job.id, order.reviewedOrderId);
+    for (const photo of order.photos || []) {
+      const photoId = deterministicId("helper_photo", job.id, order.reviewedOrderId, photo.id);
+      photoRows.push({
+        final_storage_key: deterministicMainPhotoKey({
+          mergeJobId: job.id,
+          orderId,
+          photoId,
+          sourceStorageKey: photo.storageKey,
+        }),
+        label: photo.label || "",
+        order_id: orderId,
+        photo_id: photoId,
+        photo_role: photo.photoRole,
+        source_photo_id: photo.sourcePurchaseTaskPhotoId,
+        source_task_id: order.purchaseTaskId,
+        source_storage_key: photo.storageKey,
+        staging_order_photo_id: photo.id,
+      });
+    }
+  }
+  return { mainOrderIds, orderRows, photoRows, sourceLinkRows };
+}
+
+async function writeMergeRows(client, { copyAuditRows, job, orderRows, photoRows, sourceLinkRows }) {
     if (orderRows.length) {
       await client.query(
         `insert into main.orders
@@ -3405,11 +3442,7 @@ async function mergeApprovedStagingJob(database, input) {
         [JSON.stringify(sourceLinkRows)],
       );
     }
-    if (photoRows.length && r2Store) {
-      await Promise.all(photoRows.map((photo) => r2Store.copyObject(
-        photo.source_storage_key,
-        photo.final_storage_key,
-      )));
+    if (copyAuditRows.length) {
       await client.query(
         `insert into audit.merge_object_copies
            (merge_job_id, order_photo_id, source_key, destination_key, action)
@@ -3418,7 +3451,7 @@ async function mergeApprovedStagingJob(database, input) {
            photo_id text, source_storage_key text, final_storage_key text
          )
          on conflict (merge_job_id, order_photo_id, destination_key) do nothing`,
-        [job.id, JSON.stringify(photoRows)],
+        [job.id, JSON.stringify(copyAuditRows)],
       );
     }
     if (photoRows.length) {
@@ -3443,30 +3476,6 @@ async function mergeApprovedStagingJob(database, input) {
         [JSON.stringify(photoRows)],
       );
     }
-    const result = await client.query(
-      `update helper_app.staging_merge_jobs
-       set status = 'merged',
-           version = version + 1,
-           main_order_ids = $2::jsonb,
-           merged_by_user_id = $3,
-           merged_at = now(),
-           recovery_until = now() + interval '7 days',
-           last_error = null,
-           updated_at = now()
-       where id = $1
-       returning *`,
-      [job.id, JSON.stringify(mainOrderIds), input.actorUserId || null],
-    );
-    await insertAuditEvent(client, {
-      action: "admin_staging_merge_completed",
-      actor_role: "admin",
-      actor_user_id: input.actorUserId || null,
-      after_state: { mainOrderIds, mergeJobId: job.id },
-      before_state: { status: job.status },
-      trip_id: job.trip_id,
-    });
-    return result.rows[0];
-  });
 }
 
 async function activateTrip(database, { actorUserId, expectedVersion, tripId }) {
@@ -4807,26 +4816,99 @@ async function insertPurchaseTask(client, input) {
   return task;
 }
 
-async function insertPurchasePhoto(client, input) {
+async function insertSitePhotoBatchRows(client, { batchId, helperId, photos, tripId }) {
+  if (!photos.length) return;
   await client.query(
-    `insert into helper_app.purchase_task_photos
-       (purchase_task_id, trip_id, helper_id, storage_key, photo_role, sort_order)
-     values ($1, $2, $3, $4, $5, $6)
-     on conflict (purchase_task_id, photo_role, sort_order) do nothing`,
+    `insert into helper_app.media_objects
+       (storage_key, media_kind, retention_status, original_filename,
+        content_type, byte_size, uploaded_by_helper_id)
+     select input.storage_key, 'site_photo', 'temporary_work_media',
+            input.original_filename, input.content_type, input.byte_size,
+            input.uploaded_by_helper_id
+     from unnest($1::text[], $2::text[], $3::text[], $4::int[], $5::uuid[])
+       as input(storage_key, original_filename, content_type, byte_size, uploaded_by_helper_id)
+     on conflict (storage_key) do update
+     set original_filename = coalesce(excluded.original_filename, helper_app.media_objects.original_filename),
+         content_type = coalesce(excluded.content_type, helper_app.media_objects.content_type),
+         byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)`,
     [
-      input.purchaseTaskId,
-      input.tripId,
-      input.helperId,
-      input.storageKey,
-      input.photoRole,
-      input.sortOrder,
+      photos.map((photo) => photo.storageKey),
+      photos.map((photo) => photo.originalFilename || null),
+      photos.map((photo) => photo.contentType || null),
+      photos.map((photo) => Number.isFinite(Number(photo.byteSize)) ? Number(photo.byteSize) : null),
+      photos.map(() => helperId),
     ],
   );
   await client.query(
-    `update helper_app.media_objects
-     set retention_status = 'order_evidence'
-     where storage_key = $1`,
-    [input.storageKey],
+    `insert into helper_app.site_photos
+       (batch_id, trip_id, helper_id, client_photo_id, storage_key,
+        original_filename, content_type, byte_size, sort_order)
+     select $1, $2, $3, input.client_photo_id, input.storage_key,
+            input.original_filename, input.content_type, input.byte_size,
+            input.sort_order
+     from unnest($4::text[], $5::text[], $6::text[], $7::text[], $8::int[], $9::int[])
+       as input(client_photo_id, storage_key, original_filename, content_type, byte_size, sort_order)`,
+    [
+      batchId,
+      tripId,
+      helperId,
+      photos.map((photo) => photo.clientPhotoId),
+      photos.map((photo) => photo.storageKey),
+      photos.map((photo) => photo.originalFilename || null),
+      photos.map((photo) => photo.contentType || null),
+      photos.map((photo) => Number.isFinite(Number(photo.byteSize)) ? Number(photo.byteSize) : null),
+      photos.map((photo) => photo.sortOrder),
+    ],
+  );
+}
+
+async function upsertQuoteTaskMediaBatch(client, photos) {
+  if (!photos.length) return;
+  await client.query(
+    `insert into helper_app.media_objects
+       (storage_key, media_kind, retention_status, original_filename, content_type, byte_size)
+     select input.storage_key, 'quote_task_photo', 'task_evidence',
+            input.original_filename, input.content_type, input.byte_size
+     from unnest($1::text[], $2::text[], $3::text[], $4::int[])
+       as input(storage_key, original_filename, content_type, byte_size)
+     on conflict (storage_key) do update
+     set media_kind = 'quote_task_photo',
+         retention_status = 'task_evidence',
+         original_filename = excluded.original_filename,
+         content_type = excluded.content_type,
+         byte_size = excluded.byte_size`,
+    [
+      photos.map((photo) => photo.storageKey),
+      photos.map((photo) => photo.originalFilename || null),
+      photos.map((photo) => photo.contentType || null),
+      photos.map((photo) => Number.isFinite(Number(photo.byteSize)) ? Number(photo.byteSize) : null),
+    ],
+  );
+}
+
+async function insertQuoteTaskPhotosBatch(
+  client,
+  { instruction, photos, productName, taskId, tripId, helperId },
+) {
+  if (!photos.length) return;
+  await client.query(
+    `insert into helper_app.quote_task_photos
+       (quote_task_id, trip_id, helper_id, source_site_photo_id, storage_key,
+        product_name, instruction, sort_order)
+     select $1, $2, $3, input.source_site_photo_id, input.storage_key,
+            $4, $5, input.sort_order
+     from unnest($6::uuid[], $7::text[], $8::int[])
+       as input(source_site_photo_id, storage_key, sort_order)`,
+    [
+      taskId,
+      tripId,
+      helperId,
+      productName,
+      instruction,
+      photos.map((photo) => photo.sourceSitePhotoId || null),
+      photos.map((photo) => photo.storageKey),
+      photos.map((photo, index) => Number.isInteger(photo.sortOrder) ? photo.sortOrder : index),
+    ],
   );
 }
 
@@ -5030,12 +5112,16 @@ function assertHelperOwnsRebuyTask(task, helper) {
   }
 }
 
-async function upsertRebuyPhoto(client, input) {
+async function upsertRebuyPhotosBatch(client, { helperId, mediaKind, photos, photoRole, rebuyTaskId }) {
+  if (!photos.length) return;
   await client.query(
     `insert into helper_app.media_objects
        (storage_key, media_kind, retention_status, original_filename,
         content_type, byte_size, uploaded_by_helper_id)
-     values ($1, $2, 'order_evidence', $3, $4, $5, $6)
+     select input.storage_key, $5, 'order_evidence', input.original_filename,
+            input.content_type, input.byte_size, $6
+     from unnest($1::text[], $2::text[], $3::text[], $4::int[])
+       as input(storage_key, original_filename, content_type, byte_size)
      on conflict (storage_key) do update
      set media_kind = excluded.media_kind,
          retention_status = 'order_evidence',
@@ -5043,21 +5129,28 @@ async function upsertRebuyPhoto(client, input) {
          content_type = coalesce(excluded.content_type, helper_app.media_objects.content_type),
          byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)`,
     [
-      input.storageKey,
-      input.mediaKind,
-      input.originalFilename,
-      input.contentType,
-      input.byteSize,
-      input.helperId || null,
+      photos.map((photo) => photo.storageKey),
+      photos.map((photo) => photo.originalFilename || null),
+      photos.map((photo) => photo.contentType || null),
+      photos.map((photo) => Number.isFinite(Number(photo.byteSize)) ? Number(photo.byteSize) : null),
+      mediaKind,
+      helperId || null,
     ],
   );
   await client.query(
     `insert into helper_app.rebuy_task_photos
        (rebuy_task_id, storage_key, photo_role, sort_order)
-     values ($1, $2, $3, $4)
+     select $1, input.storage_key, $2, input.sort_order
+     from unnest($3::text[], $4::int[])
+       as input(storage_key, sort_order)
      on conflict (rebuy_task_id, photo_role, sort_order) do update
      set storage_key = excluded.storage_key`,
-    [input.rebuyTaskId, input.storageKey, input.photoRole, input.sortOrder],
+    [
+      rebuyTaskId,
+      photoRole,
+      photos.map((photo) => photo.storageKey),
+      photos.map((photo, index) => Number.isInteger(photo.sortOrder) ? photo.sortOrder : index),
+    ],
   );
 }
 
@@ -5069,16 +5162,16 @@ async function copyRebuyPhotosToPurchase(client, input) {
      order by photo_role asc, sort_order asc`,
     [input.rebuyTaskId],
   );
-  for (const photo of photos.rows) {
-    await insertPurchasePhoto(client, {
-      helperId: input.helperId,
-      photoRole: photo.photo_role === "reference" ? "manual_reference" : "detail_reply",
-      purchaseTaskId: input.purchaseTaskId,
-      sortOrder: photo.sort_order,
-      storageKey: photo.storage_key,
-      tripId: input.tripId,
-    });
-  }
+  const purchasePhotos = photos.rows.map((photo) => ({
+    helperId: input.helperId,
+    photoRole: photo.photo_role === "reference" ? "manual_reference" : "detail_reply",
+    purchaseTaskId: input.purchaseTaskId,
+    sortOrder: photo.sort_order,
+    storageKey: photo.storage_key,
+    tripId: input.tripId,
+  }));
+  await insertPurchasePhotosBatch(client, purchasePhotos);
+  await markMediaAsOrderEvidenceBatch(client, purchasePhotos.map((photo) => photo.storageKey));
 }
 
 async function refreshQuoteTaskStatus(client, quoteTaskId) {
