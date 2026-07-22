@@ -22,6 +22,7 @@ export function SitePhotoWorkspace({ tripId }: { tripId: string }) {
   const navigation = useTripSectionNavigation();
   const [batches, setBatches] = useState<BatchSummary[]>([]);
   const [error, setError] = useState("");
+  const [localBatchDetailOpen, setLocalBatchDetailOpen] = useState(false);
   const [loading, setLoading] = useState(true);
 
   const loadBatches = useCallback(async (signal?: AbortSignal) => {
@@ -57,21 +58,24 @@ export function SitePhotoWorkspace({ tripId }: { tripId: string }) {
 
   return (
     <section className="grid gap-4 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
-      <BackButton
-        label="返回連線"
-        onClick={() => navigation?.openWork()}
-        type="button"
-        variant="outline"
-      />
+      {!localBatchDetailOpen ? (
+        <BackButton
+          label="返回連線"
+          onClick={() => navigation?.openWork()}
+          type="button"
+          variant="outline"
+        />
+      ) : null}
       <div>
         <p className="text-xs font-semibold uppercase text-muted-foreground">區塊一</p>
         <h5 className="mt-1 text-xl font-semibold tracking-tight">現場大圖</h5>
       </div>
       <SitePhotoUploader
         onBatchSubmitted={() => loadBatches()}
+        onDetailOpenChange={setLocalBatchDetailOpen}
         tripId={tripId}
       />
-      {loading ? (
+      {!localBatchDetailOpen && loading ? (
         <div
           aria-label="正在載入照片批次"
           className="grid gap-2 border-t pt-4"
@@ -79,7 +83,7 @@ export function SitePhotoWorkspace({ tripId }: { tripId: string }) {
         >
           <div className="h-12 animate-pulse rounded-lg bg-muted" />
         </div>
-      ) : error ? (
+      ) : !localBatchDetailOpen && error ? (
         <div className="grid gap-2 border-t pt-4">
           <InsightBanner title={error} tone="red" />
           <Button
@@ -93,7 +97,7 @@ export function SitePhotoWorkspace({ tripId }: { tripId: string }) {
             重新載入
           </Button>
         </div>
-      ) : batches.length ? (
+      ) : !localBatchDetailOpen && batches.length ? (
         <div className="grid gap-3 border-t pt-4">
           {batches.map((batch) => (
             <Link
@@ -111,9 +115,9 @@ export function SitePhotoWorkspace({ tripId }: { tripId: string }) {
             </Link>
           ))}
         </div>
-      ) : (
+      ) : !localBatchDetailOpen ? (
         <EmptyState title="尚無照片批次" body="第一批照片送出後會顯示在這裡。" />
-      )}
+      ) : null}
     </section>
   );
 }

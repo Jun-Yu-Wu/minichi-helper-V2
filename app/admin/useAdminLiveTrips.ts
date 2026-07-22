@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 
+import { stableDataSignature } from "../../src/lib/refresh-signature";
+
 export type AdminLiveTrip = {
   helper_display_name?: string | null;
   id: string;
@@ -14,18 +16,21 @@ export function useAdminLiveTrips(initialTrips?: AdminLiveTrip[]) {
   const [loadingTrips, setLoadingTrips] = useState(initialTrips === undefined);
   const [tripsError, setTripsError] = useState("");
 
-  const loadTrips = useCallback(async () => {
-    setLoadingTrips(true);
+  const loadTrips = useCallback(async (showLoading = true) => {
+    if (showLoading) setLoadingTrips(true);
     try {
       const response = await fetch("/api/admin/live/trips", { cache: "no-store" });
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || "載入失敗");
-      setTrips(data.trips || []);
+      const nextTrips = data.trips || [];
+      setTrips((current) => (
+        stableDataSignature(current) === stableDataSignature(nextTrips) ? current : nextTrips
+      ));
       setTripsError("");
     } catch (error) {
       setTripsError(error instanceof Error ? error.message : "即時行程載入失敗。");
     } finally {
-      setLoadingTrips(false);
+      if (showLoading) setLoadingTrips(false);
     }
   }, []);
 
@@ -41,11 +46,11 @@ export function useAdminLiveTrips(initialTrips?: AdminLiveTrip[]) {
 
     async function loadVisibleTrips() {
       if (document.visibilityState !== "visible") return;
-      await loadTrips();
+      await loadTrips(false);
       if (!active) return;
     }
 
-    if (!hasInitialTrips) void loadVisibleTrips();
+    if (!hasInitialTrips) void loadTrips(true);
     timer = setInterval(() => void loadVisibleTrips(), 8000);
     document.addEventListener("visibilitychange", loadVisibleTrips);
     return () => {

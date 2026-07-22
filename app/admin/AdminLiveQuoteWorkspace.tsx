@@ -9,6 +9,7 @@ import { BackButton } from "../components/BackButton";
 import { StatusBadge } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { cn } from "../../src/lib/utils";
+import { stableDataSignature } from "../../src/lib/refresh-signature";
 import { QuickPublishPurchaseForm } from "./AdminForms";
 import { useAdminLiveTrips, type AdminLiveTrip } from "./useAdminLiveTrips";
 
@@ -88,13 +89,16 @@ export function AdminLiveQuoteWorkspace({
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "載入失敗");
         if (!canceled) {
-          setTasks(data.tasks || []);
+          const nextTasks = data.tasks || [];
+          setTasks((current) => (
+            stableDataSignature(current) === stableDataSignature(nextTasks) ? current : nextTasks
+          ));
           setLoadError("");
         }
       } catch (error) {
         if (!canceled) setLoadError(error instanceof Error ? error.message : "詢價任務載入失敗。");
       } finally {
-        if (!canceled) setLoadingTasks(false);
+        if (!canceled && showLoading) setLoadingTasks(false);
       }
     }
 

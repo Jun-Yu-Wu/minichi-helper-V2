@@ -8,6 +8,7 @@ import { EmptyState, InsightBanner, StatusBadge, Surface } from "../components/O
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
+import { stableDataSignature } from "../../src/lib/refresh-signature";
 
 const REFRESH_MS = 8000;
 
@@ -53,7 +54,6 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
   }, []);
 
   const loadTasks = useCallback(async (signal?: AbortSignal, showLoading = false) => {
-    setListError("");
     if (showLoading) setListLoading(true);
     try {
       const response = await fetch(
@@ -62,12 +62,16 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
       );
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "無法載入採買任務。");
-      setTasks(body.tasks || []);
+      const nextTasks = body.tasks || [];
+      setTasks((current) => (
+        stableDataSignature(current) === stableDataSignature(nextTasks) ? current : nextTasks
+      ));
+      setListError((current) => (current ? "" : current));
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
       setListError(error instanceof Error ? error.message : "無法載入採買任務。");
     } finally {
-      if (!signal?.aborted) setListLoading(false);
+      if (!signal?.aborted && showLoading) setListLoading(false);
     }
   }, [tripId]);
 

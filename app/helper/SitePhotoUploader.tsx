@@ -7,6 +7,7 @@ import {
   ArrowRight,
   Camera,
   Check,
+  ChevronRight,
   ImageUp,
   LoaderCircle,
   RefreshCw,
@@ -18,6 +19,7 @@ import {
   submitSitePhotoBatchAction,
   type HelperActionResult,
 } from "../actions/helper";
+import { BackButton } from "../components/BackButton";
 import { InsightBanner, StatusBadge } from "../components/OperationsUi";
 import { Button } from "../components/ui/button";
 
@@ -53,14 +55,17 @@ const JPEG_QUALITY = 0.84;
 
 export function SitePhotoUploader({
   onBatchSubmitted,
+  onDetailOpenChange,
   tripId,
 }: {
   onBatchSubmitted?: () => void;
+  onDetailOpenChange?: (open: boolean) => void;
   tripId: string;
 }) {
   const [note, setNote] = useState("");
   const [photos, setPhotos] = useState<SelectedPhoto[]>([]);
   const [batches, setBatches] = useState<LocalBatch[]>([]);
+  const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [isPreparing, setIsPreparing] = useState(false);
   const photosRef = useRef<SelectedPhoto[]>([]);
   const batchesRef = useRef<LocalBatch[]>([]);
@@ -324,6 +329,38 @@ export function SitePhotoUploader({
     );
   }
 
+  function openBatch(batchId: string) {
+    setSelectedBatchId(batchId);
+    onDetailOpenChange?.(true);
+  }
+
+  function closeBatch() {
+    setSelectedBatchId(null);
+    onDetailOpenChange?.(false);
+  }
+
+  const selectedBatch = selectedBatchId
+    ? batches.find((batch) => batch.id === selectedBatchId)
+    : null;
+
+  if (selectedBatch) {
+    return (
+      <div className="grid gap-4">
+        <BackButton label="返回批次列表" onClick={closeBatch} type="button" />
+        <div>
+          <p className="text-xs font-semibold uppercase text-muted-foreground">區塊一</p>
+          <h4 className="mt-1 font-semibold">{selectedBatch.note || "現場大圖批次"}</h4>
+        </div>
+        <LocalBatchCard
+          batch={selectedBatch}
+          onRetryPhoto={retryPhoto}
+          onRetryUpload={processUploads}
+          onSubmit={submitBatchMetadata}
+        />
+      </div>
+    );
+  }
+
   return (
     <div className="grid gap-4">
       <h4 className="font-semibold">上傳現場照片</h4>
@@ -427,92 +464,134 @@ export function SitePhotoUploader({
         <div className="grid gap-3 border-t pt-4">
           <h5 className="text-sm font-semibold">本次上傳</h5>
           {batches.map((batch) => {
-            const uploadedCount = batch.photos.filter((photo) => photo.storageKey).length;
-            const failedPhotos = batch.photos.filter((photo) => photo.uploadStatus === "failed");
             return (
-              <article className="rounded-lg border bg-background p-3" key={batch.id}>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <p className="text-sm font-medium">
-                    {uploadedCount}/{batch.photos.length} 張已上傳
-                  </p>
-                  <StatusBadge tone={batchTone(batch)}>
-                    {batchStatusLabel(batch)}
-                  </StatusBadge>
-                </div>
-                {batch.note ? (
-                  <p className="mt-1 text-sm text-muted-foreground">{batch.note}</p>
-                ) : null}
-                <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5">
-                  {batch.photos.map((photo) => (
-                    <div className="grid gap-1" key={photo.clientPhotoId}>
-                      <div className="relative">
-                        <img
-                          alt={photo.originalFilename}
-                          className="aspect-square w-full rounded-md object-cover"
-                          loading="lazy"
-                          src={photo.objectUrl}
-                        />
-                        <PhotoStatus status={photo.uploadStatus} />
-                      </div>
-                      {photo.uploadStatus === "failed" ? (
-                        <Button
-                          className="h-8 px-2 text-xs"
-                          disabled={batch.status === "uploading"}
-                          type="button"
-                          variant="outline"
-                          onClick={() => retryPhoto(batch.id, photo.clientPhotoId)}
-                        >
-                          <RefreshCw className="size-3" />
-                          重試
-                        </Button>
-                      ) : null}
-                    </div>
-                  ))}
-                </div>
-                {batch.error ? (
-                  <p className="mt-2 text-sm text-destructive">{batch.error}</p>
-                ) : null}
-                {failedPhotos.length > 1 ? (
-                  <Button
-                    className="mt-3"
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                    onClick={() => processUploads(batch)}
-                  >
-                    <RefreshCw className="size-4" />
-                    重試 {failedPhotos.length} 張失敗照片
-                  </Button>
-                ) : null}
-                {batch.status === "ready" ? (
-                  <Button
-                    className="mt-3"
-                    size="sm"
-                    type="button"
-                    onClick={() => submitBatchMetadata(batch)}
-                  >
-                    <Send className="size-4" />
-                    完成批次送出
-                  </Button>
-                ) : null}
-                {batch.status === "failed" && batch.errorStage === "submit" ? (
-                  <Button
-                    className="mt-3"
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                    onClick={() => submitBatchMetadata(batch)}
-                  >
-                    <RefreshCw className="size-4" />
-                    重新送出批次資料
-                  </Button>
-                ) : null}
-              </article>
+              <LocalBatchCard
+                batch={batch}
+                key={batch.id}
+                onOpen={() => openBatch(batch.id)}
+                onRetryPhoto={retryPhoto}
+                onRetryUpload={processUploads}
+                onSubmit={submitBatchMetadata}
+              />
             );
           })}
         </div>
       ) : null}
     </div>
+  );
+}
+
+function LocalBatchCard({
+  batch,
+  onOpen,
+  onRetryPhoto,
+  onRetryUpload,
+  onSubmit,
+}: {
+  batch: LocalBatch;
+  onOpen?: () => void;
+  onRetryPhoto?: (batchId: string, clientPhotoId: string) => void;
+  onRetryUpload?: (batch: LocalBatch) => void;
+  onSubmit?: (batch: LocalBatch) => void;
+}) {
+  const uploadedCount = batch.photos.filter((photo) => photo.storageKey).length;
+  const failedPhotos = batch.photos.filter((photo) => photo.uploadStatus === "failed");
+  const progressLabel = `${uploadedCount}/${batch.photos.length} 張已上傳`;
+
+  return (
+    <article className="rounded-lg border bg-background p-3">
+      {onOpen ? (
+        <button
+          aria-label={`查看${batch.note || "現場大圖批次"}上傳進度`}
+          className="flex w-full items-center justify-between gap-2 rounded-md text-left transition hover:bg-accent/40"
+          type="button"
+          onClick={onOpen}
+        >
+          <span className="min-w-0">
+            <span className="block text-sm font-medium">{progressLabel}</span>
+            {batch.note ? (
+              <span className="mt-1 block truncate text-sm text-muted-foreground">{batch.note}</span>
+            ) : null}
+          </span>
+          <span className="flex shrink-0 items-center gap-2">
+            <StatusBadge tone={batchTone(batch)}>{batchStatusLabel(batch)}</StatusBadge>
+            <ChevronRight aria-hidden="true" className="size-4 text-muted-foreground" />
+          </span>
+        </button>
+      ) : (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm font-medium">{progressLabel}</p>
+          <StatusBadge tone={batchTone(batch)}>{batchStatusLabel(batch)}</StatusBadge>
+        </div>
+      )}
+      <progress
+        aria-label={progressLabel}
+        className="mt-3 h-2 w-full overflow-hidden rounded-full"
+        max={batch.photos.length || 1}
+        value={uploadedCount}
+      />
+      {batch.note && !onOpen ? (
+        <p className="mt-1 text-sm text-muted-foreground">{batch.note}</p>
+      ) : null}
+      <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5">
+        {batch.photos.map((photo) => (
+          <div className="grid gap-1" key={photo.clientPhotoId}>
+            <div className="relative">
+              <img
+                alt={photo.originalFilename}
+                className="aspect-square w-full rounded-md object-cover"
+                loading="lazy"
+                src={photo.objectUrl}
+              />
+              <PhotoStatus status={photo.uploadStatus} />
+            </div>
+            {photo.uploadStatus === "failed" && onRetryPhoto ? (
+              <Button
+                className="h-8 px-2 text-xs"
+                disabled={batch.status === "uploading"}
+                type="button"
+                variant="outline"
+                onClick={() => onRetryPhoto(batch.id, photo.clientPhotoId)}
+              >
+                <RefreshCw className="size-3" />
+                重試
+              </Button>
+            ) : null}
+          </div>
+        ))}
+      </div>
+      {batch.error ? <p className="mt-2 text-sm text-destructive">{batch.error}</p> : null}
+      {onRetryUpload && failedPhotos.length > 1 ? (
+        <Button
+          className="mt-3"
+          size="sm"
+          type="button"
+          variant="outline"
+          onClick={() => onRetryUpload(batch)}
+        >
+          <RefreshCw className="size-4" />
+          重試 {failedPhotos.length} 張失敗照片
+        </Button>
+      ) : null}
+      {onSubmit && batch.status === "ready" ? (
+        <Button className="mt-3" size="sm" type="button" onClick={() => onSubmit(batch)}>
+          <Send className="size-4" />
+          完成批次送出
+        </Button>
+      ) : null}
+      {onSubmit && batch.status === "failed" && batch.errorStage === "submit" ? (
+        <Button
+          className="mt-3"
+          size="sm"
+          type="button"
+          variant="outline"
+          onClick={() => onSubmit(batch)}
+        >
+          <RefreshCw className="size-4" />
+          重新送出批次資料
+        </Button>
+      ) : null}
+    </article>
   );
 }
 

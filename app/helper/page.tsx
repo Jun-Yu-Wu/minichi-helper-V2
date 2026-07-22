@@ -677,7 +677,12 @@ function TripPreActiveState({
         ) : null}
       </div>
       {trip.status === "arrived" ? (
-        <WaitingForActivationRefresh />
+        <WaitingForActivationRefresh
+          initialStatus={trip.status}
+          initialUpdatedAt={trip.updated_at}
+          initialVersion={trip.version}
+          tripId={trip.id}
+        />
       ) : null}
     </Surface>
   );

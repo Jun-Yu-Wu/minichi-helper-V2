@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Button } from "../components/ui/button";
 import { RetryableError } from "../components/RetryableState";
 import { cn } from "../../src/lib/utils";
+import { stableDataSignature } from "../../src/lib/refresh-signature";
 import { useAdminLiveTrips, type AdminLiveTrip } from "./useAdminLiveTrips";
 
 type Trip = AdminLiveTrip;
@@ -74,21 +75,27 @@ export function AdminLivePhotosWorkspace({
         const data = await response.json();
         if (!response.ok) throw new Error(data.error || "載入失敗");
         if (!canceled) {
-          setBatches(data.batches || []);
+          const nextBatches = data.batches || [];
+          setBatches((current) => (
+            stableDataSignature(photoBatchState(current)) === stableDataSignature(photoBatchState(nextBatches))
+              ? current
+              : nextBatches
+          ));
           setLoadError("");
           setSelectedPhotoIds((current) => {
             const available = new Set(
-              (data.batches || []).flatMap((batch: SitePhotoBatch) =>
+              nextBatches.flatMap((batch: SitePhotoBatch) =>
                 (batch.photos || []).map((photo) => photo.id),
               ),
             );
-            return new Set(Array.from(current).filter((id) => available.has(id)));
+            const next = new Set(Array.from(current).filter((id) => available.has(id)));
+            return setsEqual(current, next) ? current : next;
           });
         }
       } catch (error) {
         if (!canceled) setLoadError(error instanceof Error ? error.message : "現場照片載入失敗。");
       } finally {
-        if (!canceled) setLoadingPhotos(false);
+        if (!canceled && showLoading) setLoadingPhotos(false);
       }
     }
 
@@ -402,6 +409,23 @@ export function AdminLivePhotosWorkspace({
       ) : null}
     </section>
   );
+}
+
+function photoBatchState(batches: SitePhotoBatch[]) {
+  return batches.map((batch) => ({
+    created_at: batch.created_at,
+    id: batch.id,
+    note: batch.note || null,
+    photos: (batch.photos || []).map((photo) => ({
+      id: photo.id,
+      original_filename: photo.original_filename || null,
+      sort_order: photo.sort_order,
+    })),
+  }));
+}
+
+function setsEqual(left: Set<string>, right: Set<string>) {
+  return left.size === right.size && Array.from(left).every((value) => right.has(value));
 }
 
 function buildBatchNames(batches: SitePhotoBatch[]) {
