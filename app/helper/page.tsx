@@ -719,7 +719,12 @@ function TripWorkspace({
   const workChrome = <ReturnToTripsButton />;
   const purchasePanel = <PurchaseTasks tripId={trip.id} />;
   const quotePanel = <QuoteTaskWorkspace tripId={trip.id} />;
-  const sitePanel = <SitePhotoWorkspace initialBatches={batches} tripId={trip.id} />;
+  const sitePanel = (
+    <SitePhotoWorkspace
+      initialBatches={panel === "site" ? batches : undefined}
+      tripId={trip.id}
+    />
+  );
 
   if (panel === "overview") {
     return (
