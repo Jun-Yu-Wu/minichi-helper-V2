@@ -8,6 +8,7 @@ import { BackButton } from "../components/BackButton";
 import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
+import { PhotoFileInput } from "../components/PhotoFileInput";
 import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 import { useStaleResource } from "../../src/lib/client-resource-cache";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
@@ -721,32 +722,24 @@ function QuotePhotoReplyForm({
             <label className="flex min-h-12 cursor-pointer items-center justify-center rounded-lg border bg-background px-3 text-sm font-medium">
               <Camera className="mr-2 size-4" aria-hidden="true" />
               拍照
-              <input
+              <PhotoFileInput
                 className="sr-only"
-                type="file"
                 accept="image/*"
                 capture="environment"
                 disabled={formLocked || isConverted || pending}
                 multiple
-                onChange={(event) => {
-                  addFiles(event.target.files);
-                  event.currentTarget.value = "";
-                }}
+                onFiles={addFiles}
               />
             </label>
             <label className="flex min-h-12 cursor-pointer items-center justify-center rounded-lg border bg-background px-3 text-sm font-medium">
               <ImageUp className="mr-2 size-4" aria-hidden="true" />
               從相簿選擇
-              <input
+              <PhotoFileInput
                 className="sr-only"
-                type="file"
                 accept="image/*"
                 disabled={formLocked || isConverted || pending}
                 multiple
-                onChange={(event) => {
-                  addFiles(event.target.files);
-                  event.currentTarget.value = "";
-                }}
+                onFiles={addFiles}
               />
             </label>
           </div>
@@ -761,7 +754,7 @@ function QuotePhotoReplyForm({
                 >
                   <div className="relative">
                     <img
-                      alt={detailPhoto.originalFilename}
+                      alt="細節照"
                       className="aspect-square w-full rounded-lg object-cover"
                       src={detailPhoto.objectUrl}
                     />
@@ -815,7 +808,7 @@ function QuotePhotoReplyForm({
           />
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
           <Button disabled={!canSubmit} type="submit">
-            {pending ? "照片上傳中，完成後送出..." : hasExistingReply ? "儲存" : "送出"}
+            送出
           </Button>
         </form>
       ) : null}
@@ -846,7 +839,7 @@ function replyStatusTone(status: string): "amber" | "blue" | "green" | "neutral"
 function statusLabel(status: UploadStatus) {
   if (status === "selected") return "待上傳";
   if (status === "uploading") return "上傳中";
-  if (status === "uploaded") return "已上傳";
+  if (status === "uploaded") return "";
   return "上傳失敗";
 }
 

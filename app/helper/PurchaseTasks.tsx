@@ -7,6 +7,7 @@ import { BackButton } from "../components/BackButton";
 import { EmptyState, InsightBanner, StatusBadge, Surface } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
+import { PhotoFileInput } from "../components/PhotoFileInput";
 import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
 import { useStaleResource } from "../../src/lib/client-resource-cache";
@@ -763,25 +764,22 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
               <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-background/70 p-3 text-center">
                 <Camera className="size-5" aria-hidden="true" />
                 <span className="text-sm">選擇挑臉確認照</span>
-                <input
+                <PhotoFileInput
                   className="sr-only"
-                  type="file"
                   accept="image/*"
-                  onChange={(event) => addFaceCheckPhoto(event.target.files)}
+                  onFiles={addFaceCheckPhoto}
                 />
               </label>
               {faceCheckPhoto ? (
-                <div className="grid gap-2 rounded-md border bg-background p-2">
-                  <img alt={faceCheckPhoto.originalFilename} className="aspect-square w-full max-w-48 rounded-md object-cover" src={faceCheckPhoto.objectUrl} />
+                <div className={`grid gap-2 rounded-md border p-2 ${faceCheckPhoto.status === "uploaded" ? "border-emerald-400 bg-emerald-50/40" : "bg-background"}`}>
+                  <img alt="挑臉確認照" className="aspect-square w-full max-w-48 rounded-md object-cover" src={faceCheckPhoto.objectUrl} />
                   <div className="mt-2 flex flex-wrap gap-2">
-                    <Button disabled={faceCheckPhoto.status === "uploading" || faceCheckPhoto.status === "uploaded"} size="sm" type="button" variant="outline" onClick={() => uploadFaceCheckPhoto()}>
-                      <RefreshCw className="mr-2 size-4" />
-                      {faceCheckPhoto.status === "uploading"
-                        ? "上傳中..."
-                        : faceCheckPhoto.status === "uploaded"
-                          ? "已上傳"
-                          : "重新上傳"}
-                    </Button>
+                    {faceCheckPhoto.status !== "uploaded" ? (
+                      <Button disabled={faceCheckPhoto.status === "uploading"} size="sm" type="button" variant="outline" onClick={() => uploadFaceCheckPhoto()}>
+                        <RefreshCw className="mr-2 size-4" />
+                        {faceCheckPhoto.status === "uploading" ? "上傳中" : "重試上傳"}
+                      </Button>
+                    ) : null}
                     <Button size="sm" type="button" variant="ghost" onClick={removeFaceCheckPhoto}>
                       <X className="mr-2 size-4" />
                       移除
@@ -829,13 +827,7 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
             ) : null}
             <Button disabled={!canSubmit} type="submit">
               {needsFinalConfirmation ? <Check className="mr-2 size-4" /> : <PackageCheck className="mr-2 size-4" />}
-              {pending
-                ? "送出中..."
-                : needsFinalConfirmation
-                  ? "確認完成"
-                  : effectivePurchaseAction === "complete"
-                    ? "確認完成採買"
-                    : "確認取消採買"}
+              送出
             </Button>
           </form>
         </>

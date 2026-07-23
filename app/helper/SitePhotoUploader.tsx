@@ -21,6 +21,7 @@ import {
 } from "../actions/helper";
 import { BackButton } from "../components/BackButton";
 import { InsightBanner, StatusBadge } from "../components/OperationsUi";
+import { PhotoFileInput } from "../components/PhotoFileInput";
 import { Button } from "../components/ui/button";
 import {
   type BatchStatus,
@@ -365,11 +366,11 @@ export function SitePhotoUploader({
         <div className="grid gap-3">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {photos.map((photo, index) => (
-              <div key={photo.clientPhotoId} className="rounded-lg border bg-background p-2">
+              <div key={photo.clientPhotoId} className={`rounded-lg border p-2 ${photo.uploadStatus === "uploaded" ? "border-emerald-400 bg-emerald-50/40" : "bg-background"}`}>
                 <div className="relative">
                   <img
                     src={photo.objectUrl}
-                    alt={photo.originalFilename}
+                    alt="現場照片"
                     className="aspect-square w-full rounded-md object-cover"
                   />
                   <span className="absolute left-2 top-2 flex size-7 items-center justify-center rounded-full bg-black/70 text-xs font-semibold text-white">
@@ -377,9 +378,6 @@ export function SitePhotoUploader({
                   </span>
                 </div>
                 <div className="mt-2 grid gap-2">
-                  <p className="truncate text-xs text-muted-foreground">
-                    {photo.originalFilename}
-                  </p>
                   <div className="grid grid-cols-3 gap-1">
                     <IconButton
                       disabled={index === 0}
@@ -430,7 +428,7 @@ export function SitePhotoUploader({
           onClick={submitBatch}
         >
           <Send className="size-4" />
-          上傳 {photos.length ? `${photos.length} 張` : "照片"}
+          送出
         </Button>
       </div>
 
@@ -470,7 +468,7 @@ function LocalBatchCard({
 }) {
   const uploadedCount = batch.photos.filter((photo) => photo.storageKey).length;
   const failedPhotos = batch.photos.filter((photo) => photo.uploadStatus === "failed");
-  const progressLabel = `${uploadedCount}/${batch.photos.length} 張已上傳`;
+  const progressLabel = `${uploadedCount}/${batch.photos.length}`;
 
   return (
     <article className="rounded-lg border bg-background p-3">
@@ -482,7 +480,7 @@ function LocalBatchCard({
           onClick={onOpen}
         >
           <span className="min-w-0">
-            <span className="block text-sm font-medium">{progressLabel}</span>
+            <span className="block text-sm font-medium">照片進度 {progressLabel}</span>
             {batch.note ? (
               <span className="mt-1 block truncate text-sm text-muted-foreground">{batch.note}</span>
             ) : null}
@@ -494,7 +492,7 @@ function LocalBatchCard({
         </button>
       ) : (
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <p className="text-sm font-medium">{progressLabel}</p>
+          <p className="text-sm font-medium">照片進度 {progressLabel}</p>
           <StatusBadge tone={batchTone(batch)}>{batchStatusLabel(batch)}</StatusBadge>
         </div>
       )}
@@ -510,9 +508,9 @@ function LocalBatchCard({
       <div className="mt-3 grid grid-cols-3 gap-2 sm:grid-cols-5">
         {batch.photos.map((photo) => (
           <div className="grid gap-1" key={photo.clientPhotoId}>
-            <div className="relative">
+            <div className={`relative rounded-md border ${photo.uploadStatus === "uploaded" ? "border-emerald-400" : "border-transparent"}`}>
               <img
-                alt={photo.originalFilename}
+                alt="現場照片"
                 className="aspect-square w-full rounded-md object-cover"
                 loading="lazy"
                 src={photo.objectUrl}
@@ -550,7 +548,7 @@ function LocalBatchCard({
       {onSubmit && batch.status === "ready" ? (
         <Button className="mt-3" size="sm" type="button" onClick={() => onSubmit(batch)}>
           <Send className="size-4" />
-          完成批次送出
+          送出
         </Button>
       ) : null}
       {onSubmit && batch.status === "failed" && batch.errorStage === "submit" ? (
@@ -562,7 +560,7 @@ function LocalBatchCard({
           onClick={() => onSubmit(batch)}
         >
           <RefreshCw className="size-4" />
-          重新送出批次資料
+          送出
         </Button>
       ) : null}
     </article>
@@ -586,17 +584,12 @@ function PhotoPicker({
     <label className="flex min-h-24 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed bg-muted/30 p-3 text-center transition hover:bg-accent/50">
       {icon}
       <span className="text-sm font-semibold">{label}</span>
-      <input
+      <PhotoFileInput
         accept="image/*"
         capture={capture}
         className="sr-only"
         multiple={multiple}
-        type="file"
-        onChange={(event) => {
-          const selected = event.currentTarget.files;
-          void onFiles(selected);
-          event.currentTarget.value = "";
-        }}
+        onFiles={onFiles}
       />
     </label>
   );

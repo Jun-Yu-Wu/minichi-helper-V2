@@ -12,6 +12,7 @@ import {
 import { InsightBanner, Surface } from "../components/OperationsUi";
 import { SettlementAmountHero } from "../components/SettlementUi";
 import { Button } from "../components/ui/button";
+import { PhotoFileInput } from "../components/PhotoFileInput";
 import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 
 type UploadPhoto = {
@@ -128,14 +129,8 @@ export function SettlementPrecheckForm({ settlement }: { settlement: any }) {
           </div>
           <textarea name="helperNote" placeholder="補充說明（選填）" />
           <Button disabled={pending || waitingForUploads || !receipt || receipt.status === "failed"} type="submit">
-            {pending || waitingForUploads ? (
-              <>
-                <Loader2 className="size-4 animate-spin" />
-                {waitingForUploads ? "等待照片上傳..." : "送出中..."}
-              </>
-            ) : (
-              "送出結帳預檢"
-            )}
+            {pending || waitingForUploads ? <Loader2 className="size-4 animate-spin" /> : null}
+            送出
           </Button>
           <ActionMessage state={state} />
         </form>
@@ -206,14 +201,8 @@ export function WarehouseProofForm({ settlement }: { settlement: any }) {
         />
         <textarea name="note" placeholder="集運倉補充說明（選填）" />
         <Button disabled={pending || waitingForUpload || !proof || proof.status === "failed"} type="submit">
-          {pending || waitingForUpload ? (
-            <>
-              <Loader2 className="size-4 animate-spin" />
-              {waitingForUpload ? "等待照片上傳..." : "送出中..."}
-            </>
-          ) : (
-            "送出集運倉證明"
-          )}
+            {pending || waitingForUpload ? <Loader2 className="size-4 animate-spin" /> : null}
+            送出
         </Button>
         <ActionMessage state={state} />
       </form>
@@ -303,7 +292,7 @@ export function SettlementSummary({ settlement }: { settlement: any }) {
       ) : null}
       {canEdit && settlement.evidence?.length ? (
         <div className="grid gap-2">
-          <p className="text-sm font-medium">已上傳照片</p>
+          <p className="text-sm font-medium">附加照片</p>
           <div className="flex flex-wrap gap-2">
             {settlement.evidence.map((item: any) => (
               <PhotoViewerTrigger
@@ -377,12 +366,11 @@ function PhotoUpload({
       <label className="flex cursor-pointer items-center gap-2 text-sm font-medium">
         <Camera className="size-4" />
         {label}
-        <input
+        <PhotoFileInput
           accept="image/*"
           className="sr-only"
-          type="file"
-          onChange={(event) => {
-            const file = event.target.files?.[0];
+          onFiles={(files) => {
+            const file = files?.[0];
             if (!file) return;
             const nextPhoto: UploadPhoto = {
               byteSize: file.size,
@@ -399,20 +387,19 @@ function PhotoUpload({
       </label>
       {photo ? (
         <div className="grid gap-2">
-          <div className="flex items-center gap-3 rounded-md bg-background p-2">
+          <div className={`flex items-center gap-3 rounded-md border p-2 ${photo.status === "uploaded" ? "border-emerald-400 bg-emerald-50/40" : "bg-background"}`}>
             <img alt={label} className="size-16 rounded-md border object-cover" src={previewUrl} />
             <div className="min-w-0 text-sm">
-              <p className="truncate font-medium">{photo.originalFilename}</p>
-              <p className={photo.status === "uploaded" ? "text-primary" : "text-muted-foreground"}>
-                {photo.status === "uploaded" ? "已上傳" : photo.status === "uploading" ? "上傳中" : photo.status === "failed" ? "上傳失敗" : "尚未上傳"}
-              </p>
+              {photo.status !== "uploaded" ? <p className="text-muted-foreground">{photo.status === "uploading" ? "上傳中" : photo.status === "failed" ? "上傳失敗" : "準備上傳"}</p> : null}
               {photo.error ? <p className="text-xs text-destructive">{photo.error}</p> : null}
             </div>
           </div>
-          <Button disabled={photo.status === "uploading" || photo.status === "uploaded"} size="sm" type="button" variant="outline" onClick={() => void upload()}>
-            {photo.status === "uploading" ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
-            {photo.status === "uploaded" ? "已上傳" : photo.status === "failed" ? "重試上傳" : photo.status === "uploading" ? "上傳中" : "自動上傳中"}
-          </Button>
+          {photo.status !== "uploaded" ? (
+            <Button disabled={photo.status === "uploading"} size="sm" type="button" variant="outline" onClick={() => void upload()}>
+              {photo.status === "uploading" ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />}
+              {photo.status === "failed" ? "重試上傳" : "上傳"}
+            </Button>
+          ) : null}
         </div>
       ) : null}
     </div>

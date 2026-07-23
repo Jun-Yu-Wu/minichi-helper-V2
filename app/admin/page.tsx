@@ -3,7 +3,6 @@ import { Suspense } from "react";
 import type React from "react";
 import {
   CalendarDays,
-  Camera,
   ChevronRight,
   ClipboardList,
   CreditCard,
@@ -12,7 +11,6 @@ import {
   Merge,
   PackageSearch,
   Radio,
-  ShoppingBag,
   UserRound,
 } from "lucide-react";
 
@@ -55,7 +53,6 @@ import {
   CreateTripForm,
   EditHelperForm,
   RepairTripForm,
-  TaskSubtypePublisher,
 } from "./AdminForms";
 import { AdminLivePhotosWorkspace } from "./AdminLivePhotosWorkspace";
 import { AdminLivePurchaseWorkspace } from "./AdminLivePurchaseWorkspace";
@@ -65,6 +62,7 @@ import { SettlementActionForm } from "./SettlementActionForm";
 import { SettlementExchangeRateForm } from "./SettlementExchangeRateForm";
 import { StagingOrderSelectionForm } from "./StagingOrderSelectionForm";
 import { StagingReviewedOrderEditor, StagingReviewedOrderPhotosEditor } from "./StagingReviewedOrderEditors";
+import { TaskPublishingWizard } from "./TaskPublishingWizard";
 
 type AdminSearchParams = {
   checkoutSettlementId?: string;
@@ -454,7 +452,7 @@ function AdminSettlementDetail({ settlement }: { settlement: any }) {
                 ) : null}
               {settlement.evidence?.length ? (
                 <div className="grid gap-2 rounded-2xl border bg-background p-3">
-                  <p className="text-sm font-medium">已上傳照片</p>
+                  <p className="text-sm font-medium">附加照片</p>
                   <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
                   {settlement.evidence.map((item: any) => (
                       <div className="grid gap-1 text-xs text-muted-foreground" key={item.id}>
@@ -1059,60 +1057,15 @@ function AdminTaskPublishing({
   selectedTripId?: string;
 }) {
   const activeTrips = dashboard.trips.filter((trip: any) => trip.status === "active");
-  const category = normalizeTaskCategory(selectedCategory);
-  const subType = normalizeTaskSubType(category, selectedSubType);
-  const selectedTrip = activeTrips.find((trip: any) => trip.id === selectedTripId);
 
   return (
     <AdminSection icon={<ClipboardList className="size-5" />} title="任務發布">
-      <div className="grid gap-5">
-        <TaskStep number="1" title="選擇任務大類">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <SelectionCard
-              active={category === "quote"}
-              body="報價、細圖，或報價＋細圖。"
-              href="/admin?view=tasks&taskCategory=quote"
-              icon={<Camera className="size-5" />}
-              title="報價／細圖任務"
-            />
-            <SelectionCard
-              active={category === "purchase"}
-              body="一般採買或需要管理員審核的挑臉採買。"
-              href="/admin?view=tasks&taskCategory=purchase"
-              icon={<ShoppingBag className="size-5" />}
-              title="採買任務"
-            />
-          </div>
-        </TaskStep>
-
-        {category ? (
-          <TaskStep number="2" title="選擇正在進行中的行程">
-            {activeTrips.length ? (
-              <div className="grid gap-3 sm:grid-cols-2">
-                {activeTrips.map((trip: any) => (
-                  <SelectionCard
-                    active={selectedTrip?.id === trip.id}
-                    body={`${trip.helper_display_name || "未指派"} · 選取後選擇細任務`}
-                    href={adminTaskHref(category, undefined, trip.id)}
-                    key={trip.id}
-                    title={trip.trip_name}
-                  />
-                ))}
-              </div>
-            ) : (
-              <EmptyPanel title="沒有進行中的行程" body="行程啟用後才可發布任務。" />
-            )}
-          </TaskStep>
-        ) : null}
-
-        {category && selectedTrip ? (
-          <TaskSubtypePublisher
-            category={category}
-            initialSubType={subType}
-            trip={selectedTrip}
-          />
-        ) : null}
-      </div>
+      <TaskPublishingWizard
+        activeTrips={activeTrips}
+        initialCategory={selectedCategory}
+        initialSubType={selectedSubType}
+        initialTripId={selectedTripId}
+      />
     </AdminSection>
   );
 }
@@ -2143,29 +2096,6 @@ function settlementEvidenceLabel(type: string) {
   if (type === "transport_proof") return "交通照片";
   if (type === "warehouse_proof") return "集運倉照片";
   return "照片";
-}
-
-function adminTaskHref(category: string, subType?: string, tripId?: string) {
-  const query = new URLSearchParams({ taskCategory: category, view: "tasks" });
-  if (subType) query.set("taskSubType", subType);
-  if (tripId) query.set("taskTripId", tripId);
-  return `/admin?${query.toString()}`;
-}
-
-function isQuoteTaskType(value?: string): value is "detail" | "quote" | "quote_and_detail" {
-  return ["detail", "quote", "quote_and_detail"].includes(value || "");
-}
-
-function normalizeTaskCategory(value?: string) {
-  return value === "quote" || value === "purchase" ? value : undefined;
-}
-
-function normalizeTaskSubType(category?: string, value?: string) {
-  if (category === "quote" && isQuoteTaskType(value)) return value;
-  if (category === "purchase" && ["standard", "face_check"].includes(value || "")) {
-    return value;
-  }
-  return undefined;
 }
 
 function normalizeAdminView(value?: string) {

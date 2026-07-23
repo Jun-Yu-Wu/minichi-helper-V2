@@ -15,6 +15,7 @@ import {
   type AdminActionResult,
 } from "../actions/admin";
 import { Button } from "../components/ui/button";
+import { PhotoFileInput } from "../components/PhotoFileInput";
 import { preparePhotoForUpload } from "../../src/lib/client-photo-upload";
 
 const initialState: AdminActionResult = {};
@@ -241,10 +242,12 @@ const purchaseTaskTypes = [
 export function TaskSubtypePublisher({
   category,
   initialSubType,
+  onSubTypeChange,
   trip,
 }: {
   category: TaskCategory;
   initialSubType?: string;
+  onSubTypeChange?: (subType: TaskSubType) => void;
   trip: QuoteTaskFormProps["trip"];
 }) {
   const options = category === "quote" ? quoteTaskTypes : purchaseTaskTypes;
@@ -278,7 +281,10 @@ export function TaskSubtypePublisher({
               }`}
               key={option.id}
               type="button"
-              onClick={() => setSubType(option.id)}
+              onClick={() => {
+                setSubType(option.id);
+                onSubTypeChange?.(option.id);
+              }}
             >
               <p className="font-semibold">{option.label}</p>
               <p className="mt-2 text-sm text-muted-foreground">{option.body}</p>
@@ -544,31 +550,28 @@ export function CreateRebuyTaskForm({
         <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-3 text-center">
           <ImageUp className="size-5" aria-hidden="true" />
           <span className="text-sm">選擇商品照片或補買參考截圖</span>
-          <input
+          <PhotoFileInput
             accept="image/*"
             className="sr-only"
             disabled={pending}
             multiple
-            type="file"
-            onChange={(event) => {
-              addFiles(event.currentTarget.files);
-              event.currentTarget.value = "";
-            }}
+            onFiles={addFiles}
           />
         </label>
         {photos.length ? (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {photos.map((photo) => (
-              <div className="rounded-md border bg-background p-2" key={photo.clientPhotoId}>
+              <div className={`rounded-md border p-2 ${photo.status === "uploaded" ? "border-emerald-400 bg-emerald-50/40" : "bg-background"}`} key={photo.clientPhotoId}>
                 <img
-                  alt={photo.originalFilename}
+                  alt="補買參考照"
                   className="aspect-square w-full rounded-md object-cover"
                   src={photo.objectUrl}
                 />
                 <div className="mt-2 flex items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">{photo.originalFilename}</p>
-                    <p className="text-xs text-muted-foreground">{adminUploadStatusLabel(photo.status)}</p>
+                    {adminUploadStatusLabel(photo.status) ? (
+                      <p className="text-xs text-muted-foreground">{adminUploadStatusLabel(photo.status)}</p>
+                    ) : null}
                   </div>
                   {!pending ? (
                     <button
@@ -589,7 +592,7 @@ export function CreateRebuyTaskForm({
       </div>
       <ActionMessage state={state} />
       <Button className="sm:w-fit" disabled={pending || photos.some((photo) => Boolean(photo.error))} type="submit">
-        {pending ? "建立中..." : "建立補買任務"}
+        送出
       </Button>
       </> : null}
     </form>
@@ -779,32 +782,29 @@ export function CreatePurchaseTaskForm({
         <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-3 text-center">
           <ImageUp className="size-5" aria-hidden="true" />
           <span className="text-sm">選擇商品照片或參考截圖</span>
-          <input
+          <PhotoFileInput
             accept="image/*"
             className="sr-only"
             disabled={!canCreate || pending}
             multiple
             required={!photos.length}
-            type="file"
-            onChange={(event) => {
-              addFiles(event.currentTarget.files);
-              event.currentTarget.value = "";
-            }}
+            onFiles={addFiles}
           />
         </label>
         {photos.length ? (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {photos.map((photo) => (
-              <div className="rounded-md border bg-background p-2" key={photo.clientPhotoId}>
+              <div className={`rounded-md border p-2 ${photo.status === "uploaded" ? "border-emerald-400 bg-emerald-50/40" : "bg-background"}`} key={photo.clientPhotoId}>
                 <img
-                  alt={photo.originalFilename}
+                  alt="採買參考照"
                   className="aspect-square w-full rounded-md object-cover"
                   src={photo.objectUrl}
                 />
                 <div className="mt-2 flex items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">{photo.originalFilename}</p>
-                    <p className="text-xs text-muted-foreground">{adminUploadStatusLabel(photo.status)}</p>
+                    {adminUploadStatusLabel(photo.status) ? (
+                      <p className="text-xs text-muted-foreground">{adminUploadStatusLabel(photo.status)}</p>
+                    ) : null}
                   </div>
                   {!pending ? (
                     <button
@@ -834,7 +834,7 @@ export function CreatePurchaseTaskForm({
         size="sm"
         type="submit"
       >
-        {pending ? "發布中..." : requiresFaceCheck ? "發布挑臉採買" : "發布一般採買"}
+        送出
       </Button>
     </form>
   );
@@ -1190,27 +1190,23 @@ function CreateUploadedQuoteTaskForm({
         <label className="flex min-h-24 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-4 text-center">
           <ImageUp className="size-5" aria-hidden="true" />
           <span className="text-sm">選擇要發布{adminQuoteTaskTypeLabel(taskType)}任務的照片</span>
-          <input
+          <PhotoFileInput
             accept="image/*"
             className="sr-only"
             disabled={pending}
             multiple
             required={!photos.length}
-            type="file"
-            onChange={(event) => {
-              addFiles(event.currentTarget.files);
-              event.currentTarget.value = "";
-            }}
+            onFiles={addFiles}
           />
         </label>
       </div>
       {photos.length ? (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           {photos.map((photo, index) => (
-            <div className="rounded-lg border bg-background p-2" key={photo.clientPhotoId}>
+            <div className={`rounded-lg border p-2 ${photo.status === "uploaded" ? "border-emerald-400 bg-emerald-50/40" : "bg-background"}`} key={photo.clientPhotoId}>
               <div className="relative">
                 <img
-                  alt={photo.originalFilename}
+                  alt="任務照片"
                   className="aspect-square w-full rounded-md object-cover"
                   src={photo.objectUrl}
                 />
@@ -1220,8 +1216,9 @@ function CreateUploadedQuoteTaskForm({
               </div>
               <div className="mt-2 flex items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <p className="truncate text-sm font-medium">{photo.originalFilename}</p>
-                  <p className="text-xs text-muted-foreground">{adminUploadStatusLabel(photo.status)}</p>
+                  {adminUploadStatusLabel(photo.status) ? (
+                    <p className="text-xs text-muted-foreground">{adminUploadStatusLabel(photo.status)}</p>
+                  ) : null}
                 </div>
                 {!pending ? (
                   <button
@@ -1249,7 +1246,7 @@ function CreateUploadedQuoteTaskForm({
         size="sm"
         type="submit"
       >
-        {pending ? "發布中..." : photos.some((photo) => photo.status === "uploading") ? "照片上傳中，仍可送出" : "送出"}
+        送出
       </Button>
     </form>
   );
@@ -1317,7 +1314,7 @@ async function uploadAdminRebuyReferencePhoto(photo: AdminTaskUploadPhoto) {
 
 function adminUploadStatusLabel(status: AdminTaskUploadPhoto["status"]) {
   if (status === "uploading") return "上傳中";
-  if (status === "uploaded") return "已上傳";
+  if (status === "uploaded") return "";
   if (status === "failed") return "上傳失敗";
   return "等待發布";
 }

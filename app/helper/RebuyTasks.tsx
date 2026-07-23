@@ -15,6 +15,7 @@ import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
 import { BackButton } from "../components/BackButton";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
+import { PhotoFileInput } from "../components/PhotoFileInput";
 import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 import { useStaleResource } from "../../src/lib/client-resource-cache";
 
@@ -575,31 +576,28 @@ function RebuyReportForm({ onReported, task }: { onReported: (task: any) => void
         <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-3 text-center">
           <ImageUp className="size-5" aria-hidden="true" />
           <span className="text-sm">選擇補買現場照或收據截圖</span>
-          <input
+          <PhotoFileInput
             accept="image/*"
             className="sr-only"
             disabled={pending}
             multiple
-            type="file"
-            onChange={(uploadEvent) => {
-              addFiles(uploadEvent.currentTarget.files);
-              uploadEvent.currentTarget.value = "";
-            }}
+            onFiles={addFiles}
           />
         </label>
         {photos.length ? (
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {photos.map((photo) => (
-              <div className="rounded-md border bg-card p-2" key={photo.clientPhotoId}>
+              <div className={`rounded-md border p-2 ${photo.status === "uploaded" ? "border-emerald-400 bg-emerald-50/40" : "bg-card"}`} key={photo.clientPhotoId}>
                 <img
-                  alt={photo.originalFilename}
+                  alt="補買回報照"
                   className="aspect-square w-full rounded-md object-cover"
                   src={photo.objectUrl}
                 />
                 <div className="mt-2 flex items-start justify-between gap-2">
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">{photo.originalFilename}</p>
-                    <p className="text-xs text-muted-foreground">{uploadStatusLabel(photo.status)}</p>
+                    {uploadStatusLabel(photo.status) ? (
+                      <p className="text-xs text-muted-foreground">{uploadStatusLabel(photo.status)}</p>
+                    ) : null}
                   </div>
                   {!pending ? (
                     <button
@@ -624,7 +622,7 @@ function RebuyReportForm({ onReported, task }: { onReported: (task: any) => void
       </label>
       {error ? <p className="text-sm text-destructive">{error}</p> : null}
       <Button disabled={pending || photos.some((photo) => Boolean(photo.error))} type="submit">
-        {pending ? "上傳並回報中..." : "送出補買回報"}
+        送出
       </Button>
     </form>
   );
@@ -656,7 +654,7 @@ async function uploadRebuyReportPhoto(photo: RebuyUploadPhoto, rebuyTaskId: stri
 
 function uploadStatusLabel(status: RebuyUploadPhoto["status"]) {
   if (status === "uploading") return "上傳中";
-  if (status === "uploaded") return "已上傳";
+  if (status === "uploaded") return "";
   if (status === "failed") return "上傳失敗";
   return "等待送出";
 }
