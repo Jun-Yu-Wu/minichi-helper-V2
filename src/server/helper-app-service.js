@@ -1173,10 +1173,20 @@ async function listAdminQuoteTaskSummaries(
   return result.rows;
 }
 
-async function listSitePhotoBatches(database, { helperId = null, tripIds = null } = {}) {
+/**
+ * @param {{batchId?: string|null, helperId?: string|null, includePhotos?: boolean, tripIds?: string[]|null}} options
+ */
+async function listSitePhotoBatches(
+  database,
+  { batchId, helperId, includePhotos = true, tripIds } = {},
+) {
   if (tripIds && tripIds.length === 0) return [];
   const conditions = [];
   const params = [];
+  if (batchId) {
+    params.push(batchId);
+    conditions.push(`b.id = $${params.length}`);
+  }
   if (helperId) {
     params.push(helperId);
     conditions.push(`b.helper_id = $${params.length}`);
@@ -1186,12 +1196,8 @@ async function listSitePhotoBatches(database, { helperId = null, tripIds = null 
     conditions.push(`b.trip_id = any($${params.length}::uuid[])`);
   }
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
-  const result = await database.query(
-    `select b.id, b.trip_id, b.helper_id, b.submission_id, b.note, b.status,
-            b.created_at, b.updated_at,
-            t.trip_name, t.business_date, t.timezone, t.status as trip_status,
-            hp.display_name as helper_display_name,
-            coalesce(
+  const photoExpression = includePhotos
+    ? `coalesce(
               jsonb_agg(
                 jsonb_build_object(
                   'id', p.id,
@@ -1208,7 +1214,19 @@ async function listSitePhotoBatches(database, { helperId = null, tripIds = null 
                 order by p.sort_order asc
               ) filter (where p.id is not null),
               '[]'::jsonb
-            ) as photos
+            )`
+    : `'[]'::jsonb`;
+  const result = await database.query(
+    `select b.id, b.trip_id, b.helper_id, b.submission_id, b.note, b.status,
+            b.created_at, b.updated_at,
+            t.trip_name, t.business_date, t.timezone, t.status as trip_status,
+            hp.display_name as helper_display_name,
+            count(p.id)::int as photo_count,
+            (row_number() over (
+              partition by b.trip_id
+              order by b.created_at asc, b.id asc
+            ))::int as batch_number,
+            ${photoExpression} as photos
      from helper_app.site_photo_batches b
      join helper_app.trips t on t.id = b.trip_id
      join helper_app.helper_profiles hp on hp.id = b.helper_id

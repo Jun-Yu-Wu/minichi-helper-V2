@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Suspense } from "react";
 import type React from "react";
 import {
   AlertCircle,
@@ -65,18 +66,32 @@ export default async function HelperPage({
   searchParams?: Promise<HelperSearchParams>;
 }) {
   const params = (await searchParams) || {};
+  const user = await getCurrentUser();
+  if (!user) return null;
+
+  return (
+    <Suspense fallback={<HelperPageSkeleton />}>
+      <HelperPageData params={params} userId={user.id} />
+    </Suspense>
+  );
+}
+
+async function HelperPageData({
+  params,
+  userId,
+}: {
+  params: HelperSearchParams;
+  userId: string;
+}) {
   const view = normalizeHelperView(params.view);
   const panel = normalizeTripPanel(params.panel);
   const helperTripGroups =
     view === "trips" && !params.tripId
       ? parseOpenTripGroups(params.tripGroups, true)
       : [];
-  const user = await getCurrentUser();
-  if (!user) return null;
-
   const workspace = await service.getHelperWorkspace(
     database.getDatabasePool(),
-    user.id,
+    userId,
     new Date(),
     {
       sections: helperWorkspaceSections(
@@ -169,6 +184,16 @@ export default async function HelperPage({
       profileName={workspace.profile.display_name}
       tripSummariesByTripId={tripSummariesByTripId}
     />
+  );
+}
+
+function HelperPageSkeleton() {
+  return (
+    <div aria-label="正在載入工作台" className="grid gap-4" role="status">
+      <div className="h-28 animate-pulse rounded-xl border bg-muted" />
+      <div className="h-48 animate-pulse rounded-xl border bg-muted" />
+      <div className="h-36 animate-pulse rounded-xl border bg-muted" />
+    </div>
   );
 }
 

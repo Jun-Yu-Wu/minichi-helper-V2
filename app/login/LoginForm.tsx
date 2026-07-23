@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 
 import { loginAction, type LoginActionResult } from "../actions/auth";
 import { Button } from "../components/ui/button";
+import { clearClientResourceCache } from "../../src/lib/client-resource-cache";
 
 const initialState: LoginActionResult = {};
 
@@ -15,6 +16,7 @@ export function LoginForm() {
 
   useEffect(() => {
     if (!state.ok) return;
+    clearClientResourceCache();
     const next = searchParams.get("next");
     router.push(next && next.startsWith("/") && !next.startsWith("//") ? next : "/helper");
   }, [router, searchParams, state.ok]);

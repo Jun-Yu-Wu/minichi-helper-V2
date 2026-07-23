@@ -1,10 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback } from "react";
 
 import { BackLink } from "../components/BackButton";
 import { EmptyState } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
+import { useStaleResource } from "../../src/lib/client-resource-cache";
 
 export function SitePhotoBatchDetail({
   batchId,
@@ -13,31 +14,21 @@ export function SitePhotoBatchDetail({
   batchId: string;
   tripId: string;
 }) {
-  const [batch, setBatch] = useState<any | null>(null);
-  const [error, setError] = useState("");
-  const [loading, setLoading] = useState(true);
-
-  const loadBatch = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const response = await fetch(
-        `/api/helper/trips/${encodeURIComponent(tripId)}/site-photo-batches/${encodeURIComponent(batchId)}`,
-        { cache: "no-store" },
-      );
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "無法載入照片批次。");
-      setBatch(body.batch || null);
-    } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "無法載入照片批次。");
-    } finally {
-      setLoading(false);
-    }
+  const loadBatch = useCallback(async (signal: AbortSignal) => {
+    const response = await fetch(
+      `/api/helper/trips/${encodeURIComponent(tripId)}/site-photo-batches/${encodeURIComponent(batchId)}`,
+      { cache: "no-store", signal },
+    );
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "無法載入照片批次。");
+    return body.batch || null;
   }, [batchId, tripId]);
-
-  useEffect(() => {
-    void loadBatch();
-  }, [loadBatch]);
+  const batchResource = useStaleResource<any | null>({
+    fetcher: loadBatch,
+    key: `helper:site-photo-batch:${tripId}:${batchId}`,
+    staleTimeMs: 30_000,
+  });
+  const batch = batchResource.data;
 
   return (
     <div className="grid gap-3">
@@ -47,7 +38,7 @@ export function SitePhotoBatchDetail({
         label="返回批次列表"
         variant="outline"
       />
-      {loading ? (
+      {batchResource.isLoading ? (
         <div aria-busy="true" aria-label="正在載入照片" className="grid gap-3" role="status">
           <div className="h-5 w-40 animate-pulse rounded bg-muted" />
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -56,8 +47,8 @@ export function SitePhotoBatchDetail({
             ))}
           </div>
         </div>
-      ) : error ? (
-        <RetryableError message={error} onRetry={() => void loadBatch()} />
+      ) : batchResource.error ? (
+        <RetryableError message={batchResource.error} onRetry={() => void batchResource.refresh()} />
       ) : batch ? (
         <>
           <div>

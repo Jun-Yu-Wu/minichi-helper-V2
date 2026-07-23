@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Suspense } from "react";
 import type React from "react";
 import {
   CalendarDays,
@@ -94,6 +95,20 @@ export default async function AdminPage({
   searchParams?: Promise<AdminSearchParams>;
 }) {
   const params = (await searchParams) || {};
+  try {
+    await getCurrentAdmin();
+  } catch {
+    return null;
+  }
+
+  return (
+    <Suspense fallback={<AdminPageSkeleton />}>
+      <AdminPageData params={params} />
+    </Suspense>
+  );
+}
+
+async function AdminPageData({ params }: { params: AdminSearchParams }) {
   const activeView = normalizeAdminView(params.view);
   const liveSection = normalizeLiveSection(params.liveSection);
   const rebuyScope = activeView === "rebuy" ? normalizeRebuyScope(params.rebuyScope) : undefined;
@@ -101,12 +116,6 @@ export default async function AdminPage({
     activeView === "main" && params.mainSection === "trips"
       ? parseOpenTripGroups(params.tripGroups ?? params.tripGroup, true)
       : [];
-  try {
-    await getCurrentAdmin();
-  } catch {
-    return null;
-  }
-
   const dashboard = await service.listAdminDashboard(database.getDatabasePool(), {
       sections: adminDashboardSections(activeView, params.mainSection, liveSection),
       settlementIds:
@@ -250,6 +259,16 @@ export default async function AdminPage({
     />
   ) : (
     <AdminHome dashboard={dashboard} />
+  );
+}
+
+function AdminPageSkeleton() {
+  return (
+    <div aria-label="正在載入管理工作台" className="grid gap-4" role="status">
+      <div className="h-28 animate-pulse rounded-xl border bg-muted" />
+      <div className="h-56 animate-pulse rounded-xl border bg-muted" />
+      <div className="h-40 animate-pulse rounded-xl border bg-muted" />
+    </div>
   );
 }
 

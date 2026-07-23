@@ -2,14 +2,14 @@
 
 import { Check, Download, RefreshCw, Share2, X } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button } from "../components/ui/button";
 import { BackButton } from "../components/BackButton";
 import { StatusBadge } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { cn } from "../../src/lib/utils";
-import { stableDataSignature } from "../../src/lib/refresh-signature";
+import { useStaleResource } from "../../src/lib/client-resource-cache";
 import { QuickPublishPurchaseForm } from "./AdminForms";
 import { useAdminLiveTrips, type AdminLiveTrip } from "./useAdminLiveTrips";
 
@@ -37,8 +37,6 @@ type ShareablePhoto = {
   signed_url: string;
 };
 
-const REFRESH_MS = 8000;
-
 export function AdminLiveQuoteWorkspace({
   initialTripId,
   initialTrips,
@@ -48,18 +46,32 @@ export function AdminLiveQuoteWorkspace({
 }) {
   const { loadTrips: refreshTrips, loadingTrips, trips, tripsError } = useAdminLiveTrips(initialTrips);
   const [selectedTripId, setSelectedTripId] = useState(initialTripId || "");
-  const [tasks, setTasks] = useState<QuoteTaskSummary[]>([]);
   const [activeTaskId, setActiveTaskId] = useState("");
   const [activeTask, setActiveTask] = useState<any | null>(null);
   const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<string>>(new Set());
-  const [loadingTasks, setLoadingTasks] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [message, setMessage] = useState("");
   const [loadError, setLoadError] = useState("");
-  const [refreshNonce, setRefreshNonce] = useState(0);
   const [detailRefreshNonce, setDetailRefreshNonce] = useState(0);
 
   const selectedTrip = trips.find((trip) => trip.id === selectedTripId);
+  const loadTasks = useCallback(async (signal: AbortSignal) => {
+    const response = await fetch(
+      `/api/admin/live/quote-tasks?tripId=${encodeURIComponent(selectedTripId)}`,
+      { cache: "no-store", signal },
+    );
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "詢價任務載入失敗。");
+    return (data.tasks || []) as QuoteTaskSummary[];
+  }, [selectedTripId]);
+  const taskResource = useStaleResource<QuoteTaskSummary[]>({
+    enabled: Boolean(selectedTripId),
+    fetcher: loadTasks,
+    key: `admin:quote-tasks:${selectedTripId || "none"}`,
+    refreshIntervalMs: 8_000,
+    staleTimeMs: 5_000,
+  });
+  const tasks = taskResource.data || [];
   const pendingTasks = tasks.filter((task) => !isQuoteTaskComplete(task));
   const completedTasks = tasks.filter(isQuoteTaskComplete);
   const allDetailPhotos = useMemo(() => collectShareablePhotos(activeTask), [activeTask]);
@@ -67,48 +79,6 @@ export function AdminLiveQuoteWorkspace({
     () => allDetailPhotos.filter((photo) => selectedPhotoIds.has(photo.id)),
     [allDetailPhotos, selectedPhotoIds],
   );
-
-  useEffect(() => {
-    if (!selectedTripId) {
-      setTasks([]);
-      setActiveTaskId("");
-      setActiveTask(null);
-      return;
-    }
-
-    let canceled = false;
-    let timer: ReturnType<typeof setInterval> | undefined;
-
-    async function loadTasks(showLoading = false) {
-      if (showLoading) setLoadingTasks(true);
-      try {
-        const response = await fetch(
-          `/api/admin/live/quote-tasks?tripId=${encodeURIComponent(selectedTripId)}`,
-          { cache: "no-store" },
-        );
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "載入失敗");
-        if (!canceled) {
-          const nextTasks = data.tasks || [];
-          setTasks((current) => (
-            stableDataSignature(current) === stableDataSignature(nextTasks) ? current : nextTasks
-          ));
-          setLoadError("");
-        }
-      } catch (error) {
-        if (!canceled) setLoadError(error instanceof Error ? error.message : "詢價任務載入失敗。");
-      } finally {
-        if (!canceled && showLoading) setLoadingTasks(false);
-      }
-    }
-
-    loadTasks(true);
-    timer = setInterval(() => loadTasks(false), REFRESH_MS);
-    return () => {
-      canceled = true;
-      if (timer) clearInterval(timer);
-    };
-  }, [refreshNonce, selectedTripId]);
 
   useEffect(() => {
     if (!activeTaskId || !selectedTripId) return;
@@ -232,13 +202,13 @@ export function AdminLiveQuoteWorkspace({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-lg font-semibold">選擇要監聽的行程</h3>
           <Button
-            disabled={loadingTasks || !selectedTripId}
-            onClick={() => setRefreshNonce((value) => value + 1)}
+            disabled={taskResource.isRefreshing || !selectedTripId}
+            onClick={() => void taskResource.refresh()}
             size="sm"
             type="button"
             variant="outline"
           >
-            <RefreshCw className={cn("size-4", loadingTasks ? "animate-spin" : "")} />
+            <RefreshCw className={cn("size-4", taskResource.isRefreshing ? "animate-spin" : "")} />
             刷新
           </Button>
         </div>
@@ -297,12 +267,12 @@ export function AdminLiveQuoteWorkspace({
         </nav>
       ) : null}
 
-      {loadError || tripsError ? (
+      {taskResource.error || loadError || tripsError ? (
         <RetryableError
-          message={loadError || tripsError}
+          message={taskResource.error || loadError || tripsError}
           onRetry={() => {
             if (activeTaskId) setDetailRefreshNonce((value) => value + 1);
-            else if (selectedTripId) setRefreshNonce((value) => value + 1);
+            else if (selectedTripId) void taskResource.refresh();
             else void refreshTrips();
           }}
         />
@@ -312,7 +282,7 @@ export function AdminLiveQuoteWorkspace({
       {selectedTripId && !activeTaskId ? (
         <QuoteTaskList
           completedTasks={completedTasks}
-          loading={loadingTasks}
+          loading={taskResource.isLoading}
           pendingTasks={pendingTasks}
           selectedTrip={selectedTrip}
           tasks={tasks}

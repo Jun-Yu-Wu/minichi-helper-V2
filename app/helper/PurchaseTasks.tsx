@@ -8,7 +8,7 @@ import { EmptyState, InsightBanner, StatusBadge, Surface } from "../components/O
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
-import { stableDataSignature } from "../../src/lib/refresh-signature";
+import { useStaleResource } from "../../src/lib/client-resource-cache";
 
 const REFRESH_MS = 8000;
 
@@ -33,11 +33,8 @@ type PurchaseResponseState = {
 
 export function PurchaseTasks({ tripId }: { tripId: string }) {
   const navigation = useTripSectionNavigation();
-  const [tasks, setTasks] = useState<any[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeTask, setActiveTask] = useState<any | null>(null);
-  const [listLoading, setListLoading] = useState(true);
-  const [listError, setListError] = useState("");
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState("");
   const [allPhotosLoading, setAllPhotosLoading] = useState(false);
@@ -48,45 +45,28 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
       ...task,
       photos: current?.photos || task.photos || [],
     }));
-    setTasks((current) =>
+    taskResource.setData((current = []) =>
       current.map((item) => (item.id === task.id ? { ...item, ...task, photos: [] } : item)),
     );
   }, []);
 
-  const loadTasks = useCallback(async (signal?: AbortSignal, showLoading = false) => {
-    if (showLoading) setListLoading(true);
-    try {
-      const response = await fetch(
-        `/api/helper/trips/${encodeURIComponent(tripId)}/purchase-tasks`,
-        { cache: "no-store", signal },
-      );
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "無法載入採買任務。");
-      const nextTasks = body.tasks || [];
-      setTasks((current) => (
-        stableDataSignature(current) === stableDataSignature(nextTasks) ? current : nextTasks
-      ));
-      setListError((current) => (current ? "" : current));
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      setListError(error instanceof Error ? error.message : "無法載入採買任務。");
-    } finally {
-      if (!signal?.aborted && showLoading) setListLoading(false);
-    }
+  const loadTasks = useCallback(async (signal: AbortSignal) => {
+    const response = await fetch(
+      `/api/helper/trips/${encodeURIComponent(tripId)}/purchase-tasks`,
+      { cache: "no-store", signal },
+    );
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "無法載入採買任務。");
+    return (body.tasks || []) as any[];
   }, [tripId]);
-
-  useEffect(() => {
-    if (activeTaskId) return undefined;
-    const controller = new AbortController();
-    const timer = window.setInterval(() => {
-      void loadTasks(undefined, false);
-    }, REFRESH_MS);
-    void loadTasks(controller.signal, true);
-    return () => {
-      controller.abort();
-      window.clearInterval(timer);
-    };
-  }, [activeTaskId, loadTasks]);
+  const taskResource = useStaleResource<any[]>({
+    enabled: true,
+    fetcher: loadTasks,
+    key: `helper:purchase-tasks:${tripId}`,
+    refreshIntervalMs: activeTaskId ? 0 : REFRESH_MS,
+    staleTimeMs: 5_000,
+  });
+  const tasks = taskResource.data || [];
 
   async function openTask(taskId: string) {
     setActiveTaskId(taskId);
@@ -173,13 +153,13 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
           type="button"
           variant="outline"
         />
-        {listLoading ? (
+        {taskResource.isLoading ? (
           <div className="grid gap-2" aria-label="正在載入採買任務" role="status">
             <div className="h-20 animate-pulse rounded-xl bg-muted" />
             <div className="h-20 animate-pulse rounded-xl bg-muted" />
           </div>
-        ) : listError ? (
-          <RetryableError message={listError} onRetry={() => loadTasks(undefined, true)} />
+        ) : taskResource.error ? (
+          <RetryableError message={taskResource.error} onRetry={() => void taskResource.refresh()} />
         ) : (
           <div className="rounded-xl border border-dashed bg-card p-5 text-sm shadow-sm">
             <p className="font-semibold text-foreground">目前沒有採買任務</p>
@@ -213,8 +193,8 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
   return (
     <Surface className="grid gap-4">
       <BackButton label="返回連線" onClick={() => navigation?.openWork()} type="button" variant="outline" />
-      {listError ? (
-        <RetryableError message={listError} onRetry={() => loadTasks(undefined, true)} />
+      {taskResource.error ? (
+        <RetryableError message={taskResource.error} onRetry={() => void taskResource.refresh()} />
       ) : null}
       <div className="grid gap-4">
         {taskGroups.map((group) => (

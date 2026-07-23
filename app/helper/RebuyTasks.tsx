@@ -1,7 +1,7 @@
 "use client";
 
 import type React from "react";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CheckCircle2,
   ChevronRight,
@@ -15,6 +15,7 @@ import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
 import { BackButton } from "../components/BackButton";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
+import { useStaleResource } from "../../src/lib/client-resource-cache";
 
 type RebuyUploadPhoto = {
   byteSize: number;
@@ -42,27 +43,27 @@ export function RebuyTasks({
   tasks: any[];
 }) {
   const [currentSection, setCurrentSection] = useState<"public" | "mine" | undefined>(rebuySection);
-  const [taskList, setTaskList] = useState(tasks);
   const [activeTaskId, setActiveTaskId] = useState<string | undefined>(selectedTaskId);
   const [activeTask, setActiveTask] = useState<any | null>(selectedTaskId ? tasks[0] || null : null);
   const [detailError, setDetailError] = useState("");
   const [detailLoading, setDetailLoading] = useState(false);
-  const [listError, setListError] = useState("");
 
-  async function reloadTasks() {
-    setListError("");
-    try {
-      const response = await fetch("/api/helper/rebuy-tasks", { cache: "no-store" });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "補買列表載入失敗。");
-      setTaskList(body.tasks || []);
-      return body.tasks || [];
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "補買列表載入失敗。";
-      setListError(message);
-      throw error;
-    }
-  }
+  const loadTasks = useCallback(async (signal: AbortSignal) => {
+    const response = await fetch("/api/helper/rebuy-tasks", { cache: "no-store", signal });
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "補買列表載入失敗。");
+    return (body.tasks || []) as any[];
+  }, []);
+  const taskResource = useStaleResource<any[]>({
+    fetcher: loadTasks,
+    initialData: tasks,
+    key: "helper:rebuy-tasks",
+    staleTimeMs: 5_000,
+  });
+  const taskList = taskResource.data || [];
+  const reloadTasks = useCallback(async () => {
+    return (await taskResource.refresh()) || [];
+  }, [taskResource.refresh]);
 
   async function openTask(taskId: string) {
     setActiveTaskId(taskId);
@@ -107,7 +108,7 @@ export function RebuyTasks({
           <RebuyTaskDetail task={task} onTaskChanged={(updatedTask) => {
             setActiveTask((previous: any) => ({ ...previous, ...updatedTask }));
             setCurrentSection(updatedTask.visibility === "public" && updatedTask.status === "open" ? "public" : "mine");
-            setTaskList((current) =>
+            taskResource.setData((current = []) =>
               current.map((item) => item.id === updatedTask.id ? { ...item, ...updatedTask } : item),
             );
           }} />
@@ -156,7 +157,7 @@ export function RebuyTasks({
           {currentSection === "public" ? publicOpen.length : activeMine}
         </StatusBadge>
       </div>
-      {listError ? <RetryableError message={listError} onRetry={() => void reloadTasks()} /> : null}
+      {taskResource.error ? <RetryableError message={taskResource.error} onRetry={() => void reloadTasks()} /> : null}
       {currentSection === "mine" && readyToCheckout ? (
         <RebuyCheckoutButton readyToCheckout={readyToCheckout} onCheckedOut={reloadTasks} />
       ) : null}

@@ -1,13 +1,14 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { Camera, CheckCircle2, ChevronLeft, ChevronRight, Pencil, RefreshCw, X } from "lucide-react";
 
 import { BackButton } from "../components/BackButton";
 import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
+import { useStaleResource } from "../../src/lib/client-resource-cache";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
 
 type UploadStatus = "selected" | "uploading" | "uploaded" | "failed";
@@ -27,33 +28,27 @@ type DetailPhoto = {
 
 export function QuoteTaskWorkspace({ tripId }: { tripId: string }) {
   const navigation = useTripSectionNavigation();
-  const [tasks, setTasks] = useState<any[]>([]);
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [activeTask, setActiveTask] = useState<any | null>(null);
   const [photoIndex, setPhotoIndex] = useState(0);
-  const [listError, setListError] = useState("");
   const [detailError, setDetailError] = useState("");
-  const [listLoading, setListLoading] = useState(true);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  const loadTasks = useCallback(async (signal?: AbortSignal) => {
-    setListError("");
-    setListLoading(true);
-    try {
-      const response = await fetch(
-        `/api/helper/trips/${encodeURIComponent(tripId)}/quote-tasks`,
-        { cache: "no-store", signal },
-      );
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error || "無法載入細圖／報價任務。");
-      setTasks(body.tasks || []);
-    } catch (error) {
-      if (error instanceof DOMException && error.name === "AbortError") return;
-      setListError(error instanceof Error ? error.message : "無法載入細圖／報價任務。");
-    } finally {
-      if (!signal?.aborted) setListLoading(false);
-    }
+  const loadTasks = useCallback(async (signal: AbortSignal) => {
+    const response = await fetch(
+      `/api/helper/trips/${encodeURIComponent(tripId)}/quote-tasks`,
+      { cache: "no-store", signal },
+    );
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "無法載入細圖／報價任務。");
+    return (body.tasks || []) as any[];
   }, [tripId]);
+  const taskResource = useStaleResource<any[]>({
+    fetcher: loadTasks,
+    key: `helper:quote-tasks:${tripId}`,
+    staleTimeMs: 5_000,
+  });
+  const tasks = taskResource.data || [];
 
   const loadTask = useCallback(async (taskId: string, signal?: AbortSignal) => {
     setDetailError("");
@@ -77,12 +72,6 @@ export function QuoteTaskWorkspace({ tripId }: { tripId: string }) {
       if (!signal?.aborted) setDetailLoading(false);
     }
   }, [tripId]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void loadTasks(controller.signal);
-    return () => controller.abort();
-  }, [loadTasks]);
 
   function openTask(taskId: string) {
     setActiveTaskId(taskId);
@@ -119,7 +108,7 @@ export function QuoteTaskWorkspace({ tripId }: { tripId: string }) {
       const isCompleted = completedPhotoCount(photos) === photos.length && photos.length > 0;
       return { ...current, photos, status: isCompleted ? "completed" : current.status };
     });
-    setTasks((current) =>
+    taskResource.setData((current = []) =>
       current.map((task) => {
         if (task.id !== activeTaskId) return task;
         const repliedPhotoCount = Math.min(
@@ -157,12 +146,12 @@ export function QuoteTaskWorkspace({ tripId }: { tripId: string }) {
 
   return (
     <QuoteTaskList
-      error={listError}
-      loading={listLoading}
+      error={taskResource.error}
+      loading={taskResource.isLoading}
       tasks={tasks}
       onBack={() => navigation?.openWork()}
       onOpenTask={openTask}
-      onRefresh={() => loadTasks()}
+      onRefresh={() => void taskResource.refresh()}
     />
   );
 }

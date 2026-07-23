@@ -3,9 +3,6 @@ import { NextResponse } from "next/server";
 import { getCurrentAdmin } from "../../../../../src/server/current-session";
 import database from "../../../../../src/server/database";
 import service from "../../../../../src/server/helper-app-service";
-import { createR2ObjectStore } from "../../../../../src/server/r2-object-store";
-
-const helperService = service as any;
 
 export async function GET(request: Request) {
   try {
@@ -20,15 +17,13 @@ export async function GET(request: Request) {
     return NextResponse.json({ error: "缺少行程資訊。" }, { status: 400 });
   }
 
-  const batches = await helperService.listSitePhotoBatches(database.getDatabasePool(), {
+  const batches = await (service as any).listSitePhotoBatches(database.getDatabasePool(), {
+    includePhotos: false,
     tripIds: [tripId],
   });
-  const signedBatches = batches.length
-    ? await helperService.attachSignedPhotoUrls(batches, createR2ObjectStore())
-    : [];
 
   return NextResponse.json(
-    { batches: signedBatches },
+    { batches },
     {
       headers: {
         "Cache-Control": "private, no-store",

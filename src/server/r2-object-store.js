@@ -11,6 +11,10 @@ const CONTENT_TYPE_EXTENSIONS = {
 };
 
 let sdkPromise = null;
+const signedGetUrlCache = new Map();
+const signedGetUrlRequests = new Map();
+const SIGNED_GET_URL_CACHE_MAX = 2000;
+const SIGNED_GET_URL_CACHE_MAX_AGE_MS = 60_000;
 
 async function loadSdk() {
   if (!sdkPromise) {
@@ -21,6 +25,25 @@ async function loadSdk() {
   }
   const [s3, presigner] = await sdkPromise;
   return { ...s3, ...presigner };
+}
+
+function signedGetUrlCacheKey(storageKey, expiresIn) {
+  return `${storageKey}:${expiresIn}`;
+}
+
+function signedGetUrlCacheAge(expiresIn) {
+  return Math.max(
+    1_000,
+    Math.min(SIGNED_GET_URL_CACHE_MAX_AGE_MS, expiresIn * 1_000 - 30_000),
+  );
+}
+
+function trimSignedGetUrlCache() {
+  while (signedGetUrlCache.size > SIGNED_GET_URL_CACHE_MAX) {
+    const oldestKey = signedGetUrlCache.keys().next().value;
+    if (!oldestKey) break;
+    signedGetUrlCache.delete(oldestKey);
+  }
 }
 
 function createR2ObjectStore(config = r2Config()) {
@@ -54,13 +77,34 @@ function createR2ObjectStore(config = r2Config()) {
     },
 
     async signedGetUrl(storageKey, expiresIn = config.signedUrlTtlSeconds) {
+      const cacheKey = signedGetUrlCacheKey(storageKey, expiresIn);
+      const cached = signedGetUrlCache.get(cacheKey);
+      if (cached && cached.expiresAt > Date.now()) return cached.url;
+      if (cached) signedGetUrlCache.delete(cacheKey);
+
+      const inFlight = signedGetUrlRequests.get(cacheKey);
+      if (inFlight) return inFlight;
+
       const { GetObjectCommand, getSignedUrl } = await loadSdk();
       const s3 = await client();
-      return getSignedUrl(
+      const request = getSignedUrl(
         s3,
         new GetObjectCommand({ Bucket: config.bucket, Key: storageKey }),
         { expiresIn },
-      );
+      )
+        .then((url) => {
+          signedGetUrlCache.set(cacheKey, {
+            expiresAt: Date.now() + signedGetUrlCacheAge(expiresIn),
+            url,
+          });
+          trimSignedGetUrlCache();
+          return url;
+        })
+        .finally(() => {
+          signedGetUrlRequests.delete(cacheKey);
+        });
+      signedGetUrlRequests.set(cacheKey, request);
+      return request;
     },
 
     async signedPutUrl(storageKey, contentType, expiresIn = config.signedUrlTtlSeconds) {

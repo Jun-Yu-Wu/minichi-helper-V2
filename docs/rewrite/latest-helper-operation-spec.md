@@ -1,6 +1,6 @@
 # Latest Helper Operation Spec
 
-Last updated: 2026-07-02
+Last updated: 2026-07-23
 
 This document is the authoritative product behavior source for the MINICHI helper
 rewrite. It supersedes older helper-operation descriptions when behavior differs.
@@ -17,6 +17,46 @@ migration context, and regression baselines.
 - New frontend work must use TypeScript, Tailwind CSS, and shadcn/ui.
 - Photos must store durable R2 `storage_key` values; signed URLs are temporary display values.
 - High-frequency helper submissions must be retryable and idempotent with client-generated submission ids.
+
+## Cross-Cutting Photo Annotation Editor
+
+The helper and admin applications share one photo viewer and annotation editor.
+Any photo that the current role is authorized to open can expose the same edit
+entry point, while workflow actions after editing remain restricted by the
+photo's context and role permissions.
+
+The original photo is immutable. Saving an edit creates a derived media version
+linked to the original photo and never overwrites the original media record or
+R2 object. The derived version should retain source linkage, editor identity,
+creation time, durable private R2 `storage_key`, and the annotation/edit
+manifest needed for future re-editing or audit inspection.
+
+The first editor version includes:
+
+- Text.
+- Freehand pen.
+- Line and arrow.
+- Rectangle.
+- Circle or ellipse.
+- Color and stroke width.
+- Undo and redo.
+- Clear current annotations.
+
+The editor is mobile-first and must work with touch gestures, local preview,
+draft preservation, upload progress, retry, and idempotent save behavior. The
+first version supports saving the derived version, sharing, and downloading.
+Workflow attachment is introduced in later slices and is an additional
+attachment action, not a universal replacement for the source photo.
+
+Sharing and device saving use the Web Share API where supported. Since browser
+support cannot guarantee direct writing to every phone photo library, a download
+or equivalent system-share fallback is required.
+
+Edited photos must not silently replace quote/detail replies, face-check
+evidence, settlement proof, warehouse proof, staging source data, or final
+`main.orders` photos. A later workflow integration may attach a derived photo
+with explicit source linkage while preserving the original and the existing
+staging-to-admin-review-to-merge boundary.
 
 ## First Implementation Slice Boundary
 

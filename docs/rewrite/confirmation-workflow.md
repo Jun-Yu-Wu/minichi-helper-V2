@@ -1,12 +1,41 @@
 # Helper Rewrite Confirmation Workflow
 
-Last updated: 2026-07-02
+Last updated: 2026-07-23
 
 This document lists the product and implementation decisions that must be confirmed
 before or during the MINICHI helper rewrite. The source behavior is
 `latest-helper-operation-spec.md`.
 
 ## Confirmed Decisions
+
+### Round 25 confirmed on 2026-07-23: Photo annotation and editing
+
+The helper and admin applications will share one photo viewer and annotation
+editor. Any photo that the current role is allowed to open can expose the same
+edit entry point, while the available workflow actions remain restricted by
+photo context, role, and existing authorization rules.
+
+- The original photo is immutable. Saving an edit creates a derived photo
+  version and never overwrites the original media record or R2 object.
+- The first version includes text, freehand pen, line/arrow, rectangle,
+  circle/ellipse, color and stroke width controls, undo/redo, and clearing the
+  current annotations.
+- The editor is mobile-first and must support touch-oriented editing with clear
+  pending, success, failure, and retry states.
+- The first version provides saving the edited version, sharing, and download.
+  Workflow attachment is phased and is not treated as a universal first-version
+  replacement action.
+- Sharing and device saving use the Web Share API where supported. Because a
+  browser cannot guarantee direct writing to every phone photo library, the
+  implementation must retain a download or equivalent system-share fallback.
+- The first version does not replace original workflow evidence with an edited
+  image. In later workflow integrations, an edited image is an additional
+  derived attachment with source linkage, not a silent rewrite of helper
+  replies, face-check evidence, settlement proof, warehouse proof, staging
+  source data, or final `main.orders` data.
+- The shared editor must preserve helper/admin visibility boundaries and the
+  existing private R2 `storage_key`, signed-URL, staging, and explicit-merge
+  rules.
 
 ### Settlement UI follow-up confirmed on 2026-07-09
 

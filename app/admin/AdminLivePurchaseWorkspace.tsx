@@ -2,7 +2,7 @@
 
 import { RefreshCw } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useState, useTransition } from "react";
+import { useCallback, useEffect, useState, useTransition } from "react";
 
 import { reviewFaceCheckPurchaseAction } from "../actions/admin";
 import { InsightBanner, StatusBadge } from "../components/OperationsUi";
@@ -10,7 +10,7 @@ import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
 import { BackButton } from "../components/BackButton";
 import { cn } from "../../src/lib/utils";
-import { stableDataSignature } from "../../src/lib/refresh-signature";
+import { useStaleResource } from "../../src/lib/client-resource-cache";
 import { useAdminLiveTrips, type AdminLiveTrip } from "./useAdminLiveTrips";
 
 type Trip = AdminLiveTrip;
@@ -31,8 +31,6 @@ type PurchaseTaskSummary = {
   trip_id: string;
 };
 
-const REFRESH_MS = 8000;
-
 export function AdminLivePurchaseWorkspace({
   initialTripId,
   initialTrips,
@@ -42,63 +40,35 @@ export function AdminLivePurchaseWorkspace({
 }) {
   const { loadTrips: refreshTrips, loadingTrips, trips, tripsError } = useAdminLiveTrips(initialTrips);
   const [selectedTripId, setSelectedTripId] = useState(initialTripId || "");
-  const [tasks, setTasks] = useState<PurchaseTaskSummary[]>([]);
   const [activeTaskId, setActiveTaskId] = useState("");
   const [activeTask, setActiveTask] = useState<any | null>(null);
-  const [loadingTasks, setLoadingTasks] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [allPhotosLoading, setAllPhotosLoading] = useState(false);
   const [allPhotosLoaded, setAllPhotosLoaded] = useState(false);
   const [message, setMessage] = useState("");
   const [loadError, setLoadError] = useState("");
-  const [refreshNonce, setRefreshNonce] = useState(0);
   const [detailRefreshNonce, setDetailRefreshNonce] = useState(0);
   const [reviewPending, startReviewTransition] = useTransition();
 
   const selectedTrip = trips.find((trip) => trip.id === selectedTripId);
+  const loadTasks = useCallback(async (signal: AbortSignal) => {
+    const response = await fetch(
+      `/api/admin/live/purchase-tasks?tripId=${encodeURIComponent(selectedTripId)}`,
+      { cache: "no-store", signal },
+    );
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "採買任務載入失敗。");
+    return (data.tasks || []) as PurchaseTaskSummary[];
+  }, [selectedTripId]);
+  const taskResource = useStaleResource<PurchaseTaskSummary[]>({
+    enabled: Boolean(selectedTripId),
+    fetcher: loadTasks,
+    key: `admin:purchase-tasks:${selectedTripId || "none"}`,
+    refreshIntervalMs: 8_000,
+    staleTimeMs: 5_000,
+  });
+  const tasks = taskResource.data || [];
   const lanes = purchaseLanes(tasks);
-
-  useEffect(() => {
-    if (!selectedTripId) {
-      setTasks([]);
-      setActiveTaskId("");
-      setActiveTask(null);
-      return;
-    }
-
-    let canceled = false;
-    let timer: ReturnType<typeof setInterval> | undefined;
-
-    async function loadTasks(showLoading = false) {
-      if (showLoading) setLoadingTasks(true);
-      try {
-        const response = await fetch(
-          `/api/admin/live/purchase-tasks?tripId=${encodeURIComponent(selectedTripId)}`,
-          { cache: "no-store" },
-        );
-        const data = await response.json();
-        if (!response.ok) throw new Error(data.error || "載入失敗");
-        if (!canceled) {
-          const nextTasks = data.tasks || [];
-          setTasks((current) => (
-            stableDataSignature(current) === stableDataSignature(nextTasks) ? current : nextTasks
-          ));
-          setLoadError("");
-        }
-      } catch (error) {
-        if (!canceled) setLoadError(error instanceof Error ? error.message : "採買任務載入失敗。");
-      } finally {
-        if (!canceled && showLoading) setLoadingTasks(false);
-      }
-    }
-
-    loadTasks(true);
-    timer = setInterval(() => loadTasks(false), REFRESH_MS);
-    return () => {
-      canceled = true;
-      if (timer) clearInterval(timer);
-    };
-  }, [refreshNonce, selectedTripId]);
 
   useEffect(() => {
     if (!activeTaskId || !selectedTripId) return;
@@ -189,7 +159,7 @@ export function AdminLivePurchaseWorkspace({
     startReviewTransition(async () => {
       try {
         await reviewFaceCheckPurchaseAction(formData);
-        setRefreshNonce((value) => value + 1);
+        await taskResource.refresh();
         const response = await fetch(
           `/api/admin/live/purchase-tasks/${encodeURIComponent(activeTaskId)}?tripId=${encodeURIComponent(selectedTripId)}`,
           { cache: "no-store" },
@@ -209,13 +179,13 @@ export function AdminLivePurchaseWorkspace({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-lg font-semibold">選擇要監聽的行程</h3>
           <Button
-            disabled={loadingTasks || !selectedTripId}
-            onClick={() => setRefreshNonce((value) => value + 1)}
+            disabled={taskResource.isRefreshing || !selectedTripId}
+            onClick={() => void taskResource.refresh()}
             size="sm"
             type="button"
             variant="outline"
           >
-            <RefreshCw className={cn("size-4", loadingTasks ? "animate-spin" : "")} />
+            <RefreshCw className={cn("size-4", taskResource.isRefreshing ? "animate-spin" : "")} />
             刷新
           </Button>
         </div>
@@ -274,12 +244,12 @@ export function AdminLivePurchaseWorkspace({
         </nav>
       ) : null}
 
-      {loadError || tripsError ? (
+      {taskResource.error || loadError || tripsError ? (
         <RetryableError
-          message={loadError || tripsError}
+          message={taskResource.error || loadError || tripsError}
           onRetry={() => {
             if (activeTaskId) setDetailRefreshNonce((value) => value + 1);
-            else if (selectedTripId) setRefreshNonce((value) => value + 1);
+            else if (selectedTripId) void taskResource.refresh();
             else void refreshTrips();
           }}
         />
@@ -289,7 +259,7 @@ export function AdminLivePurchaseWorkspace({
       {selectedTripId && !activeTaskId ? (
         <PurchaseTaskList
           lanes={lanes}
-          loading={loadingTasks}
+          loading={taskResource.isLoading}
           selectedTrip={selectedTrip}
           tasks={tasks}
           onOpenTask={openTask}

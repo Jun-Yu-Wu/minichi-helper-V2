@@ -1,12 +1,13 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { ChevronRight, RefreshCw } from "lucide-react";
 
 import { EmptyState, InsightBanner } from "../components/OperationsUi";
 import { BackButton } from "../components/BackButton";
 import { Button } from "../components/ui/button";
+import { useStaleResource } from "../../src/lib/client-resource-cache";
 import { SitePhotoUploader } from "./SitePhotoUploader";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
 
@@ -26,42 +27,23 @@ export function SitePhotoWorkspace({
   tripId: string;
 }) {
   const navigation = useTripSectionNavigation();
-  const [batches, setBatches] = useState<BatchSummary[]>(initialBatches || []);
-  const [error, setError] = useState("");
   const [localBatchDetailOpen, setLocalBatchDetailOpen] = useState(false);
-  const [loading, setLoading] = useState(initialBatches === undefined);
-
-  const loadBatches = useCallback(async (signal?: AbortSignal, showLoading = true) => {
-    setError("");
-    if (showLoading) setLoading(true);
-    try {
-      const response = await fetch(
-        `/api/helper/trips/${encodeURIComponent(tripId)}/site-photo-batches`,
-        { cache: "no-store", signal },
-      );
-      const body = await response.json();
-      if (!response.ok) {
-        throw new Error(body.error || "無法載入照片批次。");
-      }
-      setBatches(body.batches || []);
-    } catch (loadError) {
-      if (loadError instanceof DOMException && loadError.name === "AbortError") {
-        return;
-      }
-      setError(
-        loadError instanceof Error ? loadError.message : "無法載入照片批次。",
-      );
-    } finally {
-      if (!signal?.aborted && showLoading) setLoading(false);
-    }
+  const loadBatches = useCallback(async (signal: AbortSignal) => {
+    const response = await fetch(
+      `/api/helper/trips/${encodeURIComponent(tripId)}/site-photo-batches`,
+      { cache: "no-store", signal },
+    );
+    const body = await response.json();
+    if (!response.ok) throw new Error(body.error || "無法載入照片批次。");
+    return (body.batches || []) as BatchSummary[];
   }, [tripId]);
-
-  useEffect(() => {
-    if (initialBatches !== undefined) return undefined;
-    const controller = new AbortController();
-    void loadBatches(controller.signal);
-    return () => controller.abort();
-  }, [initialBatches, loadBatches]);
+  const batchesResource = useStaleResource<BatchSummary[]>({
+    fetcher: loadBatches,
+    initialData: initialBatches,
+    key: `helper:site-photo-batches:${tripId}`,
+    staleTimeMs: 5_000,
+  });
+  const batches = batchesResource.data || [];
 
   return (
     <section className="grid gap-4 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
@@ -78,11 +60,11 @@ export function SitePhotoWorkspace({
         <h5 className="mt-1 text-xl font-semibold tracking-tight">現場大圖</h5>
       </div>
       <SitePhotoUploader
-        onBatchSubmitted={() => void loadBatches(undefined, false)}
+        onBatchSubmitted={() => void batchesResource.refresh()}
         onDetailOpenChange={setLocalBatchDetailOpen}
         tripId={tripId}
       />
-      {!localBatchDetailOpen && loading ? (
+      {!localBatchDetailOpen && batchesResource.isLoading ? (
         <div
           aria-label="正在載入照片批次"
           className="grid gap-2 border-t pt-4"
@@ -90,12 +72,12 @@ export function SitePhotoWorkspace({
         >
           <div className="h-12 animate-pulse rounded-lg bg-muted" />
         </div>
-      ) : !localBatchDetailOpen && error ? (
+      ) : !localBatchDetailOpen && batchesResource.error ? (
         <div className="grid gap-2 border-t pt-4">
-          <InsightBanner title={error} tone="red" />
+          <InsightBanner title={batchesResource.error} tone="red" />
           <Button
             className="w-fit"
-            onClick={() => loadBatches()}
+            onClick={() => void batchesResource.refresh()}
             size="sm"
             type="button"
             variant="outline"
