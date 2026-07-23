@@ -1,8 +1,8 @@
 "use client";
 
-import { ChevronLeft, ChevronRight, Pencil, RefreshCw, Share2 } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Pencil, RefreshCw, Share2 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button } from "../components/ui/button";
 import { PhotoLightbox } from "../components/PhotoAnnotationEditor";
@@ -34,6 +34,7 @@ type QuoteTaskSummary = {
 
 type ShareablePhoto = {
   filename: string;
+  id: string;
   signed_url: string;
 };
 
@@ -53,6 +54,7 @@ export function AdminLiveQuoteWorkspace({
   const [message, setMessage] = useState("");
   const [loadError, setLoadError] = useState("");
   const [detailRefreshNonce, setDetailRefreshNonce] = useState(0);
+  const [selectedSharePhotoIds, setSelectedSharePhotoIds] = useState<Set<string>>(new Set());
 
   const loadTasks = useCallback(async (signal: AbortSignal) => {
     const response = await fetch(
@@ -71,6 +73,14 @@ export function AdminLiveQuoteWorkspace({
     staleTimeMs: 5_000,
   });
   const tasks = taskResource.data || [];
+  const shareableTaskPhotos = useMemo(
+    () => collectShareablePhotosForTask(activeTask),
+    [activeTask],
+  );
+  const selectedSharePhotos = useMemo(
+    () => shareableTaskPhotos.filter((photo) => selectedSharePhotoIds.has(photo.id)),
+    [selectedSharePhotoIds, shareableTaskPhotos],
+  );
   const pendingTasks = tasks.filter((task) => !isQuoteTaskComplete(task));
   const completedTasks = tasks.filter(isQuoteTaskComplete);
   useEffect(() => {
@@ -109,6 +119,7 @@ export function AdminLiveQuoteWorkspace({
     setActiveTaskId("");
     setActiveTask(null);
     setPhotoIndex(0);
+    setSelectedSharePhotoIds(new Set());
     const url = new URL(window.location.href);
     url.searchParams.set("view", "live");
     url.searchParams.set("liveTripId", tripId);
@@ -120,12 +131,27 @@ export function AdminLiveQuoteWorkspace({
     setActiveTaskId(taskId);
     setActiveTask(null);
     setPhotoIndex(0);
+    setSelectedSharePhotoIds(new Set());
   }
 
   function closeTask() {
     setActiveTaskId("");
     setActiveTask(null);
     setPhotoIndex(0);
+    setSelectedSharePhotoIds(new Set());
+  }
+
+  function toggleSharePhoto(photoId: string) {
+    setSelectedSharePhotoIds((current) => {
+      const next = new Set(current);
+      if (next.has(photoId)) next.delete(photoId);
+      else next.add(photoId);
+      return next;
+    });
+  }
+
+  function selectAllSharePhotos() {
+    setSelectedSharePhotoIds(new Set(shareableTaskPhotos.map((photo) => photo.id)));
   }
 
   async function sharePhotos(photos: ShareablePhoto[]) {
@@ -271,9 +297,15 @@ export function AdminLiveQuoteWorkspace({
           ) : activeTask ? (
             <QuoteTaskDetail
               onPhotoIndexChange={setPhotoIndex}
+              onSelectAllSharePhotos={selectAllSharePhotos}
+              onClearSharePhotos={() => setSelectedSharePhotoIds(new Set())}
+              onShareSelectedPhotos={() => void sharePhotos(selectedSharePhotos)}
               onSharePhoto={(photo) => sharePhotos(collectShareablePhotosForPhoto(photo))}
+              onToggleSharePhoto={toggleSharePhoto}
               photoIndex={photoIndex}
               task={activeTask}
+              selectedSharePhotoIds={selectedSharePhotoIds}
+              shareableTaskPhotos={shareableTaskPhotos}
             />
           ) : null}
         </section>
@@ -365,14 +397,26 @@ function QuoteTaskLane({
 }
 
 function QuoteTaskDetail({
+  onClearSharePhotos,
   onPhotoIndexChange,
+  onSelectAllSharePhotos,
+  onShareSelectedPhotos,
   onSharePhoto,
+  onToggleSharePhoto,
   photoIndex,
+  selectedSharePhotoIds,
+  shareableTaskPhotos,
   task,
 }: {
+  onClearSharePhotos: () => void;
   onPhotoIndexChange: (index: number) => void;
+  onSelectAllSharePhotos: () => void;
+  onShareSelectedPhotos: () => void;
   onSharePhoto: (photo: any) => void | Promise<void>;
+  onToggleSharePhoto: (photoId: string) => void;
   photoIndex: number;
+  selectedSharePhotoIds: Set<string>;
+  shareableTaskPhotos: ShareablePhoto[];
   task: any;
 }) {
   const photos = task.photos || [];
@@ -438,7 +482,36 @@ function QuoteTaskDetail({
                   </h4>
                   <p className="mt-0.5 text-xs text-muted-foreground">目前只顯示這張照片的回覆。</p>
                 </div>
-                <div className="flex shrink-0 flex-wrap gap-2">
+              <div className="flex shrink-0 flex-wrap gap-2">
+                  <Button
+                    disabled={!shareableTaskPhotos.length}
+                    onClick={onSelectAllSharePhotos}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    <Check className="size-4" />
+                    全選照片
+                  </Button>
+                  <Button
+                    disabled={!selectedSharePhotoIds.size}
+                    onClick={onClearSharePhotos}
+                    size="sm"
+                    type="button"
+                    variant="outline"
+                  >
+                    取消選取
+                  </Button>
+                  <Button
+                    disabled={!selectedSharePhotoIds.size}
+                    onClick={onShareSelectedPhotos}
+                    size="sm"
+                    type="button"
+                    variant="secondary"
+                  >
+                    <Share2 className="size-4" />
+                    分享選取 ({selectedSharePhotoIds.size})
+                  </Button>
                   <Button
                     disabled={!shareablePhotos.length}
                     onClick={() => onSharePhoto(photo)}
@@ -457,7 +530,9 @@ function QuoteTaskDetail({
                   <p className="text-xs font-semibold text-muted-foreground">發出的照片</p>
                   <SelectableImage
                     alt={photo.product_name || "quote task photo"}
+                    onToggle={() => onToggleSharePhoto(getSharePhotoId(photo, `source-${photo.id}`))}
                     photo={photo}
+                    selected={selectedSharePhotoIds.has(getSharePhotoId(photo, `source-${photo.id}`))}
                     url={photo.signed_url}
                   />
                 </div>
@@ -497,7 +572,9 @@ function QuoteTaskDetail({
                               <SelectableImage
                                 alt={detailPhoto.original_filename || "detail photo"}
                                 key={detailPhoto.storage_key || index}
+                                onToggle={() => onToggleSharePhoto(getSharePhotoId(detailPhoto, `detail-${photo.id}-${index}`))}
                                 photo={detailPhoto}
+                                selected={selectedSharePhotoIds.has(getSharePhotoId(detailPhoto, `detail-${photo.id}-${index}`))}
                                 url={detailPhoto.signed_url}
                               />
                             );
@@ -532,21 +609,47 @@ function QuoteTaskDetail({
 
 function SelectableImage({
   alt,
+  onToggle,
   photo,
+  selected = false,
   url,
 }: {
   alt: string;
+  onToggle?: () => void;
   photo?: any;
+  selected?: boolean;
   url: string;
 }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   return (
     <>
-      <div className="group relative aspect-square overflow-hidden rounded-xl bg-muted">
+      <div className={cn(
+        "group relative aspect-square overflow-hidden rounded-xl bg-muted",
+        selected ? "ring-2 ring-primary ring-offset-2" : "",
+      )}>
         <button aria-label={`檢視${alt}`} className="size-full" onClick={() => setPreviewOpen(true)} type="button">
           <img alt={alt} className="size-full object-cover" loading="lazy" src={url} />
           <span className="pointer-events-none absolute inset-0 opacity-0 ring-2 ring-primary transition group-hover:opacity-100" />
         </button>
+        {onToggle ? (
+          <button
+            aria-label={selected ? `取消選取${alt}` : `選取${alt}`}
+            aria-pressed={selected}
+            className={cn(
+              "absolute right-2 top-2 grid size-8 place-items-center rounded-full border text-xs shadow-sm transition",
+              selected
+                ? "border-primary bg-primary text-primary-foreground"
+                : "border-white/80 bg-black/45 text-white hover:bg-black/65",
+            )}
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggle();
+            }}
+            type="button"
+          >
+            {selected ? <Check className="size-4" /> : null}
+          </button>
+        ) : null}
         {photo?.storage_key ? (
           <button
             aria-label="開啟照片編輯器"
@@ -572,6 +675,7 @@ function collectShareablePhotosForPhoto(photo: any): ShareablePhoto[] {
       if (!detailPhoto.signed_url) continue;
       items.push({
         filename: detailPhoto.original_filename || `quote-detail-${photo.sort_order + 1}-${index + 1}.jpg`,
+        id: getSharePhotoId(detailPhoto, `detail-${photo.id}-${index}`),
         signed_url: detailPhoto.signed_url,
       });
     }
@@ -580,10 +684,36 @@ function collectShareablePhotosForPhoto(photo: any): ShareablePhoto[] {
   if (photo.signed_url) {
     items.push({
       filename: photo.product_name || `quote-source-${photo.sort_order + 1}.jpg`,
+      id: getSharePhotoId(photo, `source-${photo.id}`),
       signed_url: photo.signed_url,
     });
   }
   return items;
+}
+
+function collectShareablePhotosForTask(task: any): ShareablePhoto[] {
+  if (!task?.photos?.length) return [];
+  return task.photos.flatMap((photo: any) => {
+    const source = photo.signed_url
+      ? [{
+          filename: photo.product_name || `quote-source-${photo.sort_order + 1}.jpg`,
+          id: getSharePhotoId(photo, `source-${photo.id}`),
+          signed_url: photo.signed_url,
+        }]
+      : [];
+    const detailPhotos = (photo.latest_reply?.detail_photos || [])
+      .filter((detailPhoto: any) => detailPhoto.signed_url)
+      .map((detailPhoto: any, index: number) => ({
+        filename: detailPhoto.original_filename || `quote-detail-${photo.sort_order + 1}-${index + 1}.jpg`,
+        id: getSharePhotoId(detailPhoto, `detail-${photo.id}-${index}`),
+        signed_url: detailPhoto.signed_url,
+      }));
+    return [...source, ...detailPhotos];
+  });
+}
+
+function getSharePhotoId(photo: any, fallback: string) {
+  return String(photo?.storage_key || photo?.id || fallback);
 }
 
 function taskTypeLabel(taskType: string) {
