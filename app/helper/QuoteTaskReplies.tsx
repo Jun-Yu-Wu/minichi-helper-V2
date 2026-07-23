@@ -1,8 +1,8 @@
 "use client";
 
 import type { FormEvent } from "react";
-import { useCallback, useMemo, useState } from "react";
-import { Camera, CheckCircle2, ChevronLeft, ChevronRight, Pencil, RefreshCw, X } from "lucide-react";
+import { useCallback, useRef, useState } from "react";
+import { Camera, CheckCircle2, ChevronLeft, ChevronRight, ImageUp, Pencil, RefreshCw, X } from "lucide-react";
 
 import { BackButton } from "../components/BackButton";
 import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
@@ -11,6 +11,7 @@ import { Button } from "../components/ui/button";
 import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 import { useStaleResource } from "../../src/lib/client-resource-cache";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
+import { preparePhotoForUpload } from "../../src/lib/client-photo-upload";
 
 type UploadStatus = "selected" | "uploading" | "uploaded" | "failed";
 
@@ -412,6 +413,7 @@ function QuotePhotoReplyForm({
   taskType: string;
 }) {
   const [detailPhotos, setDetailPhotos] = useState<DetailPhoto[]>([]);
+  const uploadPromisesRef = useRef(new Map<string, Promise<Partial<DetailPhoto>>>());
   const [error, setError] = useState("");
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientId("quote-reply"));
   const [note, setNote] = useState(() => String(photo.latest_reply?.note || ""));
@@ -422,8 +424,8 @@ function QuotePhotoReplyForm({
   const [isEditing, setIsEditing] = useState(() => !photo.latest_reply);
   const [justSubmitted, setJustSubmitted] = useState(false);
 
-  function completeLocalSubmit() {
-    const uploadedDetailPhotos = detailPhotos
+  function completeLocalSubmit(uploadedPhotos = detailPhotos) {
+    const uploadedDetailPhotos = uploadedPhotos
       .filter((detailPhoto) => detailPhoto.status === "uploaded" && detailPhoto.storageKey)
       .map((detailPhoto) => ({
         byte_size: detailPhoto.byteSize,
@@ -455,24 +457,9 @@ function QuotePhotoReplyForm({
   const existingDetailPhotos = Array.isArray(photo.latest_reply?.detail_photos)
     ? photo.latest_reply.detail_photos
     : [];
-  const submittedDetailPhotos = useMemo(
-    () =>
-      detailPhotos
-        .filter((detailPhoto) => detailPhoto.status === "uploaded" && detailPhoto.storageKey)
-        .map((detailPhoto) => ({
-          byteSize: detailPhoto.byteSize,
-          contentType: detailPhoto.contentType,
-          originalFilename: detailPhoto.originalFilename,
-          sortOrder: detailPhoto.sortOrder,
-          storageKey: detailPhoto.storageKey,
-        })),
-    [detailPhotos],
-  );
-  const allDetailsUploaded =
-    detailPhotos.length > 0 && detailPhotos.every((detailPhoto) => detailPhoto.status === "uploaded");
   const canSubmit =
     (!requiresPrice || priceJpy.trim().length > 0) &&
-    (!requiresDetail || (detailPhotos.length ? allDetailsUploaded : hasExistingReply)) &&
+    (!requiresDetail || (detailPhotos.length ? detailPhotos.every((detailPhoto) => detailPhoto.status !== "failed") : hasExistingReply)) &&
     !formLocked &&
     !isConverted &&
     !pending;
@@ -496,11 +483,17 @@ function QuotePhotoReplyForm({
       ...selected.map((photo, index) => ({ ...photo, sortOrder: current.length + index })),
     ]);
     for (const detailPhoto of selected) {
-      void uploadDetailPhoto(detailPhoto);
+      void startDetailPhotoUpload(detailPhoto).catch(() => undefined);
     }
   }
 
-  async function uploadDetailPhoto(detailPhoto: DetailPhoto) {
+  function uploadDetailPhoto(detailPhoto: DetailPhoto) {
+    void startDetailPhotoUpload(detailPhoto).catch(() => undefined);
+  }
+
+  function startDetailPhotoUpload(detailPhoto: DetailPhoto) {
+    const existing = uploadPromisesRef.current.get(detailPhoto.clientPhotoId);
+    if (existing) return existing;
     setDetailPhotos((current) =>
       current.map((item) =>
         item.clientPhotoId === detailPhoto.clientPhotoId
@@ -508,12 +501,13 @@ function QuotePhotoReplyForm({
           : item,
       ),
     );
-    try {
+    const uploadPromise = (async () => {
+      const preparedFile = await preparePhotoForUpload(detailPhoto.file);
       const presign = await fetch("/api/uploads/presign", {
         body: JSON.stringify({
           clientPhotoId: detailPhoto.clientPhotoId,
-          contentType: detailPhoto.contentType,
-          byteSize: detailPhoto.byteSize,
+          contentType: preparedFile.type || detailPhoto.contentType,
+          byteSize: preparedFile.size,
           fileName: detailPhoto.originalFilename,
           quoteTaskPhotoId: photo.id,
           uploadPurpose: "quote_detail_reply",
@@ -524,8 +518,8 @@ function QuotePhotoReplyForm({
       const presignBody = await presign.json();
       if (!presign.ok) throw new Error(presignBody.error || "無法建立上傳網址。");
       const upload = await fetch(presignBody.uploadUrl, {
-        body: detailPhoto.file,
-        headers: { "content-type": detailPhoto.contentType },
+        body: preparedFile,
+        headers: { "content-type": preparedFile.type || detailPhoto.contentType },
         method: "PUT",
       });
       if (!upload.ok) throw new Error(`R2 上傳失敗 (${upload.status})。`);
@@ -533,28 +527,42 @@ function QuotePhotoReplyForm({
         current.map((item) =>
           item.clientPhotoId === detailPhoto.clientPhotoId
             ? { ...item, status: "uploaded", storageKey: presignBody.storageKey }
-            : item,
+          : item,
         ),
       );
-    } catch (error) {
-      setDetailPhotos((current) =>
-        current.map((item) =>
-          item.clientPhotoId === detailPhoto.clientPhotoId
-            ? {
-                ...item,
-                error: error instanceof Error ? error.message : "上傳失敗。",
-                status: "failed",
-              }
-            : item,
-        ),
-      );
-    }
+      return {
+        byteSize: preparedFile.size,
+        contentType: preparedFile.type || detailPhoto.contentType,
+        error: undefined,
+        status: "uploaded" as const,
+        storageKey: presignBody.storageKey,
+      };
+    })()
+      .then((uploaded) => {
+        uploadPromisesRef.current.delete(detailPhoto.clientPhotoId);
+        return uploaded;
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "上傳失敗。";
+        setDetailPhotos((current) =>
+          current.map((item) =>
+            item.clientPhotoId === detailPhoto.clientPhotoId
+              ? { ...item, error: message, status: "failed" }
+              : item,
+          ),
+        );
+        uploadPromisesRef.current.delete(detailPhoto.clientPhotoId);
+        throw error;
+      });
+    uploadPromisesRef.current.set(detailPhoto.clientPhotoId, uploadPromise);
+    return uploadPromise;
   }
 
   function removeDetailPhoto(clientPhotoId: string) {
     setDetailPhotos((current) => {
       const removed = current.find((detailPhoto) => detailPhoto.clientPhotoId === clientPhotoId);
       if (removed) URL.revokeObjectURL(removed.objectUrl);
+      uploadPromisesRef.current.delete(clientPhotoId);
       return current
         .filter((detailPhoto) => detailPhoto.clientPhotoId !== clientPhotoId)
         .map((detailPhoto, index) => ({ ...detailPhoto, sortOrder: index }));
@@ -567,9 +575,28 @@ function QuotePhotoReplyForm({
     setError("");
     setPending(true);
     try {
+      const uploadedPhotos = await Promise.all(
+        detailPhotos.map(async (detailPhoto) => {
+          if (detailPhoto.storageKey) return detailPhoto;
+          const pendingUpload = uploadPromisesRef.current.get(detailPhoto.clientPhotoId);
+          const uploaded = pendingUpload
+            ? await pendingUpload
+            : await startDetailPhotoUpload(detailPhoto);
+          return { ...detailPhoto, ...uploaded };
+        }),
+      );
+      const uploadedDetailPhotos = uploadedPhotos
+        .filter((detailPhoto) => detailPhoto.status === "uploaded" && detailPhoto.storageKey)
+        .map((detailPhoto) => ({
+          byteSize: detailPhoto.byteSize,
+          contentType: detailPhoto.contentType,
+          originalFilename: detailPhoto.originalFilename,
+          sortOrder: detailPhoto.sortOrder,
+          storageKey: detailPhoto.storageKey,
+        }));
       const response = await fetch("/api/helper/quote-photo-replies", {
         body: JSON.stringify({
-          detailPhotos: submittedDetailPhotos,
+          detailPhotos: uploadedDetailPhotos,
           idempotencyKey,
           note,
           priceJpy,
@@ -580,7 +607,7 @@ function QuotePhotoReplyForm({
       });
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "送出失敗，請稍後再試。");
-      completeLocalSubmit();
+      completeLocalSubmit(uploadedPhotos);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "送出失敗，請稍後再試。");
     } finally {
@@ -682,23 +709,47 @@ function QuotePhotoReplyForm({
 
       {showEditableFields && requiresDetail ? (
         <div className="grid gap-2">
-          <label
+          <div
             className={`flex min-h-24 flex-col items-center justify-center gap-2 rounded-lg border border-dashed bg-muted/40 p-3 text-center ${
               formLocked || isConverted || pending ? "cursor-not-allowed opacity-60" : "cursor-pointer"
             }`}
           >
             <Camera className="size-5" aria-hidden="true" />
-            <span className="text-sm">拍細圖回傳</span>
-            <input
-              className="sr-only"
-              type="file"
-              accept="image/*"
-              capture="environment"
-              disabled={formLocked || isConverted || pending}
-              multiple
-              onChange={(event) => addFiles(event.target.files)}
-            />
-          </label>
+            <span className="text-sm">拍照或從相簿選擇</span>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            <label className="flex min-h-12 cursor-pointer items-center justify-center rounded-lg border bg-background px-3 text-sm font-medium">
+              <Camera className="mr-2 size-4" aria-hidden="true" />
+              拍照
+              <input
+                className="sr-only"
+                type="file"
+                accept="image/*"
+                capture="environment"
+                disabled={formLocked || isConverted || pending}
+                multiple
+                onChange={(event) => {
+                  addFiles(event.target.files);
+                  event.currentTarget.value = "";
+                }}
+              />
+            </label>
+            <label className="flex min-h-12 cursor-pointer items-center justify-center rounded-lg border bg-background px-3 text-sm font-medium">
+              <ImageUp className="mr-2 size-4" aria-hidden="true" />
+              從相簿選擇
+              <input
+                className="sr-only"
+                type="file"
+                accept="image/*"
+                disabled={formLocked || isConverted || pending}
+                multiple
+                onChange={(event) => {
+                  addFiles(event.target.files);
+                  event.currentTarget.value = "";
+                }}
+              />
+            </label>
+          </div>
           {detailPhotos.length ? (
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
               {detailPhotos.map((detailPhoto) => (
@@ -764,7 +815,7 @@ function QuotePhotoReplyForm({
           />
           {error ? <p className="text-sm text-destructive">{error}</p> : null}
           <Button disabled={!canSubmit} type="submit">
-            {hasExistingReply ? "儲存" : "送出"}
+            {pending ? "照片上傳中，完成後送出..." : hasExistingReply ? "儲存" : "送出"}
           </Button>
         </form>
       ) : null}

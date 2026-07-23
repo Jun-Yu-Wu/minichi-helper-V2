@@ -15,6 +15,7 @@ import {
   type AdminActionResult,
 } from "../actions/admin";
 import { Button } from "../components/ui/button";
+import { preparePhotoForUpload } from "../../src/lib/client-photo-upload";
 
 const initialState: AdminActionResult = {};
 const customerNicknameCache = new Map<string, string[]>();
@@ -1031,6 +1032,7 @@ type AdminTaskUploadPhoto = {
 };
 
 const MAX_ADMIN_TASK_PHOTO_BYTES = 8 * 1024 * 1024;
+const MAX_ADMIN_TASK_SOURCE_PHOTO_BYTES = 24 * 1024 * 1024;
 
 function CreateUploadedQuoteTaskForm({
   taskType,
@@ -1041,6 +1043,7 @@ function CreateUploadedQuoteTaskForm({
 }) {
   const [photos, setPhotos] = useState<AdminTaskUploadPhoto[]>([]);
   const photosRef = useRef<AdminTaskUploadPhoto[]>([]);
+  const uploadPromisesRef = useRef(new Map<string, Promise<Partial<AdminTaskUploadPhoto>>>());
   const [state, setState] = useState<AdminActionResult>({});
   const [pending, setPending] = useState(false);
 
@@ -1064,29 +1067,21 @@ function CreateUploadedQuoteTaskForm({
         clientPhotoId: createClientId("admin-task-photo"),
         contentType: file.type || "image/jpeg",
         error:
-          file.size > MAX_ADMIN_TASK_PHOTO_BYTES
-            ? "照片超過 8MB，請縮小後再上傳。"
+          file.size > MAX_ADMIN_TASK_SOURCE_PHOTO_BYTES
+            ? "照片超過 24MB，請先縮小後再上傳。"
             : undefined,
         file,
         objectUrl: URL.createObjectURL(file),
         originalFilename: file.name || "task-photo.jpg",
         sortOrder: photos.length + index,
-        status: file.size > MAX_ADMIN_TASK_PHOTO_BYTES ? "failed" as const : "selected" as const,
+        status: file.size > MAX_ADMIN_TASK_SOURCE_PHOTO_BYTES ? "failed" as const : "selected" as const,
       }));
     setPhotos((current) => [
       ...current,
       ...selected.map((photo, index) => ({ ...photo, sortOrder: current.length + index })),
     ]);
     for (const photo of selected.filter((item) => !item.error)) {
-      updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" });
-      void uploadAdminTaskPhoto(photo, trip.id)
-        .then((uploaded) => updatePhoto(photo.clientPhotoId, uploaded))
-        .catch((error) => {
-          updatePhoto(photo.clientPhotoId, {
-            error: error instanceof Error ? error.message : "照片上傳失敗。",
-            status: "failed",
-          });
-        });
+      void startPhotoUpload(photo).catch(() => undefined);
     }
   }
 
@@ -1094,6 +1089,7 @@ function CreateUploadedQuoteTaskForm({
     setPhotos((current) => {
       const removed = current.find((photo) => photo.clientPhotoId === clientPhotoId);
       if (removed) URL.revokeObjectURL(removed.objectUrl);
+      uploadPromisesRef.current.delete(clientPhotoId);
       return current
         .filter((photo) => photo.clientPhotoId !== clientPhotoId)
         .map((photo, index) => ({ ...photo, sortOrder: index }));
@@ -1113,10 +1109,11 @@ function CreateUploadedQuoteTaskForm({
       const uploadedPhotos = await Promise.all(
         photos.map(async (photo) => {
           if (photo.storageKey) return photo;
-          updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" });
           try {
-            const uploaded = await uploadAdminTaskPhoto(photo, trip.id);
-            updatePhoto(photo.clientPhotoId, uploaded);
+            const pendingUpload = uploadPromisesRef.current.get(photo.clientPhotoId);
+            const uploaded = pendingUpload
+              ? await pendingUpload
+              : await startPhotoUpload(photo);
             return { ...photo, ...uploaded };
           } catch (error) {
             const message = error instanceof Error ? error.message : "照片上傳失敗。";
@@ -1152,6 +1149,26 @@ function CreateUploadedQuoteTaskForm({
     } finally {
       setPending(false);
     }
+  }
+
+  function startPhotoUpload(photo: AdminTaskUploadPhoto) {
+    const existing = uploadPromisesRef.current.get(photo.clientPhotoId);
+    if (existing) return existing;
+    updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" });
+    const uploadPromise = uploadAdminTaskPhoto(photo, trip.id)
+      .then((uploaded) => {
+        updatePhoto(photo.clientPhotoId, uploaded);
+        uploadPromisesRef.current.delete(photo.clientPhotoId);
+        return uploaded;
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "照片上傳失敗。";
+        updatePhoto(photo.clientPhotoId, { error: message, status: "failed" });
+        uploadPromisesRef.current.delete(photo.clientPhotoId);
+        throw error;
+      });
+    uploadPromisesRef.current.set(photo.clientPhotoId, uploadPromise);
+    return uploadPromise;
   }
 
   function updatePhoto(clientPhotoId: string, patch: Partial<AdminTaskUploadPhoto>) {
@@ -1227,12 +1244,12 @@ function CreateUploadedQuoteTaskForm({
         disabled={
           pending ||
           !photos.length ||
-          photos.some((photo) => Boolean(photo.error) || photo.status !== "uploaded")
+          photos.some((photo) => Boolean(photo.error))
         }
         size="sm"
         type="submit"
       >
-        送出
+        {pending ? "發布中..." : photos.some((photo) => photo.status === "uploading") ? "照片上傳中，仍可送出" : "送出"}
       </Button>
     </form>
   );
@@ -1245,11 +1262,12 @@ function adminQuoteTaskTypeLabel(taskType: QuoteTaskFormProps["taskType"]) {
 }
 
 async function uploadAdminTaskPhoto(photo: AdminTaskUploadPhoto, tripId: string) {
+  const preparedFile = await preparePhotoForUpload(photo.file);
   const presign = await fetch("/api/uploads/presign", {
     body: JSON.stringify({
       clientPhotoId: photo.clientPhotoId,
-      contentType: photo.contentType,
-      byteSize: photo.byteSize,
+      contentType: preparedFile.type || photo.contentType,
+      byteSize: preparedFile.size,
       fileName: photo.originalFilename,
       tripId,
       uploadPurpose: "admin_quote_task_photo",
@@ -1260,12 +1278,18 @@ async function uploadAdminTaskPhoto(photo: AdminTaskUploadPhoto, tripId: string)
   const presignBody = await presign.json();
   if (!presign.ok) throw new Error(presignBody.error || "無法建立上傳網址。");
   const upload = await fetch(presignBody.uploadUrl, {
-    body: photo.file,
-    headers: { "content-type": photo.contentType },
+    body: preparedFile,
+    headers: { "content-type": preparedFile.type || photo.contentType },
     method: "PUT",
   });
   if (!upload.ok) throw new Error(`R2 上傳失敗 (${upload.status})。`);
-  return { error: undefined, status: "uploaded" as const, storageKey: presignBody.storageKey };
+  return {
+    byteSize: preparedFile.size,
+    contentType: preparedFile.type || photo.contentType,
+    error: undefined,
+    status: "uploaded" as const,
+    storageKey: presignBody.storageKey,
+  };
 }
 
 async function uploadAdminRebuyReferencePhoto(photo: AdminTaskUploadPhoto) {

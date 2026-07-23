@@ -1911,7 +1911,10 @@ async function createQuoteTask(
       before_state: {},
       trip_id: trip.id,
     });
-    return getQuoteTaskById(client, task.id);
+    // The create action only needs the inserted task acknowledgement. Avoid a
+    // second aggregate read of every task photo on the publish critical path;
+    // the scoped quote-task detail route reads the full task when needed.
+    return task;
   });
 }
 
