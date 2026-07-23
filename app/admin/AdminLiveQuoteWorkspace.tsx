@@ -1,8 +1,8 @@
 "use client";
 
-import { Check, Download, Pencil, RefreshCw, Share2, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, Pencil, RefreshCw, Share2 } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { Button } from "../components/ui/button";
 import { PhotoLightbox } from "../components/PhotoAnnotationEditor";
@@ -34,7 +34,6 @@ type QuoteTaskSummary = {
 
 type ShareablePhoto = {
   filename: string;
-  id: string;
   signed_url: string;
 };
 
@@ -49,13 +48,12 @@ export function AdminLiveQuoteWorkspace({
   const [selectedTripId, setSelectedTripId] = useState(initialTripId || "");
   const [activeTaskId, setActiveTaskId] = useState("");
   const [activeTask, setActiveTask] = useState<any | null>(null);
-  const [selectedPhotoIds, setSelectedPhotoIds] = useState<Set<string>>(new Set());
+  const [photoIndex, setPhotoIndex] = useState(0);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [message, setMessage] = useState("");
   const [loadError, setLoadError] = useState("");
   const [detailRefreshNonce, setDetailRefreshNonce] = useState(0);
 
-  const selectedTrip = trips.find((trip) => trip.id === selectedTripId);
   const loadTasks = useCallback(async (signal: AbortSignal) => {
     const response = await fetch(
       `/api/admin/live/quote-tasks?tripId=${encodeURIComponent(selectedTripId)}`,
@@ -75,12 +73,6 @@ export function AdminLiveQuoteWorkspace({
   const tasks = taskResource.data || [];
   const pendingTasks = tasks.filter((task) => !isQuoteTaskComplete(task));
   const completedTasks = tasks.filter(isQuoteTaskComplete);
-  const allDetailPhotos = useMemo(() => collectShareablePhotos(activeTask), [activeTask]);
-  const selectedPhotos = useMemo(
-    () => allDetailPhotos.filter((photo) => selectedPhotoIds.has(photo.id)),
-    [allDetailPhotos, selectedPhotoIds],
-  );
-
   useEffect(() => {
     if (!activeTaskId || !selectedTripId) return;
     let canceled = false;
@@ -97,7 +89,7 @@ export function AdminLiveQuoteWorkspace({
         if (!response.ok) throw new Error(data.error || "載入失敗");
         if (!canceled) {
           setActiveTask(data.task || null);
-          setSelectedPhotoIds(new Set());
+          setPhotoIndex(0);
         }
       } catch (error) {
         if (!canceled) setLoadError(error instanceof Error ? error.message : "詢價任務明細載入失敗。");
@@ -116,7 +108,7 @@ export function AdminLiveQuoteWorkspace({
     setSelectedTripId(tripId);
     setActiveTaskId("");
     setActiveTask(null);
-    setSelectedPhotoIds(new Set());
+    setPhotoIndex(0);
     const url = new URL(window.location.href);
     url.searchParams.set("view", "live");
     url.searchParams.set("liveTripId", tripId);
@@ -127,40 +119,13 @@ export function AdminLiveQuoteWorkspace({
   function openTask(taskId: string) {
     setActiveTaskId(taskId);
     setActiveTask(null);
-    setSelectedPhotoIds(new Set());
+    setPhotoIndex(0);
   }
 
   function closeTask() {
     setActiveTaskId("");
     setActiveTask(null);
-    setSelectedPhotoIds(new Set());
-  }
-
-  function togglePhoto(photoId: string) {
-    setSelectedPhotoIds((current) => {
-      const next = new Set(current);
-      if (next.has(photoId)) next.delete(photoId);
-      else next.add(photoId);
-      return next;
-    });
-  }
-
-  function selectAllPhotos() {
-    setSelectedPhotoIds(new Set(allDetailPhotos.map((photo) => photo.id)));
-  }
-
-  async function downloadPhotos(photos: ShareablePhoto[]) {
-    for (const [index, photo] of photos.entries()) {
-      const link = document.createElement("a");
-      link.href = photo.signed_url;
-      link.download = photo.filename || `quote-photo-${index + 1}.jpg`;
-      link.rel = "noreferrer";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      await wait(160);
-    }
-    setMessage(`${photos.length} 張照片已送出儲存。`);
+    setPhotoIndex(0);
   }
 
   async function sharePhotos(photos: ShareablePhoto[]) {
@@ -285,7 +250,6 @@ export function AdminLiveQuoteWorkspace({
           completedTasks={completedTasks}
           loading={taskResource.isLoading}
           pendingTasks={pendingTasks}
-          selectedTrip={selectedTrip}
           tasks={tasks}
           onOpenTask={openTask}
         />
@@ -306,15 +270,10 @@ export function AdminLiveQuoteWorkspace({
             </div>
           ) : activeTask ? (
             <QuoteTaskDetail
-              allPhotoCount={allDetailPhotos.length}
-              onClearPhotos={() => setSelectedPhotoIds(new Set())}
-              onSaveSelectedPhotos={() => downloadPhotos(selectedPhotos)}
-              onSelectAllPhotos={selectAllPhotos}
-              onShareSelectedPhotos={() => sharePhotos(selectedPhotos)}
-              selectedPhotoIds={selectedPhotoIds}
-              selectedPhotoCount={selectedPhotoIds.size}
+              onPhotoIndexChange={setPhotoIndex}
+              onSharePhoto={(photo) => sharePhotos(collectShareablePhotosForPhoto(photo))}
+              photoIndex={photoIndex}
               task={activeTask}
-              togglePhoto={togglePhoto}
             />
           ) : null}
         </section>
@@ -328,39 +287,16 @@ function QuoteTaskList({
   loading,
   onOpenTask,
   pendingTasks,
-  selectedTrip,
   tasks,
 }: {
   completedTasks: QuoteTaskSummary[];
   loading: boolean;
   onOpenTask: (taskId: string) => void;
   pendingTasks: QuoteTaskSummary[];
-  selectedTrip?: Trip;
   tasks: QuoteTaskSummary[];
 }) {
-  const replied = tasks.reduce((total, task) => total + Number(task.replied_photo_count || 0), 0);
-  const photos = tasks.reduce((total, task) => total + Number(task.photo_count || 0), 0);
-  const needsReview = tasks.reduce((total, task) => total + Number(task.needs_review_count || 0), 0);
-
   return (
     <section className="grid gap-4">
-      <div className="grid gap-2 rounded-2xl border bg-card p-4 shadow-sm">
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <p className="text-sm text-muted-foreground">{selectedTrip?.trip_name || "即時回傳"}</p>
-            <h3 className="text-xl font-semibold">詢價 / 細節</h3>
-          </div>
-          <StatusBadge tone={needsReview ? "amber" : replied === photos && photos ? "green" : "blue"}>
-            {replied}/{photos}
-          </StatusBadge>
-        </div>
-        <div className="grid grid-cols-3 gap-2 text-sm">
-          <MiniMetric label="任務" value={String(tasks.length)} />
-          <MiniMetric label="未回覆" value={String(pendingTasks.length)} />
-          <MiniMetric label="確認" value={String(needsReview)} />
-        </div>
-      </div>
-
       {loading && !tasks.length ? (
         <div className="grid gap-2">
           {[0, 1, 2].map((item) => (
@@ -429,28 +365,21 @@ function QuoteTaskLane({
 }
 
 function QuoteTaskDetail({
-  allPhotoCount,
-  onClearPhotos,
-  onSaveSelectedPhotos,
-  onSelectAllPhotos,
-  onShareSelectedPhotos,
-  selectedPhotoIds,
-  selectedPhotoCount,
+  onPhotoIndexChange,
+  onSharePhoto,
+  photoIndex,
   task,
-  togglePhoto,
 }: {
-  allPhotoCount: number;
-  onClearPhotos: () => void;
-  onSaveSelectedPhotos: () => void | Promise<void>;
-  onSelectAllPhotos: () => void;
-  onShareSelectedPhotos: () => void | Promise<void>;
-  selectedPhotoIds: Set<string>;
-  selectedPhotoCount: number;
+  onPhotoIndexChange: (index: number) => void;
+  onSharePhoto: (photo: any) => void | Promise<void>;
+  photoIndex: number;
   task: any;
-  togglePhoto: (photoId: string) => void;
 }) {
   const photos = task.photos || [];
-  const replied = photos.filter((photo: any) => photo.latest_reply).length;
+  const safeIndex = Math.min(photoIndex, Math.max(photos.length - 1, 0));
+  const photo = photos[safeIndex];
+  const latestReply = photo?.latest_reply;
+  const shareablePhotos = collectShareablePhotosForPhoto(photo);
   return (
     <section className="grid gap-4">
       <div className="rounded-2xl border bg-card p-4 shadow-sm">
@@ -461,16 +390,39 @@ function QuoteTaskDetail({
             {task.instruction ? <p className="mt-1 text-sm text-muted-foreground">{task.instruction}</p> : null}
           </div>
           <StatusBadge tone={task.status === "completed" ? "green" : "blue"}>
-            {replied}/{photos.length}
+            {photo ? `${safeIndex + 1}/${photos.length}` : "0/0"}
           </StatusBadge>
         </div>
       </div>
 
-      <div className="grid gap-3">
-        {photos.map((photo: any) => {
-          const latestReply = photo.latest_reply;
-          const sourcePhotoId = `source:${photo.id}`;
-          return (
+      {photo ? (
+        <>
+          <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2">
+            <Button
+              aria-label="上一張照片"
+              disabled={safeIndex === 0}
+              size="sm"
+              type="button"
+              variant="outline"
+              onClick={() => onPhotoIndexChange(safeIndex - 1)}
+            >
+              <ChevronLeft className="size-4" />
+            </Button>
+            <strong className="text-center text-sm">
+              第 {safeIndex + 1} / {photos.length} 張
+            </strong>
+            <Button
+              aria-label="下一張照片"
+              disabled={safeIndex >= photos.length - 1}
+              size="sm"
+              type="button"
+              variant="outline"
+              onClick={() => onPhotoIndexChange(safeIndex + 1)}
+            >
+              <ChevronRight className="size-4" />
+            </Button>
+          </div>
+
             <article className="grid gap-3 rounded-2xl border bg-card p-3 shadow-sm" key={photo.id}>
               <div className="flex flex-wrap items-start justify-between gap-3 border-b pb-3">
                 <div className="min-w-0">
@@ -484,41 +436,12 @@ function QuoteTaskDetail({
                   <h4 className="mt-2 truncate text-base font-semibold">
                     {photo.product_name || task.product_name || "詢價照片"}
                   </h4>
-                  <p className="mt-0.5 text-xs text-muted-foreground">
-                    左側是管理員發出的照片，右側是小幫手回覆。
-                  </p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">目前只顯示這張照片的回覆。</p>
                 </div>
                 <div className="flex shrink-0 flex-wrap gap-2">
                   <Button
-                    disabled={!allPhotoCount}
-                    onClick={onSelectAllPhotos}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    全選
-                  </Button>
-                  <Button
-                    disabled={!selectedPhotoCount}
-                    onClick={onClearPhotos}
-                    size="sm"
-                    type="button"
-                    variant="outline"
-                  >
-                    取消
-                  </Button>
-                  <Button
-                    disabled={!selectedPhotoCount}
-                    onClick={onSaveSelectedPhotos}
-                    size="sm"
-                    type="button"
-                  >
-                    <Download className="size-4" />
-                    儲存
-                  </Button>
-                  <Button
-                    disabled={!selectedPhotoCount}
-                    onClick={onShareSelectedPhotos}
+                    disabled={!shareablePhotos.length}
+                    onClick={() => onSharePhoto(photo)}
                     size="sm"
                     type="button"
                     variant="secondary"
@@ -526,9 +449,6 @@ function QuoteTaskDetail({
                     <Share2 className="size-4" />
                     分享
                   </Button>
-                  <span className="flex min-h-9 items-center text-xs text-muted-foreground">
-                    {selectedPhotoCount ? `${selectedPhotoCount} / ${allPhotoCount}` : `${allPhotoCount} 張`}
-                  </span>
                 </div>
               </div>
 
@@ -537,11 +457,8 @@ function QuoteTaskDetail({
                   <p className="text-xs font-semibold text-muted-foreground">發出的照片</p>
                   <SelectableImage
                     alt={photo.product_name || "quote task photo"}
-                    id={sourcePhotoId}
                     photo={photo}
-                    selected={selectedPhotoIds.has(sourcePhotoId)}
                     url={photo.signed_url}
-                    onToggle={togglePhoto}
                   />
                 </div>
                 {latestReply ? (
@@ -576,16 +493,12 @@ function QuoteTaskDetail({
                         <p className="text-xs font-semibold text-emerald-900/70">細圖回覆</p>
                         <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
                           {latestReply.detail_photos.map((detailPhoto: any, index: number) => {
-                            const detailId = `detail:${photo.id}:${detailPhoto.storage_key || index}`;
                             return (
                               <SelectableImage
                                 alt={detailPhoto.original_filename || "detail photo"}
-                                id={detailId}
-                                key={detailId}
+                                key={detailPhoto.storage_key || index}
                                 photo={detailPhoto}
-                                selected={selectedPhotoIds.has(detailId)}
                                 url={detailPhoto.signed_url}
-                                onToggle={togglePhoto}
                               />
                             );
                           })}
@@ -607,42 +520,31 @@ function QuoteTaskDetail({
                 )}
               </div>
             </article>
-          );
-        })}
-      </div>
+        </>
+      ) : (
+        <div className="rounded-lg border border-dashed bg-card p-4 text-sm text-muted-foreground">
+          此任務目前沒有照片。
+        </div>
+      )}
     </section>
   );
 }
 
 function SelectableImage({
   alt,
-  id,
-  onToggle,
   photo,
-  selected,
   url,
 }: {
   alt: string;
-  id: string;
-  onToggle: (id: string) => void;
   photo?: any;
-  selected: boolean;
   url: string;
 }) {
   const [previewOpen, setPreviewOpen] = useState(false);
   return (
     <>
       <div className="group relative aspect-square overflow-hidden rounded-xl bg-muted">
-        <button className="size-full" onClick={() => onToggle(id)} type="button">
+        <button aria-label={`檢視${alt}`} className="size-full" onClick={() => setPreviewOpen(true)} type="button">
           <img alt={alt} className="size-full object-cover" loading="lazy" src={url} />
-          <span
-            className={cn(
-              "absolute right-2 top-2 flex size-7 items-center justify-center rounded-full border text-xs shadow-sm",
-              selected ? "border-primary bg-primary text-primary-foreground" : "border-white/80 bg-black/40 text-white",
-            )}
-          >
-            {selected ? <Check className="size-4" /> : null}
-          </span>
           <span className="pointer-events-none absolute inset-0 opacity-0 ring-2 ring-primary transition group-hover:opacity-100" />
         </button>
         {photo?.storage_key ? (
@@ -661,34 +563,25 @@ function SelectableImage({
   );
 }
 
-function MiniMetric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-xl bg-muted/50 px-3 py-2">
-      <p className="text-xs text-muted-foreground">{label}</p>
-      <p className="font-semibold">{value}</p>
-    </div>
-  );
-}
-
-function collectShareablePhotos(task: any): ShareablePhoto[] {
-  if (!task) return [];
+function collectShareablePhotosForPhoto(photo: any): ShareablePhoto[] {
+  if (!photo) return [];
   const items: ShareablePhoto[] = [];
-  for (const photo of task.photos || []) {
-    if (photo.signed_url) {
-      items.push({
-        filename: photo.product_name || `quote-source-${photo.sort_order + 1}.jpg`,
-        id: `source:${photo.id}`,
-        signed_url: photo.signed_url,
-      });
-    }
-    for (const [index, detailPhoto] of (photo.latest_reply?.detail_photos || []).entries()) {
+  const detailPhotos = photo.latest_reply?.detail_photos || [];
+  if (detailPhotos.length) {
+    for (const [index, detailPhoto] of detailPhotos.entries()) {
       if (!detailPhoto.signed_url) continue;
       items.push({
         filename: detailPhoto.original_filename || `quote-detail-${photo.sort_order + 1}-${index + 1}.jpg`,
-        id: `detail:${photo.id}:${detailPhoto.storage_key || index}`,
         signed_url: detailPhoto.signed_url,
       });
     }
+    return items;
+  }
+  if (photo.signed_url) {
+    items.push({
+      filename: photo.product_name || `quote-source-${photo.sort_order + 1}.jpg`,
+      signed_url: photo.signed_url,
+    });
   }
   return items;
 }
@@ -702,8 +595,4 @@ function taskTypeLabel(taskType: string) {
 function isQuoteTaskComplete(task: QuoteTaskSummary) {
   const total = Number(task.photo_count || 0);
   return task.status === "completed" || (total > 0 && Number(task.replied_photo_count || 0) >= total);
-}
-
-function wait(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }

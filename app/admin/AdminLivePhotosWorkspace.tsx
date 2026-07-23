@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, Download, Maximize2, RefreshCw, Share2 } from "lucide-react";
+import { Check, Maximize2, RefreshCw, Share2 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useMemo, useState } from "react";
 
@@ -119,21 +119,6 @@ export function AdminLivePhotosWorkspace({
     setSelectedPhotoIds(new Set(allPhotos.map((photo) => photo.id)));
   }
 
-  async function downloadPhotos(photos: SitePhoto[]) {
-    if (!photos.length) return;
-    for (const [index, photo] of photos.entries()) {
-      const link = document.createElement("a");
-      link.href = photo.signed_url;
-      link.download = photo.original_filename || `site-photo-${index + 1}.jpg`;
-      link.rel = "noreferrer";
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      await wait(160);
-    }
-    setMessage(`${photos.length} 張照片已送出儲存。`);
-  }
-
   async function sharePhotos(photos: SitePhoto[]) {
     if (!photos.length) return;
     const nav = navigator as Navigator & {
@@ -245,7 +230,6 @@ export function AdminLivePhotosWorkspace({
                 <div className="flex flex-wrap items-center gap-2">
                   <Button disabled={!allPhotos.length} onClick={selectAllPhotos} size="sm" type="button" variant="outline">全選</Button>
                   <Button disabled={!selectedPhotoIds.size} onClick={() => setSelectedPhotoIds(new Set())} size="sm" type="button" variant="outline">取消</Button>
-                  <Button disabled={!selectedPhotos.length} onClick={() => void downloadPhotos(selectedPhotos)} size="sm" type="button"><Download className="size-4" />儲存</Button>
                   <Button disabled={!selectedPhotos.length} onClick={() => void sharePhotos(selectedPhotos)} size="sm" type="button" variant="secondary"><Share2 className="size-4" />分享</Button>
                   <span className="text-sm text-muted-foreground">{selectedPhotoIds.size ? `${selectedPhotoIds.size} / ${allPhotos.length}` : `${allPhotos.length} 張`}</span>
                 </div>
@@ -314,8 +298,4 @@ function chineseBatchNumber(value: number) {
 
 function formatBatchTime(value: string) {
   return new Date(value).toLocaleString("zh-TW", { timeZone: "Asia/Taipei" });
-}
-
-function wait(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
