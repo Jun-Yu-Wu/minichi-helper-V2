@@ -1,10 +1,11 @@
 "use client";
 
-import { Check, Download, RefreshCw, Share2, X } from "lucide-react";
+import { Check, Download, Pencil, RefreshCw, Share2, X } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { Button } from "../components/ui/button";
+import { PhotoLightbox } from "../components/PhotoAnnotationEditor";
 import { BackButton } from "../components/BackButton";
 import { StatusBadge } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
@@ -537,6 +538,7 @@ function QuoteTaskDetail({
                   <SelectableImage
                     alt={photo.product_name || "quote task photo"}
                     id={sourcePhotoId}
+                    photo={photo}
                     selected={selectedPhotoIds.has(sourcePhotoId)}
                     url={photo.signed_url}
                     onToggle={togglePhoto}
@@ -580,6 +582,7 @@ function QuoteTaskDetail({
                                 alt={detailPhoto.original_filename || "detail photo"}
                                 id={detailId}
                                 key={detailId}
+                                photo={detailPhoto}
                                 selected={selectedPhotoIds.has(detailId)}
                                 url={detailPhoto.signed_url}
                                 onToggle={togglePhoto}
@@ -615,32 +618,46 @@ function SelectableImage({
   alt,
   id,
   onToggle,
+  photo,
   selected,
   url,
 }: {
   alt: string;
   id: string;
   onToggle: (id: string) => void;
+  photo?: any;
   selected: boolean;
   url: string;
 }) {
+  const [previewOpen, setPreviewOpen] = useState(false);
   return (
-    <button
-      className="group relative aspect-square overflow-hidden rounded-xl bg-muted"
-      onClick={() => onToggle(id)}
-      type="button"
-    >
-      <img alt={alt} className="size-full object-cover" loading="lazy" src={url} />
-      <span
-        className={cn(
-          "absolute right-2 top-2 flex size-7 items-center justify-center rounded-full border text-xs shadow-sm",
-          selected ? "border-primary bg-primary text-primary-foreground" : "border-white/80 bg-black/40 text-white",
-        )}
-      >
-        {selected ? <Check className="size-4" /> : null}
-      </span>
-      <span className="absolute inset-0 opacity-0 ring-2 ring-primary transition group-hover:opacity-100" />
-    </button>
+    <>
+      <div className="group relative aspect-square overflow-hidden rounded-xl bg-muted">
+        <button className="size-full" onClick={() => onToggle(id)} type="button">
+          <img alt={alt} className="size-full object-cover" loading="lazy" src={url} />
+          <span
+            className={cn(
+              "absolute right-2 top-2 flex size-7 items-center justify-center rounded-full border text-xs shadow-sm",
+              selected ? "border-primary bg-primary text-primary-foreground" : "border-white/80 bg-black/40 text-white",
+            )}
+          >
+            {selected ? <Check className="size-4" /> : null}
+          </span>
+          <span className="pointer-events-none absolute inset-0 opacity-0 ring-2 ring-primary transition group-hover:opacity-100" />
+        </button>
+        {photo?.storage_key ? (
+          <button
+            aria-label="開啟照片編輯器"
+            className="absolute bottom-2 right-2 grid size-8 place-items-center rounded-full bg-black/65 text-white shadow-sm hover:bg-black/80"
+            onClick={() => setPreviewOpen(true)}
+            type="button"
+          >
+            <Pencil className="size-4" />
+          </button>
+        ) : null}
+      </div>
+      {previewOpen ? <PhotoLightbox alt={alt} onClose={() => setPreviewOpen(false)} photo={photo} /> : null}
+    </>
   );
 }
 

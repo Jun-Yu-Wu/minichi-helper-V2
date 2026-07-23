@@ -4,6 +4,7 @@ import { useState } from "react";
 import { ImageIcon } from "lucide-react";
 
 import { Button } from "../components/ui/button";
+import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 
 export function AdminPurchasePhotos({
   endpoint,
@@ -54,14 +55,12 @@ export function AdminPurchasePhotos({
             <span className="col-span-full rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</span>
           ) : (
             photos.map((photo) => (
-              <a href={photo.signed_url} key={photo.id} target="_blank" rel="noreferrer">
-                <img
-                  alt={photo.photo_role}
-                  className="aspect-square w-full rounded-md object-cover"
-                  loading="lazy"
-                  src={photo.signed_url}
-                />
-              </a>
+              <PhotoViewerTrigger
+                alt={photo.photo_role}
+                className="aspect-square rounded-md"
+                key={photo.id}
+                photo={photo}
+              />
             ))
           )}
         </div>

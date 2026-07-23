@@ -5274,6 +5274,192 @@ async function copyRebuyPhotosToPurchase(client, input) {
   await markMediaAsOrderEvidenceBatch(client, purchasePhotos.map((photo) => photo.storageKey));
 }
 
+async function authorizePhotoAnnotationSource(database, {
+  actorRole,
+  authUserId,
+  sourceStorageKey,
+}) {
+  const storageKey = requiredText(sourceStorageKey, "sourceStorageKey");
+  const result = await database.query(
+    `select mo.id, mo.storage_key, mo.media_kind, mo.content_type, mo.original_filename,
+            case when $2 = 'admin' then true else (
+              exists (
+                select 1
+                from helper_app.site_photos sp
+                join helper_app.trips t on t.id = sp.trip_id
+                join helper_app.helper_profiles hp on hp.id = sp.helper_id
+                where sp.storage_key = mo.storage_key
+                  and hp.auth_user_id = $1
+                  and hp.is_active = true
+                  and t.assigned_helper_id = hp.id
+              )
+              or exists (
+                select 1
+                from helper_app.quote_task_photos qtp
+                join helper_app.trips t on t.id = qtp.trip_id
+                join helper_app.helper_profiles hp on hp.id = qtp.helper_id
+                where qtp.storage_key = mo.storage_key
+                  and hp.auth_user_id = $1
+                  and hp.is_active = true
+                  and t.assigned_helper_id = hp.id
+              )
+              or exists (
+                select 1
+                from helper_app.quote_photo_replies qpr
+                join helper_app.trips t on t.id = qpr.trip_id
+                join helper_app.helper_profiles hp on hp.id = qpr.helper_id
+                where qpr.detail_photos @> jsonb_build_array(jsonb_build_object('storageKey', mo.storage_key))
+                  and hp.auth_user_id = $1
+                  and hp.is_active = true
+                  and t.assigned_helper_id = hp.id
+              )
+              or exists (
+                select 1
+                from helper_app.purchase_task_photos ptp
+                join helper_app.trips t on t.id = ptp.trip_id
+                join helper_app.helper_profiles hp on hp.id = ptp.helper_id
+                where ptp.storage_key = mo.storage_key
+                  and hp.auth_user_id = $1
+                  and hp.is_active = true
+                  and t.assigned_helper_id = hp.id
+              )
+              or exists (
+                select 1
+                from helper_app.settlement_evidence se
+                join helper_app.settlements s on s.id = se.settlement_id
+                join helper_app.helper_profiles hp on hp.id = s.helper_id
+                where se.storage_key = mo.storage_key
+                  and hp.auth_user_id = $1
+                  and hp.is_active = true
+              )
+              or exists (
+                select 1
+                from helper_app.rebuy_task_photos rtp
+                join helper_app.rebuy_tasks rt on rt.id = rtp.rebuy_task_id
+                left join helper_app.helper_profiles hp
+                  on hp.id = coalesce(rt.claimed_helper_id, rt.assigned_helper_id)
+                where rtp.storage_key = mo.storage_key
+                  and (
+                    (rt.visibility = 'public' and rt.status = 'open')
+                    or (hp.auth_user_id = $1 and hp.is_active = true)
+                  )
+              )
+              or exists (
+                select 1
+                from helper_app.media_variants mv
+                where mv.storage_key = mo.storage_key
+                  and mv.created_by_user_id = $1
+              )
+            ) end as can_access
+     from helper_app.media_objects mo
+     where mo.storage_key = $3`,
+    [authUserId, actorRole, storageKey],
+  );
+  const source = result.rows[0];
+  if (!source) throw new HelperAppServiceError("photo_not_found", "照片不存在或已被移除。");
+  if (!source.can_access) {
+    throw new HelperAppServiceError("forbidden", "你沒有編輯這張照片的權限。");
+  }
+  return source;
+}
+
+async function createPhotoAnnotation(database, {
+  actorRole,
+  annotationManifest,
+  authUserId,
+  byteSize,
+  contentType,
+  idempotencyKey,
+  originalFilename,
+  sourceStorageKey,
+  storageKey,
+}) {
+  const normalizedIdempotencyKey = requiredText(idempotencyKey, "idempotencyKey");
+  const normalizedStorageKey = requiredText(storageKey, "storageKey");
+  const normalizedContentType = requiredText(contentType, "contentType");
+  const normalizedManifest = annotationManifest && typeof annotationManifest === "object"
+    ? annotationManifest
+    : {};
+  if (JSON.stringify(normalizedManifest).length > 200_000) {
+    throw new HelperAppServiceError("invalid_input", "標註資料過大，請減少標註內容後重試。");
+  }
+
+  return withTransaction(database, async (client) => {
+    const helper = actorRole === "helper"
+      ? await findActiveHelperForUser(client, authUserId)
+      : null;
+    const source = await authorizePhotoAnnotationSource(client, {
+      actorRole,
+      authUserId,
+      sourceStorageKey,
+    });
+    const existingResult = await client.query(
+      `select mv.*, mo.original_filename as media_original_filename,
+              mo.content_type as media_content_type, mo.byte_size as media_byte_size
+       from helper_app.media_variants mv
+       join helper_app.media_objects mo on mo.storage_key = mv.storage_key
+       where mv.created_by_user_id = $1 and mv.idempotency_key = $2`,
+      [authUserId, normalizedIdempotencyKey],
+    );
+    if (existingResult.rows[0]) return existingResult.rows[0];
+
+    await client.query(
+      `insert into helper_app.media_objects
+         (storage_key, media_kind, retention_status, original_filename,
+          content_type, byte_size, uploaded_by_helper_id)
+       values ($1, 'photo_annotation', 'temporary_work_media', $2, $3, $4, $5)
+       on conflict (storage_key) do nothing`,
+      [
+        normalizedStorageKey,
+        optionalText(originalFilename),
+        normalizedContentType,
+        Number.isFinite(Number(byteSize)) ? Number(byteSize) : null,
+        helper?.id || null,
+      ],
+    );
+    const variantResult = await client.query(
+      `insert into helper_app.media_variants
+         (source_media_object_id, source_storage_key, storage_key,
+          annotation_manifest, original_filename, content_type, byte_size,
+          created_by_user_id, created_by_helper_id, idempotency_key)
+       values ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10)
+       on conflict (created_by_user_id, idempotency_key) do nothing
+       returning *`,
+      [
+        source.id,
+        source.storage_key,
+        normalizedStorageKey,
+        JSON.stringify(normalizedManifest),
+        optionalText(originalFilename),
+        normalizedContentType,
+        Number.isFinite(Number(byteSize)) ? Number(byteSize) : null,
+        authUserId,
+        helper?.id || null,
+        normalizedIdempotencyKey,
+      ],
+    );
+    const variant = variantResult.rows[0] || (await client.query(
+      `select * from helper_app.media_variants
+       where created_by_user_id = $1 and idempotency_key = $2`,
+      [authUserId, normalizedIdempotencyKey],
+    )).rows[0];
+    if (!variant) throw new HelperAppServiceError("save_failed", "編輯照片保存失敗，請重試。");
+
+    await client.query(
+      `insert into helper_app.media_variant_audit_events
+         (variant_id, actor_user_id, actor_role, action, details)
+       values ($1, $2, $3, 'photo_annotation_saved', $4::jsonb)`,
+      [
+        variant.id,
+        authUserId,
+        actorRole,
+        JSON.stringify({ sourceStorageKey: source.storage_key }),
+      ],
+    );
+    return variant;
+  });
+}
+
 async function refreshQuoteTaskStatus(client, quoteTaskId) {
   const result = await client.query(
     `select count(*)::int as total,
@@ -5338,6 +5524,7 @@ module.exports = {
   HelperAppServiceError,
   activateTrip,
   approveStagingMergeJob,
+  authorizePhotoAnnotationSource,
   attachSignedSettlementUrls,
   attachSignedQuoteTaskUrls,
   attachSignedPurchaseTaskUrls,
@@ -5354,6 +5541,7 @@ module.exports = {
   checkoutRebuyTasks,
   claimPublicRebuyTask,
   createHelperProfile,
+  createPhotoAnnotation,
   createPurchaseTask,
   createQuoteTask,
   createRebuyTask,

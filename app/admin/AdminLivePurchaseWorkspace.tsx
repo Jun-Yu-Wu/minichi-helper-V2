@@ -8,6 +8,7 @@ import { reviewFaceCheckPurchaseAction } from "../actions/admin";
 import { InsightBanner, StatusBadge } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
+import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 import { BackButton } from "../components/BackButton";
 import { cn } from "../../src/lib/utils";
 import { useStaleResource } from "../../src/lib/client-resource-cache";
@@ -470,19 +471,16 @@ function PurchaseTaskDetail({
           <p className="text-sm font-semibold">挑臉／回傳照片</p>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
             {primaryPhotos.map((photo: any, index: number) => (
-              <a href={photo.signed_url} key={photo.id} target="_blank" rel="noreferrer">
-                <div className="relative">
-                  <img
-                    alt={photo.photo_role}
-                    className="aspect-square w-full rounded-lg border object-cover"
-                    loading="lazy"
-                    src={photo.signed_url}
-                  />
-                  <span className="absolute left-2 top-2 flex size-7 items-center justify-center rounded-full bg-black/70 text-xs font-semibold text-white">
-                    {index + 1}
-                  </span>
-                </div>
-              </a>
+              <div className="relative" key={photo.id}>
+                <PhotoViewerTrigger
+                  alt={photo.photo_role}
+                  className="aspect-square rounded-lg border"
+                  photo={photo}
+                />
+                <span className="pointer-events-none absolute left-2 top-2 flex size-7 items-center justify-center rounded-full bg-black/70 text-xs font-semibold text-white">
+                  {index + 1}
+                </span>
+              </div>
             ))}
           </div>
         </div>
@@ -526,19 +524,16 @@ function HiddenPurchasePhotos({
       <p className="text-sm font-semibold">商品圖</p>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">
         {photos.map((photo: any, index: number) => (
-          <a href={photo.signed_url} key={photo.id} target="_blank" rel="noreferrer">
-            <div className="relative">
-              <img
-                alt={photo.photo_role}
-                className="aspect-square w-full rounded-lg border object-cover"
-                loading="lazy"
-                src={photo.signed_url}
-              />
-              <span className="absolute left-2 top-2 flex size-7 items-center justify-center rounded-full bg-black/70 text-xs font-semibold text-white">
-                {index + 1}
-              </span>
-            </div>
-          </a>
+          <div className="relative" key={photo.id}>
+            <PhotoViewerTrigger
+              alt={photo.photo_role}
+              className="aspect-square rounded-lg border"
+              photo={photo}
+            />
+            <span className="pointer-events-none absolute left-2 top-2 flex size-7 items-center justify-center rounded-full bg-black/70 text-xs font-semibold text-white">
+              {index + 1}
+            </span>
+          </div>
         ))}
       </div>
     </div>

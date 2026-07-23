@@ -1,10 +1,11 @@
 "use client";
 
-import { Check, Download, Maximize2, RefreshCw, Share2, X } from "lucide-react";
+import { Check, Download, Maximize2, RefreshCw, Share2 } from "lucide-react";
 import Link from "next/link";
 import { useCallback, useMemo, useState } from "react";
 
 import { Button } from "../components/ui/button";
+import { PhotoLightbox } from "../components/PhotoAnnotationEditor";
 import { RetryableError } from "../components/RetryableState";
 import { cn } from "../../src/lib/utils";
 import { useStaleResource } from "../../src/lib/client-resource-cache";
@@ -15,6 +16,7 @@ type Trip = AdminLiveTrip;
 type SitePhoto = {
   id: string;
   original_filename?: string | null;
+  storage_key?: string | null;
   signed_url: string;
   sort_order: number;
 };
@@ -286,11 +288,11 @@ export function AdminLivePhotosWorkspace({
       ) : null}
 
       {previewPhoto ? (
-        <div className="fixed inset-0 z-50 grid bg-black/90 p-3">
-          <button aria-label="關閉" className="absolute right-3 top-3 grid size-10 place-items-center rounded-full bg-white/10 text-white" onClick={() => setPreviewPhoto(null)} type="button"><X className="size-5" /></button>
-          <img alt={previewPhoto.original_filename || "現場照片"} className="m-auto max-h-[82vh] max-w-full rounded-md object-contain" src={previewPhoto.signed_url} />
-          <div className="mx-auto mt-3 flex max-w-sm justify-center gap-2"><Button onClick={() => void downloadPhotos([previewPhoto])} type="button"><Download className="size-4" />儲存</Button><Button onClick={() => void sharePhotos([previewPhoto])} type="button" variant="secondary"><Share2 className="size-4" />分享</Button></div>
-        </div>
+        <PhotoLightbox
+          alt={previewPhoto.original_filename || "現場照片"}
+          onClose={() => setPreviewPhoto(null)}
+          photo={previewPhoto}
+        />
       ) : null}
     </section>
   );

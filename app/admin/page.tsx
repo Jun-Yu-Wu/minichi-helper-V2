@@ -16,6 +16,8 @@ import {
   UserRound,
 } from "lucide-react";
 
+import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
+
 import {
   activateTripAction,
   approveStagingMergeJobAction,
@@ -455,10 +457,14 @@ function AdminSettlementDetail({ settlement }: { settlement: any }) {
                   <p className="text-sm font-medium">已上傳照片</p>
                   <div className="grid grid-cols-3 gap-2 sm:grid-cols-5">
                   {settlement.evidence.map((item: any) => (
-                      <a className="grid gap-1 text-xs text-muted-foreground" href={item.signed_url} key={item.id} rel="noreferrer" target="_blank">
-                        <img alt={settlementEvidenceLabel(item.evidence_type)} className="aspect-square w-full rounded-md border object-cover" src={item.signed_url} />
+                      <div className="grid gap-1 text-xs text-muted-foreground" key={item.id}>
+                        <PhotoViewerTrigger
+                          alt={settlementEvidenceLabel(item.evidence_type)}
+                          className="aspect-square rounded-md border"
+                          photo={item}
+                        />
                         <span>{settlementEvidenceLabel(item.evidence_type)}</span>
-                      </a>
+                      </div>
                   ))}
                   </div>
                 </div>
@@ -841,10 +847,14 @@ function AdminRebuyDetail({ task }: { task: any }) {
           <p className="text-sm font-medium">補買照片</p>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {task.photos.map((photo: any) => (
-              <a className="grid gap-1 text-xs text-muted-foreground" href={photo.signed_url} key={photo.id} rel="noreferrer" target="_blank">
-                <img alt={photo.photo_role} className="aspect-square w-full rounded-md border object-cover" src={photo.signed_url} />
+              <div className="grid gap-1 text-xs text-muted-foreground" key={photo.id}>
+                <PhotoViewerTrigger
+                  alt={photo.photo_role}
+                  className="aspect-square rounded-md border"
+                  photo={photo}
+                />
                 <span>{photo.photo_role === "reference" ? "參考" : "回報"}</span>
-              </a>
+              </div>
             ))}
           </div>
         </div>

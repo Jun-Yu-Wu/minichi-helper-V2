@@ -8,6 +8,7 @@ import { BackButton } from "../components/BackButton";
 import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
+import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 import { useStaleResource } from "../../src/lib/client-resource-cache";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
 
@@ -590,14 +591,11 @@ function QuotePhotoReplyForm({
   return (
     <div className="grid gap-3 rounded-2xl border bg-background p-3 shadow-sm sm:p-4">
       <div className="grid gap-3">
-        <a href={photo.signed_url} target="_blank" rel="noreferrer">
-          <img
-            alt={photo.product_name || "quote task photo"}
-            className="aspect-square w-full rounded-xl object-cover"
-            loading="lazy"
-            src={photo.signed_url}
-          />
-        </a>
+        <PhotoViewerTrigger
+          alt={photo.product_name || "quote task photo"}
+          className="aspect-square rounded-xl"
+          photo={photo}
+        />
         <div className="grid gap-2">
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge tone={replyStatusTone(photo.reply_status)}>
@@ -634,18 +632,12 @@ function QuotePhotoReplyForm({
               {existingDetailPhotos.length ? (
                 <div className="grid grid-cols-3 gap-2">
                   {existingDetailPhotos.map((detailPhoto: any, index: number) => (
-                    <a
-                      href={detailPhoto.signed_url}
+                    <PhotoViewerTrigger
+                      alt={detailPhoto.original_filename || "detail reply"}
+                      className="aspect-square rounded-lg border-2 border-emerald-400"
                       key={detailPhoto.storage_key || index}
-                      rel="noreferrer"
-                      target="_blank"
-                    >
-                      <img
-                        alt={detailPhoto.original_filename || "detail reply"}
-                        className="aspect-square w-full rounded-lg border-2 border-emerald-400 object-cover"
-                        src={detailPhoto.signed_url}
-                      />
-                    </a>
+                      photo={detailPhoto}
+                    />
                   ))}
                 </div>
               ) : null}

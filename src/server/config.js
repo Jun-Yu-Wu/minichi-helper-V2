@@ -14,6 +14,26 @@ function requiredEnv(name) {
   return value;
 }
 
+function normalizeCertificate(value) {
+  const begin = "-----BEGIN CERTIFICATE-----";
+  const end = "-----END CERTIFICATE-----";
+  const normalized = String(value)
+    .trim()
+    .replace(/^['"]|['"]$/g, "")
+    .replace(/\\n/g, "\n")
+    .replace(/\\r/g, "\r");
+  const beginIndex = normalized.indexOf(begin);
+  const endIndex = normalized.indexOf(end);
+  if (beginIndex < 0 || endIndex <= beginIndex) {
+    throw new Error("SUPABASE_DB_SSL_CA must contain a valid PEM certificate.");
+  }
+  const body = normalized
+    .slice(beginIndex + begin.length, endIndex)
+    .replace(/\s+/g, "");
+  if (!body) throw new Error("SUPABASE_DB_SSL_CA must contain certificate data.");
+  return `${begin}\n${body}\n${end}`;
+}
+
 function databaseConfig() {
   const connectionString = String(
     process.env.SUPABASE_DB_URL || process.env.DATABASE_URL || "",
@@ -32,7 +52,7 @@ function databaseConfig() {
     return {
       connectionString,
       ssl: {
-        ca: requiredEnv("SUPABASE_DB_SSL_CA"),
+        ca: normalizeCertificate(requiredEnv("SUPABASE_DB_SSL_CA")),
         rejectUnauthorized: true,
       },
     };

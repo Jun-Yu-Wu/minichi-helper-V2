@@ -12,6 +12,7 @@ import {
 import { InsightBanner, Surface } from "../components/OperationsUi";
 import { SettlementAmountHero } from "../components/SettlementUi";
 import { Button } from "../components/ui/button";
+import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 
 type UploadPhoto = {
   byteSize: number;
@@ -305,9 +306,12 @@ export function SettlementSummary({ settlement }: { settlement: any }) {
           <p className="text-sm font-medium">已上傳照片</p>
           <div className="flex flex-wrap gap-2">
             {settlement.evidence.map((item: any) => (
-              <a href={item.signed_url} key={item.id} rel="noreferrer" target="_blank">
-                <img alt={evidenceLabel(item.evidence_type)} className="size-20 rounded-md border object-cover" src={item.signed_url} />
-              </a>
+              <PhotoViewerTrigger
+                alt={evidenceLabel(item.evidence_type)}
+                className="size-20 rounded-md border"
+                key={item.id}
+                photo={item}
+              />
             ))}
           </div>
         </div>

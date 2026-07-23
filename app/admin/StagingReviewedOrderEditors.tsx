@@ -5,6 +5,7 @@ import { CheckCircle2, Pencil, X } from "lucide-react";
 
 import { ServerActionForm } from "../components/ServerActionForm";
 import { Button } from "../components/ui/button";
+import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 
 type ActionResult = { error?: string; ok?: boolean } | void;
 type ServerAction = (formData: FormData) => Promise<ActionResult>;
@@ -110,9 +111,11 @@ function PhotoPreview({ photo, editing }: { photo: any; editing: boolean }) {
   return (
     <div className="grid gap-2 rounded-xl border bg-background p-3">
       {photo.signed_url ? (
-        <a href={photo.signed_url} rel="noreferrer" target="_blank">
-          <img alt={photo.label || photo.photo_role || "訂單照片"} className="aspect-square w-full rounded-lg border object-cover" loading="lazy" src={photo.signed_url} />
-        </a>
+        <PhotoViewerTrigger
+          alt={photo.label || photo.photo_role || "訂單照片"}
+          className="aspect-square rounded-lg border"
+          photo={photo}
+        />
       ) : <div className="grid aspect-square place-items-center rounded-lg border bg-muted text-xs text-muted-foreground">照片網址暫不可用</div>}
       {editing ? <>
         <input name="photoId" type="hidden" value={photo.id} />

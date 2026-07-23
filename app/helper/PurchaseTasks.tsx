@@ -7,6 +7,7 @@ import { BackButton } from "../components/BackButton";
 import { EmptyState, InsightBanner, StatusBadge, Surface } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
+import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
 import { useStaleResource } from "../../src/lib/client-resource-cache";
 
@@ -418,28 +419,22 @@ function PurchaseTaskPhotos({ photos }: { photos: any[] }) {
   if (photos.length === 1) {
     return (
       <div className="flex justify-center">
-        <a className="block w-full max-w-sm" href={activePhoto.signed_url} target="_blank" rel="noreferrer">
-          <img
-            alt={activePhoto.photo_role}
-            className="aspect-square w-full rounded-xl border object-cover shadow-sm"
-            loading="lazy"
-            src={activePhoto.signed_url}
-          />
-        </a>
+        <PhotoViewerTrigger
+          alt={activePhoto.photo_role}
+          className="aspect-square w-full max-w-sm rounded-xl border shadow-sm"
+          photo={activePhoto}
+        />
       </div>
     );
   }
   return (
     <div className="mx-auto grid w-full max-w-sm gap-2">
       <div className="relative">
-        <a href={activePhoto.signed_url} target="_blank" rel="noreferrer">
-          <img
-            alt={activePhoto.photo_role}
-            className="aspect-square w-full rounded-xl border object-cover shadow-sm"
-            loading="lazy"
-            src={activePhoto.signed_url}
-          />
-        </a>
+        <PhotoViewerTrigger
+          alt={activePhoto.photo_role}
+          className="aspect-square w-full rounded-xl border shadow-sm"
+          photo={activePhoto}
+        />
         <Button
           aria-label="上一張照片"
           className="absolute left-2 top-1/2 size-9 -translate-y-1/2 rounded-full bg-background/90 p-0 shadow"
@@ -491,14 +486,11 @@ function LatestFaceCheckPhoto({ photo }: { photo: any | null }) {
   }
   return (
     <div className="flex justify-center">
-      <a className="block w-full max-w-sm" href={photo.signed_url} target="_blank" rel="noreferrer">
-        <img
-          alt="挑臉確認照"
-          className="aspect-square w-full rounded-xl border object-cover shadow-sm"
-          loading="lazy"
-          src={photo.signed_url}
-        />
-      </a>
+      <PhotoViewerTrigger
+        alt="挑臉確認照"
+        className="aspect-square w-full max-w-sm rounded-xl border shadow-sm"
+        photo={photo}
+      />
     </div>
   );
 }
@@ -527,19 +519,16 @@ function SecondaryPurchasePhotos({
       <p className="text-sm font-semibold">細圖／回報照片</p>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
         {photos.map((photo, index) => (
-          <a href={photo.signed_url} key={photo.id} target="_blank" rel="noreferrer">
-            <div className="relative">
-              <img
-                alt={photo.photo_role}
-                className="aspect-square w-full rounded-lg border object-cover"
-                loading="lazy"
-                src={photo.signed_url}
-              />
-              <span className="absolute left-2 top-2 rounded-full bg-black/70 px-2 py-1 text-xs font-semibold text-white">
-                {secondaryPhotoLabel(photo.photo_role, index)}
-              </span>
-            </div>
-          </a>
+          <div className="relative" key={photo.id}>
+            <PhotoViewerTrigger
+              alt={photo.photo_role}
+              className="aspect-square rounded-lg border"
+              photo={photo}
+            />
+            <span className="pointer-events-none absolute left-2 top-2 rounded-full bg-black/70 px-2 py-1 text-xs font-semibold text-white">
+              {secondaryPhotoLabel(photo.photo_role, index)}
+            </span>
+          </div>
         ))}
       </div>
     </div>

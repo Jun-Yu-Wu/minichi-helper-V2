@@ -15,6 +15,7 @@ import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
 import { BackButton } from "../components/BackButton";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
+import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 import { useStaleResource } from "../../src/lib/client-resource-cache";
 
 type RebuyUploadPhoto = {
@@ -334,10 +335,10 @@ function RebuyTaskDetail({
         <div className="grid gap-2">
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             {currentTask.photos.map((photo: any) => (
-              <a className="grid gap-1 text-xs text-muted-foreground" href={photo.signed_url} key={photo.id} rel="noreferrer" target="_blank">
-                <img alt={photo.photo_role} className="aspect-square w-full rounded-md border object-cover" src={photo.signed_url} />
+              <div className="grid gap-1 text-xs text-muted-foreground" key={photo.id}>
+                <PhotoViewerTrigger alt={photo.photo_role} className="aspect-square rounded-md border" photo={photo} />
                 <span>{photo.photo_role === "reference" ? "參考" : "回報"}</span>
-              </a>
+              </div>
             ))}
           </div>
         </div>

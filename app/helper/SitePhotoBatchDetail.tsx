@@ -4,6 +4,7 @@ import { useCallback } from "react";
 
 import { BackLink } from "../components/BackButton";
 import { EmptyState } from "../components/OperationsUi";
+import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 import { RetryableError } from "../components/RetryableState";
 import { useStaleResource } from "../../src/lib/client-resource-cache";
 
@@ -29,6 +30,7 @@ export function SitePhotoBatchDetail({
     staleTimeMs: 30_000,
   });
   const batch = batchResource.data;
+  const batchIsLoading = batchResource.isLoading || (batch === undefined && !batchResource.error);
 
   return (
     <div className="grid gap-3">
@@ -38,7 +40,7 @@ export function SitePhotoBatchDetail({
         label="返回批次列表"
         variant="outline"
       />
-      {batchResource.isLoading ? (
+      {batchIsLoading ? (
         <div aria-busy="true" aria-label="正在載入照片" className="grid gap-3" role="status">
           <div className="h-5 w-40 animate-pulse rounded bg-muted" />
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
@@ -60,23 +62,21 @@ export function SitePhotoBatchDetail({
           {batch.photos?.length ? (
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               {(batch.photos || []).map((photo: any) => (
-                <a key={photo.id} href={photo.signed_url} rel="noreferrer" target="_blank">
-                  <img
-                    alt={photo.original_filename || "site photo"}
-                    className="aspect-square w-full rounded-md object-cover"
-                    loading="lazy"
-                    src={photo.signed_url}
-                  />
-                </a>
+                <PhotoViewerTrigger
+                  alt={photo.original_filename || "現場照片"}
+                  key={photo.id}
+                  photo={photo}
+                  className="aspect-square"
+                />
               ))}
             </div>
           ) : (
             <EmptyState title="這個批次目前沒有照片" body="請返回批次列表查看其他批次。" />
           )}
         </>
-      ) : (
+      ) : batch === null ? (
         <EmptyState title="找不到這個照片批次" body="批次可能已被移除，請返回列表重新選擇。" />
-      )}
+      ) : null}
     </div>
   );
 }

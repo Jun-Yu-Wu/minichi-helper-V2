@@ -791,7 +791,11 @@ function TripWorkspace({
     panel === "site" ? (
       selectedBatchId ? (
         <WorkspaceBlock eyebrow="區塊一" title="現場大圖">
-          <SitePhotoBatchDetail batchId={selectedBatchId} tripId={trip.id} />
+          <SitePhotoBatchDetail
+            batchId={selectedBatchId}
+            key={selectedBatchId}
+            tripId={trip.id}
+          />
         </WorkspaceBlock>
       ) : (
         sitePanel

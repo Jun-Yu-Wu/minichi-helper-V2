@@ -76,6 +76,15 @@ function createR2ObjectStore(config = r2Config()) {
       ].join("/");
     },
 
+    buildPhotoAnnotationKey({ contentType, fileName, variantId }) {
+      const extension = extensionFor(contentType, fileName);
+      return [
+        "helper-app",
+        "photo-annotations",
+        `${cleanKeyPart(variantId || crypto.randomUUID(), "annotation")}${extension}`,
+      ].join("/");
+    },
+
     async signedGetUrl(storageKey, expiresIn = config.signedUrlTtlSeconds) {
       const cacheKey = signedGetUrlCacheKey(storageKey, expiresIn);
       const cached = signedGetUrlCache.get(cacheKey);
@@ -119,6 +128,21 @@ function createR2ObjectStore(config = r2Config()) {
         }),
         { expiresIn },
       );
+    },
+
+    async getObject(storageKey) {
+      const { GetObjectCommand } = await loadSdk();
+      const s3 = await client();
+      const response = await s3.send(
+        new GetObjectCommand({ Bucket: config.bucket, Key: storageKey }),
+      );
+      if (!response.Body) throw new Error("R2 photo body is empty.");
+      const body = await response.Body.transformToByteArray();
+      return {
+        body,
+        contentLength: response.ContentLength || body.byteLength,
+        contentType: response.ContentType || "application/octet-stream",
+      };
     },
 
     async copyObject(sourceKey, destinationKey) {

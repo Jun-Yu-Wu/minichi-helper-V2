@@ -197,6 +197,57 @@ test("selected staging merge photos receive temporary signed URLs without changi
   assert.equal(result[0].reviewed_orders[0].photos[0].storage_key, "helper/photo.jpg");
 });
 
+test("photo annotation source authorization keeps helper media scoped", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      return {
+        rows: [{
+          can_access: true,
+          content_type: "image/jpeg",
+          id: "media-1",
+          media_kind: "site_photo",
+          original_filename: "shop.jpg",
+          storage_key: "helper-app/trip-1/site-photos/photo.jpg",
+        }],
+      };
+    },
+  };
+
+  const source = await service.authorizePhotoAnnotationSource(database, {
+    actorRole: "helper",
+    authUserId: "helper-user-1",
+    sourceStorageKey: "helper-app/trip-1/site-photos/photo.jpg",
+  });
+
+  assert.equal(source.id, "media-1");
+  assert.deepEqual(queries[0].params, [
+    "helper-user-1",
+    "helper",
+    "helper-app/trip-1/site-photos/photo.jpg",
+  ]);
+  assert.match(queries[0].sql, /media_variants mv/);
+  assert.match(queries[0].sql, /site_photos sp/);
+});
+
+test("photo annotation source authorization rejects inaccessible media", async () => {
+  const database = {
+    async query() {
+      return { rows: [{ can_access: false, id: "media-1", storage_key: "private/photo.jpg" }] };
+    },
+  };
+
+  await assert.rejects(
+    service.authorizePhotoAnnotationSource(database, {
+      actorRole: "helper",
+      authUserId: "other-helper",
+      sourceStorageKey: "private/photo.jpg",
+    }),
+    (error) => error.code === "forbidden",
+  );
+});
+
 test("admin home summary uses one aggregate query instead of loading dashboard records", async () => {
   const queries = [];
   const database = {

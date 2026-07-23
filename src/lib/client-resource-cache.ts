@@ -172,11 +172,19 @@ export function useStaleResource<T>({
     [key],
   );
 
+  const cachedForKey = getCached<T>(key);
+  const isCurrentKey = state.key === key;
+
   return {
-    data: state.key === key ? state.data : getCached<T>(key)?.data ?? initialData,
-    error: state.key === key ? state.error : "",
-    isLoading: state.key === key ? state.isLoading : false,
-    isRefreshing: state.key === key ? state.isRefreshing : false,
+    data: isCurrentKey ? state.data : cachedForKey?.data ?? initialData,
+    error: isCurrentKey ? state.error : "",
+    // A key change is rendered once before the effect can reset local state.
+    // Treat that gap as a load when the new key has no cached data; otherwise
+    // consumers can briefly render an empty/not-found state for the new item.
+    isLoading: isCurrentKey
+      ? state.isLoading
+      : enabled && !cachedForKey && initialData === undefined,
+    isRefreshing: isCurrentKey ? state.isRefreshing : false,
     refresh,
     setData,
   };
