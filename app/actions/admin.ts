@@ -172,6 +172,7 @@ export async function createPurchaseTaskAction(
       quantity: formText(formData, "quantity"),
       referencePhotos: referencePhotosJson ? JSON.parse(referencePhotosJson) : [],
       requiresFaceCheck: formData.get("requiresFaceCheck") === "on",
+      reuseSourceTaskId: formText(formData, "reuseSourceTaskId"),
       salePriceTwd: formText(formData, "salePriceTwd"),
       tripId: formText(formData, "tripId"),
     });

@@ -20,23 +20,15 @@ export async function GET(
   const task = await (service.getPurchaseTaskDetail as any)(database.getDatabasePool(), {
     activeOnly: true,
     authUserId: user.id,
+    photoMode,
     purchaseTaskId: taskId,
     tripId,
   });
   if (!task) {
     return NextResponse.json({ error: "找不到這個採買任務。" }, { status: 404 });
   }
-  const scopedTask = photoMode === "all"
-    ? task
-    : {
-        ...task,
-        photos: (task.photos || []).filter((photo: any) =>
-          ["manual_reference", "source"].includes(String(photo.photo_role || "")),
-        ),
-      };
-
   const [signedTask] = await service.attachSignedPurchaseTaskUrls(
-    [scopedTask],
+    [task],
     createR2ObjectStore(),
   );
 

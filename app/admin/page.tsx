@@ -1196,7 +1196,17 @@ function AdminLiveReturn({
                             {task.requires_face_check ? "挑臉採買" : "一般採買"}
                           </StatusBadge>
                         </div>
-                        <h3 className="mt-2 text-lg font-semibold">{task.product_name}</h3>
+                        <h3 className="mt-2 text-lg font-semibold">
+                          {task.product_name}
+                          {Number(task.purchase_batch_sequence || 0) > 0
+                            ? `－加單${Number(task.purchase_batch_sequence)}`
+                            : ""}
+                        </h3>
+                        {task.purchase_batch_id ? (
+                          <p className="mt-1 text-xs font-medium text-primary">
+                            本批總需求與回報會依同品項聚合；目前這筆客人訂單仍獨立保留。
+                          </p>
+                        ) : null}
                         <p className="mt-1 text-sm text-muted-foreground">{task.line_community_name}</p>
                         <dl className="mt-3 grid grid-cols-2 gap-2 text-sm sm:grid-cols-4">
                           <AdminPurchaseFact label="要求數量" value={`${task.quantity} 件`} />

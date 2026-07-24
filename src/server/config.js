@@ -101,8 +101,11 @@ function r2Config() {
 function uploadConfig() {
   return {
     allowedContentTypes: new Set([
-      "image/gif",
-      "image/jpeg",
+      "image/avif",
+        "image/gif",
+      "image/heic",
+      "image/heif",
+        "image/jpeg",
       "image/png",
       "image/webp",
     ]),

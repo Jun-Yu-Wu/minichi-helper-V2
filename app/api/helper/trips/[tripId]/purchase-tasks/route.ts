@@ -14,10 +14,9 @@ export async function GET(
   }
 
   const { tripId } = await params;
-  const tasks = await (service.listPurchaseTasks as any)(database.getDatabasePool(), {
+  const tasks = await (service.listHelperPurchaseBatches as any)(database.getDatabasePool(), {
     activeOnly: true,
     authUserId: user.id,
-    includePhotos: false,
     tripIds: [tripId],
   });
 

@@ -1,12 +1,38 @@
 # Helper Rewrite Confirmation Workflow
 
-Last updated: 2026-07-23
+Last updated: 2026-07-24
 
 This document lists the product and implementation decisions that must be confirmed
 before or during the MINICHI helper rewrite. The source behavior is
 `latest-helper-operation-spec.md`.
 
 ## Confirmed Decisions
+
+### Round 26 confirmed on 2026-07-24: Purchase batch aggregation and product reuse
+
+The detailed implementation record is
+`feature-spec-purchase-batch-and-product-reuse.md`.
+
+- Admin product-name input shows the most recently published product first when
+  empty, then filters current-connection published products as text is entered.
+  Matching quality is ranked before publication recency.
+- Selecting a product suggestion fills reusable product data and durable photo
+  links, while customer identity, old status, old result, and old quote
+  provenance remain independent. Quantity remains editable.
+- The admin purchase page also exposes a recent-product quick entrance using the
+  same validated prefilled form.
+- Helper purchase aggregation is batch-based. A completed base batch remains in
+  completed history; a later order starts `加單1`, then `加單2`, and so on.
+- A batch stays appendable until its outstanding quantity/work is fully resolved.
+  A partial report does not close it. For example, a 3/4 report can still absorb
+  a later E add-on; the total and remaining quantity are recalculated without
+  duplicating the reported quantity.
+- A new add-on suffix is created only after the previous batch is closed.
+- Helpers see the current unresolved product batch and its total, reported, and
+  remaining quantities. Admins can inspect the batch's customer-level rows.
+- Customer purchase tasks remain independent source records. The batch is not a
+  final order or a replacement for staging previews, admin review, or explicit
+  merge into `main.orders`.
 
 ### Round 25 confirmed on 2026-07-23: Photo annotation and editing
 

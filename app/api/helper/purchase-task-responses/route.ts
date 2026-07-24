@@ -58,6 +58,7 @@ export async function POST(request: Request) {
       helperNote: body.helperNote,
       idempotencyKey: body.idempotencyKey,
       purchaseTaskId: body.purchaseTaskId,
+      reportPhotos: body.reportPhotos || [],
       remainingResolution: body.remainingResolution,
       unavailableQuantity: body.unavailableQuantity,
     });

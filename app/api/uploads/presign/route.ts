@@ -47,7 +47,7 @@ export async function POST(request: Request) {
     }
 
     let storageKeyTripId = tripId;
-    if (uploadPurpose === "admin_quote_task_photo") {
+    if (uploadPurpose === "admin_quote_task_photo" || uploadPurpose === "admin_purchase_task_photo") {
       adminAuthorization.authorizeAdminUserByAllowlist(user);
       if (!tripId) {
         return NextResponse.json({ error: "缺少行程資訊。" }, { status: 400 });
@@ -69,6 +69,15 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "缺少採買任務資訊。" }, { status: 400 });
       }
       const authorization = await service.authorizePurchaseFaceCheckUpload(database.getDatabasePool(), {
+        authUserId: user.id,
+        purchaseTaskId,
+      });
+      storageKeyTripId = authorization.trip_id;
+    } else if (uploadPurpose === "purchase_report") {
+      if (!purchaseTaskId) {
+        return NextResponse.json({ error: "缺少採買任務資訊。" }, { status: 400 });
+      }
+      const authorization = await service.authorizePurchaseReportUpload(database.getDatabasePool(), {
         authUserId: user.id,
         purchaseTaskId,
       });
@@ -114,7 +123,7 @@ export async function POST(request: Request) {
     // the durable object name: object names must be server-generated so a
     // client cannot choose a predictable path or overwrite another upload.
     const objectId = crypto.randomUUID();
-    const storageKey = uploadPurpose === "admin_quote_task_photo"
+    const storageKey = uploadPurpose === "admin_quote_task_photo" || uploadPurpose === "admin_purchase_task_photo"
       ? buildAdminTaskPhotoKey({
           clientPhotoId: objectId,
           contentType,
@@ -129,14 +138,22 @@ export async function POST(request: Request) {
             quoteTaskPhotoId,
             tripId: storageKeyTripId,
           })
-        : uploadPurpose === "purchase_face_check"
+          : uploadPurpose === "purchase_face_check"
           ? buildPurchaseFaceCheckPhotoKey({
               clientPhotoId: objectId,
               contentType,
               fileName,
               purchaseTaskId,
               tripId: storageKeyTripId,
-            })
+              })
+          : uploadPurpose === "purchase_report"
+            ? buildPurchaseReportPhotoKey({
+                clientPhotoId: objectId,
+                contentType,
+                fileName,
+                purchaseTaskId,
+                tripId: storageKeyTripId,
+              })
           : uploadPurpose === "settlement_evidence"
             ? buildSettlementEvidenceKey({
                 clientPhotoId: objectId,
@@ -280,6 +297,29 @@ function buildPurchaseFaceCheckPhotoKey({
   ].join("/");
 }
 
+function buildPurchaseReportPhotoKey({
+  clientPhotoId,
+  contentType,
+  fileName,
+  purchaseTaskId,
+  tripId,
+}: {
+  clientPhotoId: string;
+  contentType: string;
+  fileName: string;
+  purchaseTaskId: string;
+  tripId: string;
+}) {
+  const extension = extensionFromContentType(contentType);
+  return [
+    "helper-app",
+    tripId,
+    "purchase-reports",
+    purchaseTaskId,
+    `${clientPhotoId}${extension}`,
+  ].join("/");
+}
+
 function buildAdminTaskPhotoKey({
   clientPhotoId,
   contentType,
@@ -324,7 +364,10 @@ function buildQuoteReplyPhotoKey({
 }
 
 function extensionFromContentType(contentType: string) {
+  if (contentType === "image/avif") return ".avif";
   if (contentType === "image/gif") return ".gif";
+  if (contentType === "image/heic") return ".heic";
+  if (contentType === "image/heif") return ".heif";
   if (contentType === "image/png") return ".png";
   if (contentType === "image/webp") return ".webp";
   return ".jpg";
