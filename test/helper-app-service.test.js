@@ -61,6 +61,121 @@ test("groups pg date objects by yyyy-mm-dd in the trip timezone", () => {
   assert.equal(service.dateOnly(new Date("2026-06-23T00:00:00.000Z"), "Asia/Tokyo"), "2026-06-23");
 });
 
+test("groups purchase tasks into immutable add-on batches and keeps partial quantity open", () => {
+  const groups = service.groupPurchaseTasksForHelper([
+    {
+      id: "a",
+      purchase_batch_id: "base-batch",
+      purchase_batch_sequence: 0,
+      purchase_batch_status: "completed",
+      product_name: "浴衣漢頓",
+      quantity: 2,
+      completed_quantity: 2,
+      status: "completed",
+      updated_at: "2026-07-24T01:00:00Z",
+    },
+    {
+      id: "b",
+      purchase_batch_id: "add-on-1",
+      purchase_batch_sequence: 1,
+      purchase_batch_status: "open",
+      product_name: "浴衣漢頓",
+      quantity: 4,
+      completed_quantity: 3,
+      status: "open",
+      updated_at: "2026-07-24T02:00:00Z",
+    },
+    {
+      id: "e",
+      purchase_batch_id: "add-on-1",
+      purchase_batch_sequence: 1,
+      purchase_batch_status: "open",
+      product_name: "浴衣漢頓",
+      quantity: 1,
+      completed_quantity: 0,
+      status: "open",
+      updated_at: "2026-07-24T03:00:00Z",
+    },
+  ]);
+
+  assert.equal(groups.length, 2);
+  const completed = groups.find((group) => group.batch_id === "base-batch");
+  const open = groups.find((group) => group.batch_id === "add-on-1");
+  assert.equal(completed.batch_title, "浴衣漢頓");
+  assert.equal(completed.batch_status, "completed");
+  assert.equal(open.batch_title, "浴衣漢頓－加單1");
+  assert.equal(open.batch_requested_quantity, 5);
+  assert.equal(open.batch_reported_quantity, 3);
+  assert.equal(open.batch_remaining_quantity, 2);
+});
+
+test("reports a helper batch total while keeping customer tasks open for later add-ons", async () => {
+  const database = fakeDatabase([
+    {
+      rows: [{
+        authorized_helper_id: "helper-1",
+        authorized_helper_is_active: true,
+        authorized_trip_status: "active",
+        id: "batch-1",
+        status: "open",
+        trip_id: "trip-1",
+      }],
+    },
+    {
+      rows: [
+        {
+          id: "task-cd",
+          helper_id: "helper-1",
+          product_name: "浴衣漢頓",
+          quantity: 4,
+          completed_quantity: 2,
+          status: "open",
+          trip_id: "trip-1",
+          requires_face_check: false,
+        },
+        {
+          id: "task-e",
+          helper_id: "helper-1",
+          product_name: "浴衣漢頓",
+          quantity: 1,
+          completed_quantity: 0,
+          status: "open",
+          trip_id: "trip-1",
+          requires_face_check: false,
+        },
+      ],
+    },
+    { rows: [{ id: "task-cd", status: "open", completed_quantity: 3, quantity: 4 }] },
+    { rows: [{ id: "task-e", status: "open", completed_quantity: 0, quantity: 1 }] },
+    {
+      rows: [{
+        id: "batch-1",
+        status: "open",
+        calculated_requested_quantity: 5,
+        calculated_reported_quantity: 3,
+        calculated_remaining_quantity: 2,
+        calculated_pending_task_count: 2,
+      }],
+    },
+    { rows: [] },
+  ]);
+
+  const task = await service.respondPurchaseBatch(database, {
+    action: "complete",
+    authUserId: "user-1",
+    completedQuantity: "1",
+    helperNote: "本次再買到一件",
+    idempotencyKey: "batch-response-1",
+    purchaseBatchId: "batch-1",
+  });
+
+  assert.equal(task.id, "task-cd");
+  assert.equal(task.status, "open");
+  assert.equal(task.completed_quantity, 3);
+  assert.equal(task.purchase_batch.status, "open");
+  assert.equal(task.purchase_batch.remaining_quantity, 2);
+});
+
 test("lists customer nickname suggestions from the Supabase main customer master", async () => {
   const queries = [];
   const database = {
@@ -1641,33 +1756,25 @@ test("admin manual purchase task creation writes an open staging workflow task",
       {
         rows: [
           {
-            id: "purchase-task-1",
-            requires_face_check: false,
+            id: "purchase-batch-1",
+            sequence: 0,
             status: "open",
-            trip_id: "trip-1",
           },
         ],
       },
-      { rows: [] },
-      { rows: [] },
-      { rows: [] },
-      { rows: [] },
       {
         rows: [
           {
             id: "purchase-task-1",
-            photos: [
-              {
-                photo_role: "manual_reference",
-                storage_key: "purchase-reference-1",
-              },
-            ],
+            purchase_batch_id: "purchase-batch-1",
             requires_face_check: false,
             status: "open",
             trip_id: "trip-1",
           },
         ],
       },
+      { rows: [] },
+      { rows: [] },
     ],
     queries,
   );
@@ -1733,7 +1840,7 @@ test("helper completes a purchase task and creates completed-only staging previe
       {
         rows: [
           {
-            completed_quantity: 2,
+            completed_quantity: 3,
             helper_id: "helper-1",
             id: "purchase-task-1",
             line_community_name: "客人A",
@@ -1757,11 +1864,11 @@ test("helper completes a purchase task and creates completed-only staging previe
   const task = await service.respondPurchaseTask(database, {
     action: "complete",
     authUserId: "user-1",
-    completedQuantity: "2",
-    helperNote: "少買一件",
+    completedQuantity: "3",
+    helperNote: "已全部買到",
     idempotencyKey: "purchase-response-1",
     purchaseTaskId: "purchase-task-1",
-    unavailableQuantity: "1",
+    unavailableQuantity: "0",
   });
 
   assert.equal(task.status, "completed");
@@ -1775,11 +1882,111 @@ test("helper completes a purchase task and creates completed-only staging previe
   assert.ok(auditQuery);
   assert.equal(auditQuery.params[4], "helper_purchase_completed");
   assert.deepEqual(JSON.parse(auditQuery.params[6]), {
-    completedQuantity: 2,
+    completedQuantity: 3,
     purchaseTaskId: "purchase-task-1",
-    remainingQuantity: 1,
-    remainingResolution: "canceled",
+    remainingQuantity: 0,
+    remainingResolution: null,
   });
+});
+
+test("helper general purchase report photos are stored with the completed staging task", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [{
+          authorized_helper_id: "helper-1",
+          authorized_helper_is_active: true,
+          authorized_trip_status: "active",
+          helper_id: "helper-1",
+          id: "purchase-task-1",
+          line_community_name: "客人A",
+          product_name: "一般商品",
+          quantity: 1,
+          original_price_jpy: 900,
+          requires_face_check: false,
+          sale_price_twd: 300,
+          status: "open",
+          trip_id: "trip-1",
+        }],
+      },
+      {
+        rows: [{
+          completed_quantity: 1,
+          helper_id: "helper-1",
+          id: "purchase-task-1",
+          original_price_jpy: 900,
+          product_name: "一般商品",
+          sale_price_twd: 300,
+          status: "completed",
+          trip_id: "trip-1",
+        }],
+      },
+      { rows: [] },
+      { rows: [{ id: "preview-1" }] },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const task = await service.respondPurchaseTask(database, {
+    action: "complete",
+    authUserId: "user-1",
+    completedQuantity: "1",
+    idempotencyKey: "purchase-report-1",
+    purchaseTaskId: "purchase-task-1",
+    reportPhotos: [{
+      byteSize: 321,
+      contentType: "image/jpeg",
+      originalFilename: "shelf.jpg",
+      sortOrder: 0,
+      storageKey: "helper-app/trip-1/purchase-reports/purchase-task-1/shelf.jpg",
+    }],
+  });
+
+  assert.equal(task.status, "completed");
+  const reportQuery = queries.find((query) =>
+    String(query.sql).includes("'purchase_report_photo'") &&
+    String(query.sql).includes("'purchase_report'"),
+  );
+  assert.ok(reportQuery);
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("insert into helper_app.staging_order_previews")),
+    true,
+  );
+});
+
+test("purchase product suggestions query only recent grouped candidates and their photos", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ sql, params });
+      return {
+        rows: [{
+          created_at: "2026-07-24T08:00:00.000Z",
+          id: "purchase-task-1",
+          note: "紅色",
+          original_price_jpy: 1200,
+          photos: [{ photo_role: "manual_reference", storage_key: "photo-1" }],
+          product_name: "限定包",
+          quantity: 1,
+          requires_face_check: false,
+          sale_price_twd: 380,
+        }],
+      };
+    },
+  };
+
+  const suggestions = await service.listPurchaseProductSuggestions(database, {
+    limit: 8,
+    query: "限定",
+    tripId: "trip-1",
+  });
+
+  assert.equal(suggestions[0].sourceTaskId, "purchase-task-1");
+  assert.match(queries[0].sql, /with candidate_tasks as/);
+  assert.match(queries[0].sql, /limit \$3/);
+  assert.deepEqual(queries[0].params, ["trip-1", "限定", 8]);
 });
 
 test("helper purchase completion clamps over-reported quantity to requested quantity", async () => {
@@ -2048,6 +2255,7 @@ test("helper can complete a partial purchase without unavailable or not-found re
             line_community_name: "客人A",
             product_name: "測試商品",
             quantity: 3,
+            completed_quantity: 1,
             original_price_jpy: 1200,
             requires_face_check: false,
             sale_price_twd: 380,
@@ -2059,7 +2267,7 @@ test("helper can complete a partial purchase without unavailable or not-found re
       {
         rows: [
           {
-            completed_quantity: 1,
+            completed_quantity: 2,
             helper_id: "helper-1",
             id: "purchase-task-1",
             line_community_name: "客人A",
@@ -2069,12 +2277,11 @@ test("helper can complete a partial purchase without unavailable or not-found re
             source_quote_reply_id: null,
             source_quote_task_id: null,
             source_quote_task_photo_id: null,
-            status: "completed",
+            status: "open",
             trip_id: "trip-1",
           },
         ],
       },
-      { rows: [{ id: "preview-1" }] },
       { rows: [] },
     ],
     queries,
@@ -2088,13 +2295,17 @@ test("helper can complete a partial purchase without unavailable or not-found re
     purchaseTaskId: "purchase-task-1",
   });
 
-  assert.equal(task.status, "completed");
+  assert.equal(task.status, "open");
   const updateQuery = queries.find((query) =>
-    String(query.sql).includes("set status = 'completed'"),
+    String(query.sql).includes("set status = 'open'"),
   );
   assert.ok(updateQuery);
-  assert.equal(updateQuery.params[1], 1);
-  assert.equal(updateQuery.params[2], 2);
+  assert.equal(updateQuery.params[1], 2);
+  assert.equal(updateQuery.params[2], 1);
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("insert into helper_app.staging_order_previews")),
+    false,
+  );
 });
 
 test("helper face-check photo response writes media and task photo without redundant media update", async () => {

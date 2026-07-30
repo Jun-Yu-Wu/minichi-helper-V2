@@ -599,6 +599,27 @@ export function CreateRebuyTaskForm({
   );
 }
 
+type PurchaseProductSuggestion = {
+  createdAt?: string;
+  note?: string | null;
+  originalPriceJpy?: number | null;
+  photos: Array<{
+    byte_size?: number | null;
+    byteSize?: number | null;
+    content_type?: string | null;
+    contentType?: string | null;
+    original_filename?: string | null;
+    originalFilename?: string | null;
+    signed_url: string;
+    storage_key: string;
+  }>;
+  productName: string;
+  quantity?: number | null;
+  requiresFaceCheck?: boolean;
+  salePriceTwd?: number | null;
+  sourceTaskId: string;
+};
+
 export function CreatePurchaseTaskForm({
   requiresFaceCheck,
   trip,
@@ -612,7 +633,48 @@ export function CreatePurchaseTaskForm({
   const [state, setState] = useState<AdminActionResult>({});
   const [pending, setPending] = useState(false);
   const [formResetKey, setFormResetKey] = useState(0);
+  const [lineCommunityName, setLineCommunityName] = useState("");
+  const [productName, setProductName] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  const [originalPriceJpy, setOriginalPriceJpy] = useState("");
+  const [salePriceTwd, setSalePriceTwd] = useState("");
+  const [note, setNote] = useState("");
+  const [productFocused, setProductFocused] = useState(false);
+  const [productSuggestions, setProductSuggestions] = useState<PurchaseProductSuggestion[]>([]);
+  const [productSuggestionsLoading, setProductSuggestionsLoading] = useState(false);
+  const [reuseSourceTaskId, setReuseSourceTaskId] = useState("");
   const canCreate = trip.status === "active";
+
+  useEffect(() => {
+    if (!productFocused || !canCreate) {
+      setProductSuggestions([]);
+      setProductSuggestionsLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setProductSuggestionsLoading(true);
+      try {
+        const response = await fetch(
+          `/api/admin/purchase-products?tripId=${encodeURIComponent(trip.id)}&q=${encodeURIComponent(productName.trim())}`,
+          { cache: "no-store", signal: controller.signal },
+        );
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || "無法載入商品推薦。");
+        setProductSuggestions(Array.isArray(body.suggestions) ? body.suggestions : []);
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setProductSuggestions([]);
+        }
+      } finally {
+        if (!controller.signal.aborted) setProductSuggestionsLoading(false);
+      }
+    }, productName.trim() ? 90 : 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [canCreate, productFocused, productName, trip.id]);
 
   useEffect(() => {
     photosRef.current = photos;
@@ -627,6 +689,7 @@ export function CreatePurchaseTaskForm({
 
   function addFiles(files: FileList | null) {
     if (!files) return;
+    setReuseSourceTaskId("");
     const selected = Array.from(files)
       .filter((file) => file.type.startsWith("image/"))
       .map((file) => ({
@@ -648,8 +711,35 @@ export function CreatePurchaseTaskForm({
       ...selected.map((photo, index) => ({ ...photo, sortOrder: current.length + index })),
     ]);
     for (const photo of selected.filter((item) => !item.error)) {
-      startPhotoUpload(photo);
+      void startPhotoUpload(photo).catch(() => undefined);
     }
+  }
+
+  function applyProductSuggestion(suggestion: PurchaseProductSuggestion) {
+    for (const photo of photosRef.current) {
+      if (!photo.reused) URL.revokeObjectURL(photo.objectUrl);
+    }
+    const reusedPhotos = (suggestion.photos || []).map((photo, index) => ({
+      byteSize: Number(photo.byte_size || photo.byteSize || 0),
+      clientPhotoId: createClientId("reused-purchase-reference"),
+      contentType: photo.content_type || photo.contentType || "image/jpeg",
+      file: undefined,
+      objectUrl: photo.signed_url,
+      originalFilename: photo.original_filename || photo.originalFilename || `purchase-reference-${index + 1}.jpg`,
+      reused: true,
+      sortOrder: index,
+      status: "uploaded" as const,
+      storageKey: photo.storage_key,
+    }));
+    setProductName(suggestion.productName || "");
+    setQuantity(String(suggestion.quantity || 1));
+    setOriginalPriceJpy(suggestion.originalPriceJpy == null ? "" : String(suggestion.originalPriceJpy));
+    setSalePriceTwd(suggestion.salePriceTwd == null ? "" : String(suggestion.salePriceTwd));
+    setNote(suggestion.note || "");
+    setReuseSourceTaskId(suggestion.sourceTaskId || "");
+    setPhotos(reusedPhotos);
+    setProductFocused(false);
+    setState({});
   }
 
   function removePhoto(clientPhotoId: string) {
@@ -700,9 +790,11 @@ export function CreatePurchaseTaskForm({
             originalFilename: photo.originalFilename,
             sortOrder: photo.sortOrder,
             storageKey: photo.storageKey,
+            reused: Boolean(photo.reused),
           })),
         ),
       );
+      formData.set("reuseSourceTaskId", reuseSourceTaskId);
       const result = await createPurchaseTaskAction({}, formData);
       setState(result);
       if (result.ok) {
@@ -710,6 +802,13 @@ export function CreatePurchaseTaskForm({
         uploadPromisesRef.current.clear();
         setPhotos([]);
         form.reset();
+        setLineCommunityName("");
+        setProductName("");
+        setQuantity("1");
+        setOriginalPriceJpy("");
+        setSalePriceTwd("");
+        setNote("");
+        setReuseSourceTaskId("");
         setFormResetKey((current) => current + 1);
       }
     } catch (error) {
@@ -723,7 +822,7 @@ export function CreatePurchaseTaskForm({
     const existing = uploadPromisesRef.current.get(photo.clientPhotoId);
     if (existing) return existing;
     updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" });
-    const uploadPromise = uploadAdminTaskPhoto(photo, trip.id)
+    const uploadPromise = uploadAdminTaskPhoto(photo, trip.id, "admin_purchase_task_photo")
       .then((uploaded) => {
         updatePhoto(photo.clientPhotoId, uploaded);
         uploadPromisesRef.current.delete(photo.clientPhotoId);
@@ -747,6 +846,17 @@ export function CreatePurchaseTaskForm({
     );
   }
 
+  const photosSelected = photos.length > 0 && photos.every((photo) => !photo.error);
+  const requiredFieldsReady = Boolean(
+    canCreate &&
+    lineCommunityName.trim() &&
+    productName.trim() &&
+    quantity.trim() &&
+    originalPriceJpy.trim() &&
+    salePriceTwd.trim() &&
+    photosSelected,
+  );
+
   return (
     <form className="mt-3 grid gap-3 border-t pt-3" onSubmit={submitPurchaseTask}>
       <input name="tripId" type="hidden" value={trip.id} />
@@ -754,29 +864,85 @@ export function CreatePurchaseTaskForm({
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="grid gap-1 text-sm">
           <span className="font-medium">LINE 社群暱稱</span>
-          <CustomerNicknameInput disabled={!canCreate || pending} key={formResetKey} />
+          <CustomerNicknameInput
+            disabled={!canCreate || pending}
+            key={formResetKey}
+            onValueChange={setLineCommunityName}
+            value={lineCommunityName}
+          />
         </label>
-        <label className="grid gap-1 text-sm">
+        <label className="relative grid gap-1 text-sm">
           <span className="font-medium">商品名稱</span>
-          <input name="productName" placeholder="例如：限定色側背包" required disabled={!canCreate || pending} />
+          <input
+            aria-autocomplete="list"
+            aria-expanded={productFocused && productSuggestions.length > 0}
+            autoComplete="off"
+            name="productName"
+            placeholder="例如：限定色側背包"
+            required
+            role="combobox"
+            value={productName}
+            disabled={!canCreate || pending}
+            onBlur={() => window.setTimeout(() => setProductFocused(false), 120)}
+            onChange={(event) => {
+              setProductName(event.currentTarget.value);
+              setReuseSourceTaskId("");
+            }}
+            onFocus={() => setProductFocused(true)}
+          />
+          {productFocused && (productSuggestionsLoading || productSuggestions.length > 0) ? (
+            <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-72 overflow-y-auto rounded-lg border bg-popover p-1 text-popover-foreground shadow-lg" role="listbox">
+              {productSuggestionsLoading ? (
+                <p className="px-3 py-2 text-sm text-muted-foreground">載入最近發布商品...</p>
+              ) : productSuggestions.map((suggestion) => (
+                <button
+                  className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-accent"
+                  key={`${suggestion.sourceTaskId}:${suggestion.productName}`}
+                  role="option"
+                  type="button"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    applyProductSuggestion(suggestion);
+                  }}
+                >
+                  {suggestion.photos[0]?.signed_url ? (
+                    <img alt="" className="size-12 rounded-md object-cover" src={suggestion.photos[0].signed_url} />
+                  ) : (
+                    <span className="size-12 rounded-md bg-muted" />
+                  )}
+                  <span className="min-w-0">
+                    <strong className="block truncate text-sm">{suggestion.productName}</strong>
+                    <span className="mt-0.5 block text-xs text-muted-foreground">
+                      JPY {suggestion.originalPriceJpy ?? "-"} · {suggestion.photos.length} 張照片
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
         </label>
         <label className="grid gap-1 text-sm">
           <span className="font-medium">採買數量</span>
-          <input name="quantity" inputMode="numeric" min="1" placeholder="1" required disabled={!canCreate || pending} />
+          <input name="quantity" inputMode="numeric" min="1" placeholder="1" required value={quantity} disabled={!canCreate || pending} onChange={(event) => setQuantity(event.currentTarget.value)} />
         </label>
         <label className="grid gap-1 text-sm">
           <span className="font-medium">商品原價（JPY）</span>
-          <input name="originalPriceJpy" inputMode="numeric" min="0" placeholder="1200" required disabled={!canCreate || pending} />
+          <input name="originalPriceJpy" inputMode="numeric" min="0" placeholder="1200" required value={originalPriceJpy} disabled={!canCreate || pending} onChange={(event) => setOriginalPriceJpy(event.currentTarget.value)} />
         </label>
         <label className="grid gap-1 text-sm">
           <span className="font-medium">客人售價（TWD）</span>
-          <input name="salePriceTwd" inputMode="numeric" min="0" placeholder="380" required disabled={!canCreate || pending} />
+          <input name="salePriceTwd" inputMode="numeric" min="0" placeholder="380" required value={salePriceTwd} disabled={!canCreate || pending} onChange={(event) => setSalePriceTwd(event.currentTarget.value)} />
         </label>
       </div>
       <label className="grid gap-1 text-sm">
         <span className="font-medium">給小幫手的備註（選填）</span>
-        <textarea name="note" placeholder="尺寸、顏色、版本或現場確認重點" disabled={!canCreate || pending} />
+        <textarea name="note" placeholder="尺寸、顏色、版本或現場確認重點" value={note} disabled={!canCreate || pending} onChange={(event) => setNote(event.currentTarget.value)} />
       </label>
+      {reuseSourceTaskId ? (
+        <p className="rounded-md bg-primary/5 px-3 py-2 text-xs text-primary">
+          已套用本連線最近發布的商品資料；照片會直接沿用，數量與客人暱稱仍可修改。
+        </p>
+      ) : null}
       <div className="grid gap-2">
         <p className="text-sm font-medium">採買參考照（必填）</p>
         <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-3 text-center">
@@ -807,14 +973,25 @@ export function CreatePurchaseTaskForm({
                     ) : null}
                   </div>
                   {!pending ? (
-                    <button
-                      aria-label="移除照片"
-                      className="rounded-md p-1 text-muted-foreground hover:bg-muted"
-                      type="button"
-                      onClick={() => removePhoto(photo.clientPhotoId)}
-                    >
-                      <X className="size-4" />
-                    </button>
+                    <div className="flex items-center gap-1">
+                      {photo.status === "failed" && !photo.reused ? (
+                        <button
+                          className="rounded-md px-2 py-1 text-xs font-medium text-primary hover:bg-muted"
+                          type="button"
+                          onClick={() => void startPhotoUpload(photo).catch(() => undefined)}
+                        >
+                          重試
+                        </button>
+                      ) : null}
+                      <button
+                        aria-label="移除照片"
+                        className="rounded-md p-1 text-muted-foreground hover:bg-muted"
+                        type="button"
+                        onClick={() => removePhoto(photo.clientPhotoId)}
+                      >
+                        <X className="size-4" />
+                      </button>
+                    </div>
                   ) : null}
                 </div>
                 {photo.error ? <p className="mt-1 text-xs text-destructive">{photo.error}</p> : null}
@@ -826,10 +1003,8 @@ export function CreatePurchaseTaskForm({
       <ActionMessage state={state} />
       <Button
         disabled={
-          !canCreate ||
           pending ||
-          !photos.length ||
-          photos.some((photo) => Boolean(photo.error))
+          !requiredFieldsReady
         }
         size="sm"
         type="submit"
@@ -911,18 +1086,28 @@ export function QuickPublishPurchaseForm({
 
 function CustomerNicknameInput({
   disabled,
+  onValueChange,
   placeholder = "LINE 社群暱稱",
   required = true,
+  value: controlledValue,
 }: {
   disabled: boolean;
+  onValueChange?: (value: string) => void;
   placeholder?: string;
   required?: boolean;
+  value?: string;
 }) {
   const [focused, setFocused] = useState(false);
   const [loading, setLoading] = useState(false);
   const [suggestions, setSuggestions] = useState<string[]>([]);
-  const [value, setValue] = useState("");
+  const [internalValue, setInternalValue] = useState("");
+  const value = controlledValue ?? internalValue;
   const normalizedValue = value.trim();
+
+  function updateValue(nextValue: string) {
+    if (controlledValue === undefined) setInternalValue(nextValue);
+    onValueChange?.(nextValue);
+  }
 
   useEffect(() => {
     if (!focused || !normalizedValue) {
@@ -987,7 +1172,7 @@ function CustomerNicknameInput({
         role="combobox"
         value={value}
         onBlur={() => setFocused(false)}
-        onChange={(event) => setValue(event.currentTarget.value)}
+        onChange={(event) => updateValue(event.currentTarget.value)}
         onFocus={() => setFocused(true)}
       />
       {focused && normalizedValue && (loading || suggestions.length > 0) ? (
@@ -1005,7 +1190,7 @@ function CustomerNicknameInput({
               type="button"
               onPointerDown={(event) => {
                 event.preventDefault();
-                setValue(nickname);
+                updateValue(nickname);
                 setFocused(false);
               }}
             >
@@ -1023,9 +1208,10 @@ type AdminTaskUploadPhoto = {
   clientPhotoId: string;
   contentType: string;
   error?: string;
-  file: File;
+  file?: File;
   objectUrl: string;
   originalFilename: string;
+  reused?: boolean;
   sortOrder: number;
   status: "selected" | "uploading" | "uploaded" | "failed";
   storageKey?: string;
@@ -1258,28 +1444,37 @@ function adminQuoteTaskTypeLabel(taskType: QuoteTaskFormProps["taskType"]) {
   return "報價＋細圖";
 }
 
-async function uploadAdminTaskPhoto(photo: AdminTaskUploadPhoto, tripId: string) {
+async function uploadAdminTaskPhoto(
+  photo: AdminTaskUploadPhoto,
+  tripId: string,
+  uploadPurpose = "admin_quote_task_photo",
+) {
+  if (!photo.file) throw new Error("找不到待上傳照片。");
   const preparedFile = await preparePhotoForUpload(photo.file);
-  const presign = await fetch("/api/uploads/presign", {
-    body: JSON.stringify({
-      clientPhotoId: photo.clientPhotoId,
-      contentType: preparedFile.type || photo.contentType,
-      byteSize: preparedFile.size,
-      fileName: photo.originalFilename,
-      tripId,
-      uploadPurpose: "admin_quote_task_photo",
-    }),
-    headers: { "content-type": "application/json" },
-    method: "POST",
-  });
+  let presign: Response;
+  try {
+    presign = await fetch("/api/uploads/presign", {
+      body: JSON.stringify({
+        clientPhotoId: photo.clientPhotoId,
+        contentType: preparedFile.type || photo.contentType,
+        byteSize: preparedFile.size,
+        fileName: photo.originalFilename,
+        tripId,
+        uploadPurpose,
+      }),
+      headers: { "content-type": "application/json" },
+      method: "POST",
+    });
+  } catch {
+    throw new Error("無法連線到照片上傳服務，請確認網路後重試。");
+  }
   const presignBody = await presign.json();
   if (!presign.ok) throw new Error(presignBody.error || "無法建立上傳網址。");
-  const upload = await fetch(presignBody.uploadUrl, {
-    body: preparedFile,
-    headers: { "content-type": preparedFile.type || photo.contentType },
-    method: "PUT",
-  });
-  if (!upload.ok) throw new Error(`R2 上傳失敗 (${upload.status})。`);
+  await uploadToPresignedPhotoUrl(
+    presignBody.uploadUrl,
+    preparedFile,
+    preparedFile.type || photo.contentType,
+  );
   return {
     byteSize: preparedFile.size,
     contentType: preparedFile.type || photo.contentType,
@@ -1290,6 +1485,7 @@ async function uploadAdminTaskPhoto(photo: AdminTaskUploadPhoto, tripId: string)
 }
 
 async function uploadAdminRebuyReferencePhoto(photo: AdminTaskUploadPhoto) {
+  if (!photo.file) throw new Error("找不到待上傳照片。");
   const presign = await fetch("/api/uploads/presign", {
     body: JSON.stringify({
       clientPhotoId: photo.clientPhotoId,
@@ -1303,13 +1499,30 @@ async function uploadAdminRebuyReferencePhoto(photo: AdminTaskUploadPhoto) {
   });
   const presignBody = await presign.json();
   if (!presign.ok) throw new Error(presignBody.error || "無法建立上傳網址。");
-  const upload = await fetch(presignBody.uploadUrl, {
-    body: photo.file,
-    headers: { "content-type": photo.contentType },
-    method: "PUT",
-  });
-  if (!upload.ok) throw new Error(`R2 上傳失敗 (${upload.status})。`);
+  await uploadToPresignedPhotoUrl(
+    presignBody.uploadUrl,
+    photo.file,
+    photo.contentType,
+  );
   return { error: undefined, status: "uploaded" as const, storageKey: presignBody.storageKey };
+}
+
+async function uploadToPresignedPhotoUrl(
+  uploadUrl: string,
+  file: Blob,
+  contentType: string,
+) {
+  try {
+    const response = await fetch(uploadUrl, {
+      body: file,
+      headers: { "content-type": contentType },
+      method: "PUT",
+    });
+    if (!response.ok) throw new Error(`R2 上傳失敗 (${response.status})。`);
+  } catch (error) {
+    if (error instanceof Error && error.message !== "Failed to fetch") throw error;
+    throw new Error("照片上傳連線失敗，請重試；若持續失敗請確認 R2 上傳權限與網路。");
+  }
 }
 
 function adminUploadStatusLabel(status: AdminTaskUploadPhoto["status"]) {

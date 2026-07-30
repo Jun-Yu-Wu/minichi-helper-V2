@@ -1,6 +1,6 @@
 # Latest Helper Operation Spec
 
-Last updated: 2026-07-23
+Last updated: 2026-07-24
 
 This document is the authoritative product behavior source for the MINICHI helper
 rewrite. It supersedes older helper-operation descriptions when behavior differs.
@@ -789,6 +789,15 @@ Product autofill:
 - If helper detail photos exist, quick publish must carry all related detail photos.
 - Quick publish from quote/detail must preserve provenance linking the purchase
   task back to the quote/detail source.
+- Previously published purchase products in the current connection are also
+  available as administrator suggestions. When the product-name field is empty,
+  the newest published product is shown first; entered text filters the list,
+  with exact/prefix/contains match quality ranked before publication recency.
+- Selecting a prior product fills editable product fields and durable reference
+  photo links. It does not copy the previous customer, quantity result, task
+  status, or quote/detail provenance into the new customer purchase task.
+- The purchase publishing page provides a recent-product quick entrance that
+  uses the same validated prefilled form.
 
 ## Block 3: Purchase Tasks
 
@@ -799,11 +808,30 @@ Helper purchase lists must clearly separate:
 - Canceled.
 - Pending MINICHI review.
 
-Purchases with the same product should be grouped for helper operation. The home view
-should show total order count, total quantity, bought quantity, and completed order count.
-Swiping horizontally should reveal the individual customer purchase commands.
-The grouping key is product name + original JPY price + face-check required flag.
-Same-group batch actions must not cross this key.
+Purchases with the same compatible product are grouped into helper-facing purchase
+batches. Customer purchase tasks remain separate source records. The home view
+shows the current unresolved batch's total requested quantity, reported/bought
+quantity, remaining quantity, and batch label. Customer-level rows are available
+to the administrator, not exposed to the helper in the first version.
+
+The first version's batch compatibility key is the same connection/trip,
+compatible product identity/name, original JPY price, face-check required flag,
+and material variant/specification. Customer nickname, customer quantity, and
+sale TWD price do not split a compatible batch by themselves. Same-batch actions
+must not cross this compatibility key.
+
+The first set of orders uses the base product title. A later batch after the base
+batch is closed is labeled `－加單1`, then `－加單2`, and so on. A batch remains
+appendable until all outstanding work is fully resolved. A partial report does
+not close the batch: if a batch requires 4 units and the helper reports 3, a later
+customer can still be appended to the same batch. The system then shows the new
+total requested, already reported quantity, and remaining quantity without
+duplicating the 3 reported units. A new suffix is created only after the prior
+batch is closed by full completion or explicit resolution of the remaining work.
+
+Completed earlier batches remain in the completed area and are never reopened.
+The helper action quantity is only the current unresolved batch quantity; history
+is informational and must not be added back to the amount to buy.
 
 The first version keeps partial quantity behavior. Purchased quantities can be
 completed and generate staging orders; unpurchased remaining quantities must be

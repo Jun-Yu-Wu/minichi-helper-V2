@@ -11,6 +11,7 @@ import { PhotoFileInput } from "../components/PhotoFileInput";
 import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
 import { useStaleResource } from "../../src/lib/client-resource-cache";
+import { preparePhotoForUpload } from "../../src/lib/client-photo-upload";
 
 const REFRESH_MS = 8000;
 
@@ -48,7 +49,11 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
       photos: current?.photos || task.photos || [],
     }));
     taskResource.setData((current = []) =>
-      current.map((item) => (item.id === task.id ? { ...item, ...task, photos: [] } : item)),
+      current.map((item) =>
+        item.id === task.id || (item.batch_id && item.batch_id === task.purchase_batch?.id)
+          ? { ...item, ...task, photos: [] }
+          : item,
+      ),
     );
   }, []);
 
@@ -70,6 +75,14 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
   });
   const tasks = taskResource.data || [];
 
+  function findSummaryTask(taskId: string) {
+    return tasks.find((task) =>
+      task.id === taskId ||
+      task.representative_task_id === taskId ||
+      (Array.isArray(task.batch_task_ids) && task.batch_task_ids.includes(taskId)),
+    );
+  }
+
   async function openTask(taskId: string) {
     setActiveTaskId(taskId);
     setActiveTask(null);
@@ -77,12 +90,13 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
     setDetailLoading(true);
     setAllPhotosLoaded(false);
     setAllPhotosLoading(false);
-    const summaryTask = tasks.find((task) => task.id === taskId);
+    const summaryTask = findSummaryTask(taskId);
+    const detailTaskId = summaryTask?.representative_task_id || taskId;
     const loadsReturnedPhotos = shouldLoadReturnedPhotos(summaryTask);
     const photoMode = loadsReturnedPhotos ? "?photoMode=all" : "";
     try {
       const response = await fetch(
-        `/api/helper/trips/${encodeURIComponent(summaryTask?.trip_id || "")}/purchase-tasks/${encodeURIComponent(taskId)}${photoMode}`,
+        `/api/helper/trips/${encodeURIComponent(summaryTask?.trip_id || tripId)}/purchase-tasks/${encodeURIComponent(detailTaskId)}${photoMode}`,
         { cache: "no-store" },
       );
       const body = await response.json();
@@ -107,12 +121,13 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
 
   async function loadAllTaskPhotos() {
     if (!activeTaskId || allPhotosLoaded) return;
-    const summaryTask = tasks.find((task) => task.id === activeTaskId);
+    const summaryTask = findSummaryTask(activeTaskId);
+    const detailTaskId = summaryTask?.representative_task_id || activeTaskId;
     setAllPhotosLoading(true);
     setDetailError("");
     try {
       const response = await fetch(
-        `/api/helper/trips/${encodeURIComponent(summaryTask?.trip_id || activeTask?.trip_id || "")}/purchase-tasks/${encodeURIComponent(activeTaskId)}?photoMode=all`,
+        `/api/helper/trips/${encodeURIComponent(summaryTask?.trip_id || activeTask?.trip_id || tripId)}/purchase-tasks/${encodeURIComponent(detailTaskId)}?photoMode=all`,
         { cache: "no-store" },
       );
       const body = await response.json();
@@ -130,7 +145,7 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
   }
 
   if (activeTaskId) {
-    const summaryTask = tasks.find((task) => task.id === activeTaskId);
+    const summaryTask = findSummaryTask(activeTaskId);
     return (
       <PurchaseTaskDetail
         error={detailError}
@@ -236,7 +251,7 @@ function PurchaseTaskGroup({
             <PurchaseTaskCard
               key={task.id}
               task={task}
-              onOpenTask={onOpenTask}
+              onOpenTask={() => onOpenTask(task.representative_task_id || task.id)}
             />
           ))}
         </div>
@@ -269,9 +284,6 @@ function PurchaseTaskCard({
     >
       <span className="min-w-0">
         <strong className="block truncate text-base">{purchaseTaskDisplayTitle(task)}</strong>
-        <span className="mt-0.5 block text-xs text-muted-foreground">
-          {purchaseTaskListMeta(task)}
-        </span>
       </span>
       <StatusBadge tone={tone}>
         {purchaseProgress(task)}
@@ -346,7 +358,7 @@ function PurchaseTaskDetail({
                   <StatusBadge tone={purchaseTaskTone(task)}>{purchaseStatusLabel(task)}</StatusBadge>
                 </div>
                 <dl className="grid grid-cols-2 gap-2 text-sm">
-                  <Meta label="需採買" value={`${task.quantity} 件`} />
+                  <Meta label="需採買" value={`${purchaseTaskRequestedQuantity(task)} 件`} />
                   <Meta label="原價" value={`JPY ${task.original_price_jpy ?? "-"}`} />
                 </dl>
                 {task.note ? (
@@ -537,20 +549,67 @@ function SecondaryPurchasePhotos({
 }
 
 function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdated: (task: any) => void }) {
+  const aggregateBatch = Boolean((task.purchase_batch_id || task.batch_id) && !task.requires_face_check);
+  const batch = task.purchase_batch || null;
+  const batchStatus = aggregateBatch ? batch?.status || task.batch_status || task.status : task.status;
+  const batchReportedQuantity = aggregateBatch
+    ? Number(batch?.reported_quantity ?? task.batch_reported_quantity ?? 0)
+    : Number(task.completed_quantity || 0);
+  const initialRequestedQuantity = Math.max(
+    1,
+    Number(aggregateBatch ? batch?.requested_quantity ?? task.batch_requested_quantity : task.quantity || 1),
+  );
+  const initialCompletedQuantity = Math.max(0, Number(task.completed_quantity || 0));
+  const initialQuantitySelection = aggregateBatch
+    ? Math.max(0, initialRequestedQuantity - batchReportedQuantity)
+    : task.requires_face_check
+      ? initialCompletedQuantity || initialRequestedQuantity
+      : Math.max(0, initialRequestedQuantity - initialCompletedQuantity);
   const [state, setState] = useState<PurchaseResponseState>({});
   const [pending, setPending] = useState(false);
-  const [completedQuantity, setCompletedQuantity] = useState(String(task.completed_quantity || task.quantity || 1));
+  const [completedQuantity, setCompletedQuantity] = useState(String(initialQuantitySelection));
   const [helperNote, setHelperNote] = useState("");
   const [faceCheckPhoto, setFaceCheckPhoto] = useState<FaceCheckPhoto | null>(null);
+  const [reportPhotos, setReportPhotos] = useState<FaceCheckPhoto[]>([]);
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientId("purchase-response"));
   const [cancelingCompleted, setCancelingCompleted] = useState(false);
   const faceCheckUploadPromises = useRef(new Map<string, Promise<FaceCheckPhoto>>());
+  const reportUploadPromises = useRef(new Map<string, Promise<FaceCheckPhoto>>());
+  const faceCheckPhotoRef = useRef<FaceCheckPhoto | null>(null);
+  const reportPhotosRef = useRef<FaceCheckPhoto[]>([]);
+
+  useEffect(() => {
+    faceCheckPhotoRef.current = faceCheckPhoto;
+    reportPhotosRef.current = reportPhotos;
+  }, [faceCheckPhoto, reportPhotos]);
+
+  useEffect(() => () => {
+    if (faceCheckPhotoRef.current) URL.revokeObjectURL(faceCheckPhotoRef.current.objectUrl);
+    for (const photo of reportPhotosRef.current) URL.revokeObjectURL(photo.objectUrl);
+  }, []);
 
   useEffect(() => {
     if (state.ok && state.task && state.submissionId === idempotencyKey) {
       onTaskUpdated(state.task);
     }
   }, [idempotencyKey, onTaskUpdated, state]);
+
+  useEffect(() => {
+    const latestRequestedQuantity = Math.max(
+      1,
+      Number(aggregateBatch ? batch?.requested_quantity ?? task.batch_requested_quantity : task.quantity || 1),
+    );
+    const latestCompletedQuantity = Math.max(0, Number(task.completed_quantity || 0));
+    const latestSelection = aggregateBatch
+      ? Math.max(
+          0,
+          latestRequestedQuantity - Number(batch?.reported_quantity ?? task.batch_reported_quantity ?? 0),
+        )
+      : task.requires_face_check
+        ? latestCompletedQuantity || latestRequestedQuantity
+        : Math.max(0, latestRequestedQuantity - latestCompletedQuantity);
+    setCompletedQuantity(String(latestSelection));
+  }, [aggregateBatch, batch?.reported_quantity, batch?.requested_quantity, task.batch_reported_quantity, task.batch_requested_quantity, task.completed_quantity, task.quantity, task.requires_face_check]);
 
   const faceCheckPhotoJson = useMemo(
     () =>
@@ -565,15 +624,34 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
     [faceCheckPhoto],
   );
 
-  const completed = task.status === "completed";
-  const closed = ["canceled", "unavailable", "not_found", "review_pending"].includes(task.status);
+  const statusTask = aggregateBatch ? { ...task, status: batchStatus, batch_status: batchStatus } : task;
+  const completed = aggregateBatch ? batchStatus === "completed" : task.status === "completed";
+  const closed = aggregateBatch
+    ? ["canceled", "completed"].includes(batchStatus)
+    : ["canceled", "unavailable", "not_found", "review_pending"].includes(task.status);
   const needsFinalConfirmation = task.status === "approved_pending_helper_confirmation";
   const submitted = Boolean(state.ok && state.submissionId === idempotencyKey);
-  const requestedQuantity = Math.max(1, Number(task.quantity || 1));
-  const completedQuantityNumber = Math.max(0, Math.min(Number(completedQuantity || 0), requestedQuantity));
-  const effectivePurchaseAction = (completed && cancelingCompleted) || completedQuantityNumber === 0 ? "cancel" : "complete";
+  const requestedQuantity = Math.max(
+    1,
+    Number(aggregateBatch ? batch?.requested_quantity ?? task.batch_requested_quantity : task.quantity || 1),
+  );
+  const previouslyCompletedQuantity = aggregateBatch
+    ? batchReportedQuantity
+    : Math.max(0, Math.min(Number(task.completed_quantity || 0), requestedQuantity));
+  const usesIncrementalQuantity = aggregateBatch || (!task.requires_face_check && task.status === "open");
+  const remainingQuantity = Math.max(0, requestedQuantity - previouslyCompletedQuantity);
+  const selectedQuantityNumber = Math.max(
+    0,
+    Math.min(Number(completedQuantity || 0), usesIncrementalQuantity ? remainingQuantity : requestedQuantity),
+  );
+  const completedQuantityNumber = usesIncrementalQuantity
+    ? Math.min(requestedQuantity, previouslyCompletedQuantity + selectedQuantityNumber)
+    : selectedQuantityNumber;
+  const effectivePurchaseAction = aggregateBatch
+    ? "complete"
+    : (completed && cancelingCompleted) || (completedQuantityNumber === 0 && previouslyCompletedQuantity === 0) ? "cancel" : "complete";
   const needsCancelReason = effectivePurchaseAction === "cancel";
-  const needsFaceCheckUpload = task.requires_face_check && task.status === "open" && effectivePurchaseAction === "complete";
+  const needsFaceCheckUpload = !aggregateBatch && task.requires_face_check && task.status === "open" && effectivePurchaseAction === "complete";
   const canSubmit =
     !pending &&
     !submitted &&
@@ -581,7 +659,8 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
     (!completed || cancelingCompleted) &&
     (!needsCancelReason || Boolean(helperNote.trim())) &&
     (!needsFaceCheckUpload || ["selected", "uploading", "uploaded"].includes(String(faceCheckPhoto?.status || ""))) &&
-    completedQuantityNumber <= requestedQuantity;
+    !reportPhotos.some((photo) => photo.status === "failed") &&
+    selectedQuantityNumber <= (usesIncrementalQuantity ? remainingQuantity : requestedQuantity);
 
   function addFaceCheckPhoto(fileList: FileList | null) {
     const file = fileList?.[0];
@@ -611,11 +690,13 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
         : current,
     );
     const uploadPromise = (async () => {
+      const preparedFile = await preparePhotoForUpload(photo.file);
+      const contentType = preparedFile.type || photo.contentType;
       const presign = await fetch("/api/uploads/presign", {
         body: JSON.stringify({
           clientPhotoId: photo.clientPhotoId,
-          contentType: photo.contentType,
-          byteSize: photo.byteSize,
+          contentType,
+          byteSize: preparedFile.size,
           fileName: photo.originalFilename,
           purchaseTaskId: task.id,
           uploadPurpose: "purchase_face_check",
@@ -626,12 +707,18 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
       const presignBody = await presign.json();
       if (!presign.ok) throw new Error(presignBody.error || "無法建立上傳網址。");
       const upload = await fetch(presignBody.uploadUrl, {
-        body: photo.file,
-        headers: { "content-type": photo.contentType },
+        body: preparedFile,
+        headers: { "content-type": contentType },
         method: "PUT",
       });
       if (!upload.ok) throw new Error(`R2 上傳失敗 (${upload.status})。`);
-      const uploadedPhoto = { ...photo, status: "uploaded" as const, storageKey: presignBody.storageKey };
+      const uploadedPhoto = {
+        ...photo,
+        byteSize: preparedFile.size,
+        contentType,
+        status: "uploaded" as const,
+        storageKey: presignBody.storageKey,
+      };
       setFaceCheckPhoto((current) =>
         current?.clientPhotoId === photo.clientPhotoId
           ? uploadedPhoto
@@ -658,6 +745,95 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
     }
   }
 
+  function addReportPhotos(fileList: FileList | null) {
+    if (!fileList || task.requires_face_check || task.status !== "open") return;
+    const availableSlots = Math.max(0, 6 - reportPhotos.length);
+    const selected = Array.from(fileList)
+      .filter(isPurchaseReportImageFile)
+      .slice(0, availableSlots)
+      .map((file) => ({
+        byteSize: file.size,
+        clientPhotoId: createClientId("purchase-report"),
+        contentType: inferPurchaseReportContentType(file),
+        file,
+        objectUrl: URL.createObjectURL(file),
+        originalFilename: file.name || "purchase-report.jpg",
+        status: "selected" as const,
+      }));
+    if (!selected.length) return;
+    setReportPhotos((current) => [...current, ...selected].slice(0, 6));
+    for (const photo of selected) void uploadReportPhoto(photo).catch(() => undefined);
+  }
+
+  async function uploadReportPhoto(photo: FaceCheckPhoto): Promise<FaceCheckPhoto> {
+    if (photo.status === "uploaded" && photo.storageKey) return photo;
+    const existingUpload = reportUploadPromises.current.get(photo.clientPhotoId);
+    if (existingUpload) return existingUpload;
+    setReportPhotos((current) => current.map((item) =>
+      item.clientPhotoId === photo.clientPhotoId
+        ? { ...item, error: undefined, status: "uploading" }
+        : item,
+    ));
+    const uploadPromise = (async () => {
+      const preparedFile = await preparePhotoForUpload(photo.file);
+      const contentType = preparedFile.type || photo.contentType;
+      const presign = await fetch("/api/uploads/presign", {
+        body: JSON.stringify({
+          byteSize: preparedFile.size,
+          clientPhotoId: photo.clientPhotoId,
+          contentType,
+          fileName: photo.originalFilename,
+          purchaseTaskId: task.id,
+          tripId: task.trip_id,
+          uploadPurpose: "purchase_report",
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      const presignBody = await presign.json();
+      if (!presign.ok) throw new Error(presignBody.error || "無法建立上傳網址。");
+      const upload = await fetch(presignBody.uploadUrl, {
+        body: preparedFile,
+        headers: { "content-type": contentType },
+        method: "PUT",
+      });
+      if (!upload.ok) throw new Error(`R2 上傳失敗 (${upload.status})。`);
+      const uploadedPhoto = {
+        ...photo,
+        byteSize: preparedFile.size,
+        contentType,
+        status: "uploaded" as const,
+        storageKey: presignBody.storageKey,
+      };
+      setReportPhotos((current) => current.map((item) =>
+        item.clientPhotoId === photo.clientPhotoId ? uploadedPhoto : item,
+      ));
+      return uploadedPhoto;
+    })();
+    reportUploadPromises.current.set(photo.clientPhotoId, uploadPromise);
+    try {
+      return await uploadPromise;
+    } catch (error) {
+      setReportPhotos((current) => current.map((item) =>
+        item.clientPhotoId === photo.clientPhotoId
+          ? { ...item, error: error instanceof Error ? error.message : "上傳失敗。", status: "failed" }
+          : item,
+      ));
+      throw error;
+    } finally {
+      reportUploadPromises.current.delete(photo.clientPhotoId);
+    }
+  }
+
+  function removeReportPhoto(clientPhotoId: string) {
+    setReportPhotos((current) => {
+      const removed = current.find((photo) => photo.clientPhotoId === clientPhotoId);
+      if (removed) URL.revokeObjectURL(removed.objectUrl);
+      reportUploadPromises.current.delete(clientPhotoId);
+      return current.filter((photo) => photo.clientPhotoId !== clientPhotoId);
+    });
+  }
+
   function removeFaceCheckPhoto() {
     if (faceCheckPhoto) URL.revokeObjectURL(faceCheckPhoto.objectUrl);
     setFaceCheckPhoto(null);
@@ -681,24 +857,39 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
               storageKey: uploadedFaceCheckPhoto.storageKey,
             }
           : null;
+      const uploadedReportPhotos = await Promise.all(
+        reportPhotos.map((photo) => uploadReportPhoto(photo)),
+      );
+      const reportPhotoPayload = uploadedReportPhotos.map((photo, index) => ({
+        byteSize: photo.byteSize,
+        contentType: photo.contentType,
+        originalFilename: photo.originalFilename,
+        sortOrder: index,
+        storageKey: photo.storageKey,
+      }));
       if (needsFaceCheckUpload && !faceCheckPhotoPayload) {
         throw new Error("請先選擇挑臉確認照。");
       }
-      const response = await fetch("/api/helper/purchase-task-responses", {
+      const response = await fetch(
+        aggregateBatch ? "/api/helper/purchase-batch-responses" : "/api/helper/purchase-task-responses",
+        {
         body: JSON.stringify({
           completedQuantity,
           faceCheckPhoto: faceCheckPhotoPayload,
           helperNote,
           idempotencyKey,
           purchaseAction: needsFinalConfirmation ? "complete" : effectivePurchaseAction,
+          purchaseBatchId: aggregateBatch ? task.purchase_batch_id : undefined,
           purchaseTaskId: task.id,
+          reportPhotos: reportPhotoPayload,
           unavailableQuantity: effectivePurchaseAction === "complete"
             ? Math.max(0, requestedQuantity - completedQuantityNumber)
             : task.quantity,
         }),
         headers: { "content-type": "application/json" },
         method: "POST",
-      });
+        },
+      );
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "操作失敗，請稍後再試。");
       setState({ ok: true, submissionId: idempotencyKey, task: body.task });
@@ -717,16 +908,16 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
           <p className="text-sm font-semibold text-foreground">回報結果</p>
           <p className="mt-1 text-sm text-muted-foreground">{purchaseResponseHelpText(task, cancelingCompleted)}</p>
         </div>
-        <StatusBadge tone={purchaseTaskTone(task)}>{purchaseStatusLabel(task)}</StatusBadge>
+        <StatusBadge tone={purchaseTaskTone(statusTask)}>{purchaseStatusLabel(statusTask)}</StatusBadge>
       </div>
-      <PurchaseTaskStateNotice task={task} />
+      <PurchaseTaskStateNotice task={statusTask} />
       {closed && task.helper_note ? (
         <div className="rounded-lg bg-muted/45 px-3 py-2 text-sm">
           <p className="text-xs font-medium text-muted-foreground">小幫手備註</p>
           <p className="mt-1 leading-6 text-foreground">{task.helper_note}</p>
         </div>
       ) : null}
-      {completed && !cancelingCompleted ? (
+      {completed && !cancelingCompleted && !aggregateBatch ? (
         <Button className="w-full" type="button" variant="outline" onClick={() => {
           setCancelingCompleted(true);
           setHelperNote("");
@@ -739,19 +930,26 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
         <>
           {(!cancelingCompleted && !needsFinalConfirmation) || effectivePurchaseAction === "complete" || needsFinalConfirmation ? (
             <label className="grid gap-1.5 text-sm">
-              <span className="font-medium">實際買到數量</span>
+              <span className="font-medium">{aggregateBatch ? "整批實際買到數量" : "實際買到數量"}</span>
                 <select
                   name="completedQuantityVisible"
                   value={completedQuantity}
                   onChange={(event) => setCompletedQuantity(event.target.value)}
                 >
-                  {Array.from({ length: requestedQuantity + 1 }, (_, quantity) => (
+                  {Array.from(
+                    { length: (usesIncrementalQuantity ? remainingQuantity : requestedQuantity) + 1 },
+                    (_, index) => index,
+                  ).map((quantity) => (
                     <option key={quantity} value={quantity}>
                       {quantity === 0 ? "0（取消）" : quantity}
                     </option>
                   ))}
                 </select>
-              <span className="text-xs text-muted-foreground">選 0 會取消這筆採買；請填寫取消理由。</span>
+              <span className="text-xs text-muted-foreground">
+                {!aggregateBatch && completedQuantityNumber === 0 && previouslyCompletedQuantity === 0
+                  ? "選 0 會取消這筆採買；請填寫取消理由。"
+                  : null}
+              </span>
             </label>
           ) : null}
 
@@ -786,6 +984,58 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
                     </Button>
                   </div>
                   {faceCheckPhoto.error ? <p className="mt-1 text-xs text-destructive">{faceCheckPhoto.error}</p> : null}
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+
+          {!task.requires_face_check && task.status === "open" && effectivePurchaseAction === "complete" ? (
+            <div className="grid gap-3 rounded-lg border border-emerald-200 bg-emerald-50/50 p-3">
+              <div>
+                <p className="text-sm font-semibold text-emerald-950">採買回報照片（選填）</p>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex min-h-14 cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed bg-background/80 p-2 text-center">
+                  <Camera className="size-4" aria-hidden="true" />
+                  <span className="text-sm">拍照</span>
+                  <PhotoFileInput
+                    capture="environment"
+                    className="sr-only"
+                    accept="image/*"
+                    onFiles={addReportPhotos}
+                  />
+                </label>
+                <label className="flex min-h-14 cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed bg-background/80 p-2 text-center">
+                  <span className="text-sm">從相簿選取</span>
+                  <PhotoFileInput
+                    className="sr-only"
+                    accept="image/*"
+                    multiple
+                    onFiles={addReportPhotos}
+                  />
+                </label>
+              </div>
+              {reportPhotos.length ? (
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+                  {reportPhotos.map((photo) => (
+                    <div className={`grid gap-1 rounded-md border p-2 ${photo.status === "uploaded" ? "border-emerald-400 bg-emerald-50/80" : photo.status === "failed" ? "border-red-300 bg-red-50" : "bg-background"}`} key={photo.clientPhotoId}>
+                      <img alt="採買回報照片" className="aspect-square w-full rounded-md object-cover" src={photo.objectUrl} />
+                      <div className="flex items-center justify-between gap-1">
+                        <span className="text-xs text-muted-foreground">{purchasePhotoUploadStatusLabel(photo.status)}</span>
+                        <div className="flex items-center gap-1">
+                          {photo.status === "failed" ? (
+                            <button className="rounded px-1.5 py-1 text-xs font-medium text-primary hover:bg-muted" type="button" onClick={() => void uploadReportPhoto(photo).catch(() => undefined)}>
+                              重試
+                            </button>
+                          ) : null}
+                          <button aria-label="移除回報照片" className="rounded p-1 text-muted-foreground hover:bg-muted" type="button" onClick={() => removeReportPhoto(photo.clientPhotoId)}>
+                            <X className="size-4" />
+                          </button>
+                        </div>
+                      </div>
+                      {photo.error ? <p className="text-xs text-destructive">{photo.error}</p> : null}
+                    </div>
+                  ))}
                 </div>
               ) : null}
             </div>
@@ -865,15 +1115,19 @@ function Meta({ label, value }: { label: string; value: string }) {
 }
 
 function isCompletedTask(task: any) {
-  return task.status === "completed";
+  return taskStatus(task) === "completed";
 }
 
 function isCanceledTask(task: any) {
-  return ["canceled", "unavailable", "not_found"].includes(task.status);
+  return ["canceled", "unavailable", "not_found"].includes(taskStatus(task));
 }
 
 function isFaceCheckReviewTask(task: any) {
-  return Boolean(task.requires_face_check) && ["review_pending", "approved_pending_helper_confirmation"].includes(task.status);
+  return Boolean(task.requires_face_check) && ["review_pending", "approved_pending_helper_confirmation"].includes(taskStatus(task));
+}
+
+function taskStatus(task: any) {
+  return task.batch_id ? task.batch_status || "open" : task.status;
 }
 
 function shouldLoadReturnedPhotos(task: any | undefined) {
@@ -889,16 +1143,28 @@ function purchaseTaskName(task: any) {
 }
 
 function purchaseTaskDisplayTitle(task: any) {
+  if (task.batch_title) return task.batch_title;
   const productName = String(task.product_name || "").trim();
   if (productName) return productName;
   return "未填商品";
 }
 
-function purchaseTaskListMeta(task: any) {
-  const parts = [`${Number(task.quantity || 0)} 件`];
-  if (task.original_price_jpy != null) parts.push(`JPY ${task.original_price_jpy}`);
-  if (task.requires_face_check) parts.push("挑臉審核");
-  return parts.join(" · ");
+function purchaseTaskRequestedQuantity(task: any) {
+  if (task.purchase_batch) {
+    return Math.max(
+      0,
+      Number(task.purchase_batch.requested_quantity || 0) -
+        Number(task.purchase_batch.reported_quantity || 0),
+    );
+  }
+  if (task.batch_requested_quantity != null) {
+    return Math.max(
+      0,
+      Number(task.batch_requested_quantity || 0) -
+        Number(task.batch_reported_quantity || 0),
+    );
+  }
+  return Math.max(0, Number(task.quantity || 0) - Number(task.completed_quantity || 0));
 }
 
 function purchaseStatusLabel(task: any) {
@@ -933,6 +1199,9 @@ function purchaseTaskTone(task: any): "amber" | "blue" | "green" | "red" {
 }
 
 function purchaseProgress(task: any) {
+  if (task.batch_id) {
+    return `${Number(task.batch_reported_quantity || 0)}/${Number(task.batch_requested_quantity || 0)}`;
+  }
   const quantity = Math.max(Number(task.quantity || 0), 0);
   const completed = isCompletedTask(task)
     ? Math.max(Number(task.completed_quantity || 0), 0)
@@ -955,7 +1224,7 @@ function secondaryPurchasePhotos(photos: any[]) {
 function returnedPurchasePhotos(photos: any[]) {
   const faceCheckPhoto = latestFaceCheckPhoto(photos);
   if (faceCheckPhoto) return [faceCheckPhoto];
-  return photos.filter((photo) => String(photo.photo_role || "") === "detail_reply");
+  return photos.filter((photo) => ["detail_reply", "purchase_report"].includes(String(photo.photo_role || "")));
 }
 
 function latestFaceCheckPhoto(photos: any[]) {
@@ -975,6 +1244,7 @@ function compareNewestPhotoFirst(left: any, right: any) {
 
 function secondaryPhotoLabel(role: string, index: number) {
   if (role === "face_check_report") return "挑臉";
+  if (role === "purchase_report") return "回報";
   if (role === "detail_reply") return "細圖";
   return String(index + 1);
 }
@@ -983,4 +1253,24 @@ function createClientId(prefix: string) {
   const randomUuid = globalThis.crypto?.randomUUID?.();
   if (randomUuid) return `${prefix}-${randomUuid}`;
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function purchasePhotoUploadStatusLabel(status: FaceCheckPhoto["status"]) {
+  if (status === "uploaded") return "已上傳";
+  if (status === "uploading") return "背景上傳中";
+  if (status === "failed") return "上傳失敗";
+  return "準備上傳";
+}
+
+function isPurchaseReportImageFile(file: File) {
+  return file.type.startsWith("image/") || /\.(avif|gif|heic|heif|jpe?g|png|webp)$/i.test(file.name);
+}
+
+function inferPurchaseReportContentType(file: File) {
+  if (file.type.startsWith("image/")) return file.type;
+  if (/\.png$/i.test(file.name)) return "image/png";
+  if (/\.webp$/i.test(file.name)) return "image/webp";
+  if (/\.gif$/i.test(file.name)) return "image/gif";
+  if (/\.hei[cf]$/i.test(file.name)) return "image/heic";
+  return "image/jpeg";
 }

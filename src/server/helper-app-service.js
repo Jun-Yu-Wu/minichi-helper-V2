@@ -611,7 +611,11 @@ async function listPurchaseTasks(
   const where = conditions.length ? `where ${conditions.join(" and ")}` : "";
   if (!includePhotos) {
     const result = await database.query(
-      `select pt.id, pt.trip_id, pt.helper_id, pt.source_quote_task_id,
+      `select pt.id, pt.trip_id, pt.helper_id, pt.purchase_batch_id,
+              pb.group_key as purchase_batch_group_key,
+              pb.sequence as purchase_batch_sequence,
+              pb.status as purchase_batch_status,
+              pt.source_quote_task_id,
               pt.source_quote_task_photo_id, pt.source_quote_reply_id,
               pt.line_community_name, pt.product_name, pt.quantity,
               pt.original_price_jpy, pt.sale_price_twd, pt.note,
@@ -625,6 +629,7 @@ async function listPurchaseTasks(
        from helper_app.purchase_tasks pt
        join helper_app.trips t on t.id = pt.trip_id
        join helper_app.helper_profiles hp on hp.id = pt.helper_id
+       left join helper_app.purchase_batches pb on pb.id = pt.purchase_batch_id
        left join lateral (
          select count(*)::int as photo_count
          from helper_app.purchase_task_photos ptp
@@ -642,14 +647,18 @@ async function listPurchaseTasks(
            )
        ) photo_counts on true
        ${where}
-       group by pt.id, t.id, hp.id, photo_counts.photo_count
+       group by pt.id, t.id, hp.id, pb.id, photo_counts.photo_count
        order by pt.created_at desc`,
       params,
     );
     return result.rows;
   }
   const result = await database.query(
-    `select pt.id, pt.trip_id, pt.helper_id, pt.source_quote_task_id,
+    `select pt.id, pt.trip_id, pt.helper_id, pt.purchase_batch_id,
+            pb.group_key as purchase_batch_group_key,
+            pb.sequence as purchase_batch_sequence,
+            pb.status as purchase_batch_status,
+            pt.source_quote_task_id,
             pt.source_quote_task_photo_id, pt.source_quote_reply_id,
             pt.line_community_name, pt.product_name, pt.quantity,
             pt.original_price_jpy, pt.sale_price_twd, pt.note,
@@ -666,6 +675,7 @@ async function listPurchaseTasks(
      from helper_app.purchase_tasks pt
      join helper_app.trips t on t.id = pt.trip_id
      join helper_app.helper_profiles hp on hp.id = pt.helper_id
+     left join helper_app.purchase_batches pb on pb.id = pt.purchase_batch_id
      left join lateral (
        select count(*)::int as photo_count,
               jsonb_agg(
@@ -674,13 +684,18 @@ async function listPurchaseTasks(
                   'storage_key', visible_photos.storage_key,
                   'photo_role', visible_photos.photo_role,
                   'sort_order', visible_photos.sort_order,
+                  'original_filename', visible_photos.original_filename,
+                  'content_type', visible_photos.content_type,
+                  'byte_size', visible_photos.byte_size,
                   'created_at', visible_photos.created_at
                 )
                 order by visible_photos.photo_role asc, visible_photos.sort_order asc, visible_photos.created_at asc
               ) as items
        from (
-         select ptp.id, ptp.storage_key, ptp.photo_role, ptp.sort_order, ptp.created_at
+         select ptp.id, ptp.storage_key, ptp.photo_role, ptp.sort_order,
+                mo.original_filename, mo.content_type, mo.byte_size, ptp.created_at
          from helper_app.purchase_task_photos ptp
+         left join helper_app.media_objects mo on mo.storage_key = ptp.storage_key
          where ptp.purchase_task_id = pt.id
            and (
              ptp.photo_role <> 'face_check_report'
@@ -696,7 +711,7 @@ async function listPurchaseTasks(
        ) visible_photos
      ) photos on true
      ${where}
-     group by pt.id, t.id, hp.id, photos.photo_count, photos.items
+     group by pt.id, t.id, hp.id, pb.id, photos.photo_count, photos.items
      order by pt.created_at desc`,
     params,
   );
@@ -708,6 +723,7 @@ async function getPurchaseTaskDetail(
   {
     activeOnly = false,
     authUserId = null,
+    photoMode = "product",
     purchaseTaskId,
     tripId,
   } = {},
@@ -726,8 +742,17 @@ async function getPurchaseTaskDetail(
     conditions.push("hp.is_active = true");
     conditions.push("t.status = 'active'");
   }
+  const purchasePhotoCondition = photoMode === "all"
+    ? ""
+    : photoMode === "report"
+      ? "and ptp.photo_role in ('detail_reply', 'purchase_report', 'face_check_report')"
+      : "and ptp.photo_role in ('manual_reference', 'source')";
   const result = await database.query(
-    `select pt.id, pt.trip_id, pt.helper_id, pt.source_quote_task_id,
+    `select pt.id, pt.trip_id, pt.helper_id, pt.purchase_batch_id,
+            pb.group_key as purchase_batch_group_key,
+            pb.sequence as purchase_batch_sequence,
+            pb.status as purchase_batch_status,
+            pt.source_quote_task_id,
             pt.source_quote_task_photo_id, pt.source_quote_reply_id,
             pt.line_community_name, pt.product_name, pt.quantity,
             pt.original_price_jpy, pt.sale_price_twd, pt.note,
@@ -736,10 +761,27 @@ async function getPurchaseTaskDetail(
             pt.admin_review_note, pt.created_at, pt.updated_at, pt.completed_at,
             t.trip_name, t.business_date, t.timezone, t.status as trip_status,
             hp.display_name as helper_display_name,
+            batch_summary.summary as purchase_batch,
             coalesce(photos.items, '[]'::jsonb) as photos
      from helper_app.purchase_tasks pt
      join helper_app.trips t on t.id = pt.trip_id
      join helper_app.helper_profiles hp on hp.id = pt.helper_id
+     left join helper_app.purchase_batches pb on pb.id = pt.purchase_batch_id
+     left join lateral (
+       select jsonb_build_object(
+                'id', batch.id,
+                'product_name', batch.product_name,
+                'sequence', batch.sequence,
+                'status', batch.status,
+                'requires_face_check', batch.requires_face_check,
+                'requested_quantity', coalesce(sum(batch_task.quantity) filter (where batch_task.status not in ('canceled', 'unavailable', 'not_found')), 0)::int,
+                'reported_quantity', coalesce(sum(batch_task.completed_quantity) filter (where batch_task.status not in ('canceled', 'unavailable', 'not_found')), 0)::int
+              ) as summary
+       from helper_app.purchase_batches batch
+       left join helper_app.purchase_tasks batch_task on batch_task.purchase_batch_id = batch.id
+       where batch.id = pt.purchase_batch_id
+       group by batch.id
+     ) batch_summary on true
      left join lateral (
        select jsonb_agg(
                 jsonb_build_object(
@@ -747,12 +789,17 @@ async function getPurchaseTaskDetail(
                   'storage_key', ptp.storage_key,
                   'photo_role', ptp.photo_role,
                   'sort_order', ptp.sort_order,
+                  'original_filename', mo.original_filename,
+                  'content_type', mo.content_type,
+                  'byte_size', mo.byte_size,
                   'created_at', ptp.created_at
                 )
                 order by ptp.photo_role asc, ptp.sort_order asc
               ) as items
        from helper_app.purchase_task_photos ptp
+       left join helper_app.media_objects mo on mo.storage_key = ptp.storage_key
        where ptp.purchase_task_id = pt.id
+         ${purchasePhotoCondition}
          and (
            ptp.photo_role <> 'face_check_report'
            or ptp.id = (
@@ -769,7 +816,15 @@ async function getPurchaseTaskDetail(
      limit 1`,
     params,
   );
-  return result.rows[0] || null;
+  const task = result.rows[0];
+  if (!task?.purchase_batch) return task || null;
+  return {
+    ...task,
+    purchase_batch: {
+      ...task.purchase_batch,
+      title: purchaseBatchTitle(task.purchase_batch.product_name, task.purchase_batch.sequence),
+    },
+  };
 }
 
 async function listRebuyTasks(
@@ -1466,6 +1521,185 @@ function groupPurchaseTasksByTripId(tasks) {
   return groups;
 }
 
+function normalizePurchaseBatchKey({ productName, originalPriceJpy, requiresFaceCheck }) {
+  const normalizedName = String(productName || "")
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/\s+/g, " ");
+  return [
+    normalizedName,
+    originalPriceJpy == null ? "none" : String(originalPriceJpy),
+    requiresFaceCheck ? "face-check" : "standard",
+  ].join("|");
+}
+
+function purchaseBatchTitle(productName, sequence) {
+  const name = String(productName || "").trim() || "未命名採買";
+  return Number(sequence || 0) > 0 ? `${name}－加單${Number(sequence)}` : name;
+}
+
+function groupPurchaseTasksForHelper(tasks) {
+  const groups = new Map();
+  for (const task of tasks) {
+    const key = task.purchase_batch_id || `legacy:${task.id}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.tasks.push(task);
+      continue;
+    }
+    groups.set(key, {
+      batch_id: task.purchase_batch_id || null,
+      batch_sequence: Number(task.purchase_batch_sequence || 0),
+      batch_status: task.purchase_batch_status || null,
+      group_key: task.purchase_batch_group_key || null,
+      representative_task_id: task.id,
+      tasks: [task],
+    });
+  }
+
+  return [...groups.values()]
+    .map((group) => {
+      const tasks = group.tasks;
+      const representative = tasks.find((task) =>
+        !["completed", "canceled", "unavailable", "not_found"].includes(task.status),
+      ) || tasks[0];
+      const activeTasks = tasks.filter((task) => !["canceled", "unavailable", "not_found"].includes(task.status));
+      const requestedQuantity = activeTasks.reduce((sum, task) => sum + Number(task.quantity || 0), 0);
+      const reportedQuantity = activeTasks.reduce((sum, task) => sum + Number(task.completed_quantity || 0), 0);
+      const remainingQuantity = activeTasks.reduce(
+        (sum, task) => sum + Math.max(0, Number(task.quantity || 0) - Number(task.completed_quantity || 0)),
+        0,
+      );
+      const hasReview = tasks.some((task) => task.status === "review_pending");
+      const hasApprovedPending = tasks.some((task) => task.status === "approved_pending_helper_confirmation");
+      const hasOpen = tasks.some((task) => task.status === "open");
+      const allCanceled = tasks.length > 0 && activeTasks.length === 0;
+      const status = group.batch_status || (
+        hasReview
+          ? "review_pending"
+          : hasApprovedPending
+            ? "approved_pending_helper_confirmation"
+            : hasOpen || remainingQuantity > 0
+              ? "open"
+              : allCanceled
+                ? "canceled"
+                : "completed"
+      );
+      return {
+        ...representative,
+        id: group.batch_id || representative.id,
+        batch_id: group.batch_id,
+        batch_title: purchaseBatchTitle(representative.product_name, group.batch_sequence),
+        batch_sequence: group.batch_sequence,
+        batch_status: status,
+        batch_customer_count: tasks.length,
+        batch_requested_quantity: requestedQuantity,
+        batch_reported_quantity: reportedQuantity,
+        batch_remaining_quantity: remainingQuantity,
+        representative_task_id: representative.id,
+        batch_task_ids: tasks.map((task) => task.id),
+      };
+    })
+    .sort((left, right) => {
+      const leftOpen = ["open", "review_pending", "approved_pending_helper_confirmation"].includes(left.batch_status) ? 0 : 1;
+      const rightOpen = ["open", "review_pending", "approved_pending_helper_confirmation"].includes(right.batch_status) ? 0 : 1;
+      if (leftOpen !== rightOpen) return leftOpen - rightOpen;
+      return new Date(right.updated_at || right.created_at || 0).getTime() - new Date(left.updated_at || left.created_at || 0).getTime();
+    });
+}
+
+async function listHelperPurchaseBatches(database, { authUserId, helperId, tripIds } = {}) {
+  const tasks = await listPurchaseTasks(database, {
+    activeOnly: true,
+    authUserId,
+    helperId,
+    includePhotos: false,
+    tripIds,
+  });
+  return groupPurchaseTasksForHelper(tasks);
+}
+
+async function listPurchaseProductSuggestions(database, { tripId, query = "", limit = 8 } = {}) {
+  const normalizedTripId = requiredText(tripId, "tripId");
+  const normalizedQuery = String(query || "").trim();
+  const boundedLimit = Math.max(1, Math.min(Number(limit) || 8, 12));
+  const result = await database.query(
+    `with candidate_tasks as (
+       select distinct on (
+         pt.trip_id,
+         regexp_replace(lower(btrim(pt.product_name)), '[[:space:]]+', ' ', 'g'),
+         coalesce(pt.original_price_jpy::text, 'none'),
+         case when pt.requires_face_check then 'face-check' else 'standard' end
+       ) pt.*
+       from helper_app.purchase_tasks pt
+       where pt.trip_id = $1
+         and ($2 = '' or lower(pt.product_name) like '%' || lower($2) || '%')
+       order by
+         pt.trip_id,
+         regexp_replace(lower(btrim(pt.product_name)), '[[:space:]]+', ' ', 'g'),
+         coalesce(pt.original_price_jpy::text, 'none'),
+         case when pt.requires_face_check then 'face-check' else 'standard' end,
+         pt.created_at desc,
+         pt.id desc
+     ), limited_tasks as (
+       select *
+       from candidate_tasks
+       order by
+         case
+           when $2 <> '' and lower(btrim(product_name)) = lower($2) then 0
+           when $2 <> '' and lower(btrim(product_name)) like lower($2) || '%' then 1
+           else 2
+         end,
+         created_at desc,
+         id desc
+       limit $3
+     )
+     select lt.id, lt.product_name, lt.quantity, lt.original_price_jpy,
+            lt.sale_price_twd, lt.note, lt.requires_face_check, lt.created_at,
+            coalesce(
+              (
+                select jsonb_agg(
+                         jsonb_build_object(
+                           'storage_key', ptp.storage_key,
+                           'photo_role', ptp.photo_role,
+                           'sort_order', ptp.sort_order,
+                           'original_filename', mo.original_filename,
+                           'content_type', mo.content_type,
+                           'byte_size', mo.byte_size
+                         )
+                         order by ptp.sort_order asc, ptp.created_at asc
+                       )
+                from helper_app.purchase_task_photos ptp
+                left join helper_app.media_objects mo on mo.storage_key = ptp.storage_key
+                where ptp.purchase_task_id = lt.id
+                  and ptp.photo_role <> 'face_check_report'
+              ),
+              '[]'::jsonb
+            ) as photos
+     from limited_tasks lt
+     order by
+       case
+         when $2 <> '' and lower(btrim(lt.product_name)) = lower($2) then 0
+         when $2 <> '' and lower(btrim(lt.product_name)) like lower($2) || '%' then 1
+         else 2
+       end,
+       lt.created_at desc,
+       lt.id desc`,
+    [normalizedTripId, normalizedQuery, boundedLimit],
+  );
+  return result.rows.map((task) => ({
+    sourceTaskId: task.id,
+    productName: task.product_name,
+    quantity: task.quantity,
+    originalPriceJpy: task.original_price_jpy,
+    salePriceTwd: task.sale_price_twd,
+    note: task.note,
+    requiresFaceCheck: task.requires_face_check,
+    createdAt: task.created_at,
+    photos: Array.isArray(task.photos) ? task.photos : [],
+  }));
+}
+
 async function attachSignedPhotoUrls(batches, r2Store) {
   return Promise.all(
     batches.map(async (batch) => ({
@@ -1930,15 +2164,13 @@ async function createPurchaseTask(database, input) {
       ...normalized,
       helperId: trip.assigned_helper_id,
     });
-    await upsertPurchaseReferenceMediaBatch(client, referencePhotos);
-    await insertPurchasePhotosBatch(client, referencePhotos.map((photo, index) => ({
+    await insertPurchaseReferencePhotosBatch(client, {
       helperId: trip.assigned_helper_id,
-      photoRole: "manual_reference",
+      photos: referencePhotos,
       purchaseTaskId: task.id,
-      sortOrder: index,
-      storageKey: photo.storageKey,
+      sourceTaskId: normalized.reuseSourceTaskId,
       tripId: trip.id,
-    })));
+    });
     return task;
   });
 }
@@ -2396,6 +2628,7 @@ async function respondPurchaseTask(database, input) {
     if (task.helper_id !== helper.id) {
       throw new HelperAppServiceError("forbidden", "Purchase task is not assigned to this helper.");
     }
+    const isBatchedTask = Boolean(task.purchase_batch_id);
     assertTripCanUseLiveWorkspace(
       { status: task.authorized_trip_status },
       "Purchase tasks can be updated only while the trip is active.",
@@ -2409,7 +2642,15 @@ async function respondPurchaseTask(database, input) {
     }
 
     const requestedQuantity = Math.max(1, Number(task.quantity || 1));
-    const completedQuantity = Math.min(normalized.completedQuantity ?? requestedQuantity, requestedQuantity);
+    const previousCompletedQuantity = Math.max(
+      0,
+      Math.min(Number(task.completed_quantity || 0), requestedQuantity),
+    );
+    const usesIncrementalQuantity = !isBatchedTask && !task.requires_face_check && task.status === "open";
+    const reportedQuantity = Math.min(normalized.completedQuantity ?? requestedQuantity, requestedQuantity);
+    const completedQuantity = usesIncrementalQuantity
+      ? Math.min(requestedQuantity, previousCompletedQuantity + reportedQuantity)
+      : reportedQuantity;
     const cancelsByZeroQuantity = normalized.action === "complete" && completedQuantity === 0;
 
     if (normalized.action === "cancel" || normalized.action === "unavailable" || normalized.action === "not_found" || cancelsByZeroQuantity) {
@@ -2440,6 +2681,7 @@ async function respondPurchaseTask(database, input) {
       if (task.status === "completed") {
         await removeStagingOrderPreviewForPurchaseTask(client, task.id);
       }
+      const batch = isBatchedTask ? await refreshPurchaseBatch(client, task.purchase_batch_id) : null;
       await insertAuditEvent(client, {
         action: `helper_purchase_${status}`,
         actor_helper_id: helper.id,
@@ -2449,7 +2691,7 @@ async function respondPurchaseTask(database, input) {
         before_state: { status: task.status },
         trip_id: task.trip_id,
       });
-      return result.rows[0];
+      return { ...result.rows[0], purchase_batch: batch };
     }
 
     if (task.requires_face_check && task.status === "open") {
@@ -2517,6 +2759,59 @@ async function respondPurchaseTask(database, input) {
       throw new HelperAppServiceError("invalid_status", "Face-check task needs admin approval first.");
     }
 
+    const finalizingPartialWithoutAdditionalPurchase =
+      usesIncrementalQuantity && reportedQuantity === 0 && previousCompletedQuantity > 0;
+    if (
+      completedQuantity < requestedQuantity &&
+      task.status === "open" &&
+      !task.requires_face_check &&
+      !finalizingPartialWithoutAdditionalPurchase
+    ) {
+      const result = await client.query(
+        `update helper_app.purchase_tasks
+         set status = 'open',
+             completed_quantity = $2,
+             unavailable_quantity = $3,
+             helper_note = $4,
+             idempotency_key = $5,
+             completed_at = null,
+             updated_at = now()
+         where id = $1
+         returning *`,
+        [
+          task.id,
+          completedQuantity,
+          requestedQuantity - completedQuantity,
+          normalized.helperNote,
+          normalized.idempotencyKey,
+        ],
+      );
+      const batch = await refreshPurchaseBatch(client, task.purchase_batch_id);
+      if (normalized.reportPhotos.length) {
+        await insertPurchaseReportPhotosBatch(client, {
+          helperId: helper.id,
+          photos: normalized.reportPhotos,
+          purchaseTaskId: task.id,
+          tripId: task.trip_id,
+        });
+      }
+      await insertAuditEvent(client, {
+        action: "helper_purchase_partial_reported",
+        actor_helper_id: helper.id,
+        actor_role: "helper",
+        actor_user_id: normalized.authUserId,
+        after_state: {
+          completedQuantity,
+          purchaseTaskId: task.id,
+          remainingQuantity: requestedQuantity - completedQuantity,
+          purchaseBatchId: task.purchase_batch_id,
+        },
+        before_state: { status: task.status, completedQuantity: task.completed_quantity || 0 },
+        trip_id: task.trip_id,
+      });
+      return { ...result.rows[0], purchase_batch: batch };
+    }
+
     const result = await client.query(
       `update helper_app.purchase_tasks
        set status = 'completed',
@@ -2542,7 +2837,16 @@ async function respondPurchaseTask(database, input) {
         normalized.idempotencyKey,
       ],
     );
+    if (normalized.reportPhotos.length) {
+      await insertPurchaseReportPhotosBatch(client, {
+        helperId: helper.id,
+        photos: normalized.reportPhotos,
+        purchaseTaskId: task.id,
+        tripId: task.trip_id,
+      });
+    }
     await syncStagingOrderPreview(client, result.rows[0]);
+    const batch = isBatchedTask ? await refreshPurchaseBatch(client, task.purchase_batch_id) : null;
     await insertAuditEvent(client, {
       action: task.requires_face_check ? "helper_purchase_face_check_confirmed" : "helper_purchase_completed",
       actor_helper_id: helper.id,
@@ -2557,7 +2861,131 @@ async function respondPurchaseTask(database, input) {
       before_state: { status: task.status },
       trip_id: task.trip_id,
     });
-    return result.rows[0];
+    return { ...result.rows[0], purchase_batch: batch };
+  });
+}
+
+async function respondPurchaseBatch(database, input) {
+  const normalized = normalizePurchaseBatchResponseInput(input);
+  return withTransaction(database, async (client) => {
+    const { helper, batch } = await lockPurchaseBatchForHelper(client, {
+      authUserId: normalized.authUserId,
+      purchaseBatchId: normalized.purchaseBatchId,
+    });
+    assertTripCanUseLiveWorkspace(
+      { status: batch.authorized_trip_status },
+      "Purchase batches can be updated only while the trip is active.",
+    );
+    if (batch.status !== "open") {
+      throw new HelperAppServiceError("invalid_status", "This purchase batch is already closed.");
+    }
+    if (normalized.action !== "complete") {
+      throw new HelperAppServiceError(
+        "invalid_input",
+        "A purchase batch can only be reported by the quantity purchased this time; cancel individual customer tasks instead.",
+      );
+    }
+
+    const taskResult = await client.query(
+      `select *
+       from helper_app.purchase_tasks
+       where purchase_batch_id = $1
+       order by created_at asc, id asc
+       for update`,
+      [batch.id],
+    );
+    const tasks = taskResult.rows;
+    if (tasks.some((task) => task.requires_face_check)) {
+      throw new HelperAppServiceError(
+        "invalid_status",
+        "挑臉採買仍需逐筆完成確認，請從客人任務進行回報。",
+      );
+    }
+    const activeTasks = tasks.filter(
+      (task) => !["canceled", "unavailable", "not_found"].includes(task.status),
+    );
+    const reportPhotoTask = normalized.purchaseTaskId
+      ? activeTasks.find((task) => task.id === normalized.purchaseTaskId)
+      : activeTasks[0];
+    if (normalized.purchaseTaskId && !reportPhotoTask) {
+      throw new HelperAppServiceError("forbidden", "Purchase report photos must belong to this batch.");
+    }
+    const requestedQuantity = activeTasks.reduce((sum, task) => sum + Number(task.quantity || 0), 0);
+    const reportedQuantity = activeTasks.reduce((sum, task) => sum + Number(task.completed_quantity || 0), 0);
+    const remainingQuantity = Math.max(0, requestedQuantity - reportedQuantity);
+    const addedQuantity = Math.min(normalized.completedQuantity ?? remainingQuantity, remainingQuantity);
+    const completedQuantity = reportedQuantity + addedQuantity;
+
+    let remainingToAllocate = completedQuantity;
+    const allocations = [];
+    for (const task of activeTasks) {
+      const quantity = Math.max(0, Number(task.quantity || 0));
+      const allocatedQuantity = Math.min(quantity, remainingToAllocate);
+      remainingToAllocate -= allocatedQuantity;
+      allocations.push({ task, allocatedQuantity, quantity });
+    }
+
+    const updatedTasks = [];
+    for (const allocation of allocations) {
+      const { task, allocatedQuantity, quantity } = allocation;
+      const status = allocatedQuantity >= quantity ? "completed" : "open";
+      const result = await client.query(
+        `update helper_app.purchase_tasks
+         set status = $2,
+             completed_quantity = $3,
+             unavailable_quantity = $4,
+             helper_note = $5,
+             idempotency_key = $6,
+             completed_at = case when $2 = 'completed' then coalesce(completed_at, now()) else null end,
+             updated_at = now()
+         where id = $1
+         returning *`,
+        [
+          task.id,
+          status,
+          allocatedQuantity,
+          Math.max(0, quantity - allocatedQuantity),
+          normalized.helperNote,
+          normalized.idempotencyKey,
+        ],
+      );
+      const updatedTask = result.rows[0];
+      updatedTasks.push(updatedTask);
+      if (updatedTask.status === "completed") {
+        await syncStagingOrderPreview(client, updatedTask);
+      }
+    }
+
+    if (normalized.reportPhotos.length && reportPhotoTask) {
+      await insertPurchaseReportPhotosBatch(client, {
+        helperId: helper.id,
+        photos: normalized.reportPhotos,
+        purchaseTaskId: reportPhotoTask.id,
+        tripId: batch.trip_id,
+      });
+    }
+
+    const refreshedBatch = await refreshPurchaseBatch(client, batch.id);
+    await insertAuditEvent(client, {
+      action: "helper_purchase_batch_reported",
+      actor_helper_id: helper.id,
+      actor_role: "helper",
+      actor_user_id: normalized.authUserId,
+      after_state: {
+        completedQuantity,
+        purchaseBatchId: batch.id,
+        requestedQuantity,
+        remainingQuantity: Math.max(0, requestedQuantity - completedQuantity),
+        taskAllocations: allocations.map(({ task, allocatedQuantity }) => ({
+          completedQuantity: allocatedQuantity,
+          purchaseTaskId: task.id,
+        })),
+      },
+      before_state: { reportedQuantity },
+      trip_id: batch.trip_id,
+    });
+    const representative = updatedTasks.find((task) => task.status === "open") || updatedTasks[0];
+    return { ...representative, purchase_batch: refreshedBatch };
   });
 }
 
@@ -2658,6 +3086,27 @@ async function authorizePurchaseFaceCheckUpload(database, { authUserId, purchase
     throw new HelperAppServiceError("invalid_status", "This purchase task does not need a face-check upload.");
   }
   assertTripCanUseLiveWorkspace({ status: row.trip_status }, "Face-check photos can be uploaded only while the trip is active.");
+  return row;
+}
+
+async function authorizePurchaseReportUpload(database, { authUserId, purchaseTaskId }) {
+  const result = await database.query(
+    `select pt.id, pt.trip_id, pt.helper_id, pt.status, pt.requires_face_check,
+            t.status as trip_status, hp.is_active
+     from helper_app.purchase_tasks pt
+     join helper_app.trips t on t.id = pt.trip_id
+     join helper_app.helper_profiles hp on hp.id = pt.helper_id
+     where pt.id = $1
+       and hp.auth_user_id = $2`,
+    [purchaseTaskId, authUserId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new HelperAppServiceError("forbidden", "Purchase task is not assigned to this helper.");
+  if (!row.is_active) throw new HelperAppServiceError("helper_inactive", "Helper profile is inactive.");
+  if (row.requires_face_check || row.status !== "open") {
+    throw new HelperAppServiceError("invalid_status", "This purchase task does not accept a general report photo now.");
+  }
+  assertTripCanUseLiveWorkspace({ status: row.trip_status }, "Purchase report photos can be uploaded only while the trip is active.");
   return row;
 }
 
@@ -3806,7 +4255,7 @@ async function createSettlementForEndedTrip(client, { helper, trip }) {
     );
     settlement = existing.rows[0];
   }
-  await client.query(
+  const result = await client.query(
     `insert into helper_app.settlement_line_items
        (settlement_id, staging_order_preview_id, purchase_task_id, product_name,
         quantity, original_price_jpy, product_total_jpy)
@@ -4599,6 +5048,7 @@ function normalizePurchaseTaskInput(input, { allowMissingOriginalPriceJpy = fals
     productName: requiredText(input.productName, "productName"),
     quantity,
     requiresFaceCheck: Boolean(input.requiresFaceCheck),
+    reuseSourceTaskId: optionalText(input.reuseSourceTaskId),
     salePriceTwd,
     sourceQuoteReplyId: input.sourceQuoteReplyId || null,
     sourceQuoteTaskId: input.sourceQuoteTaskId || null,
@@ -4625,6 +5075,7 @@ function normalizePurchaseReferencePhotos(photos) {
           originalFilename: optionalText(photo.originalFilename || photo.original_filename),
           sortOrder,
           storageKey: requiredText(photo.storageKey || photo.storage_key, "storageKey"),
+          reused: Boolean(photo.reused),
         };
       })
     : [];
@@ -4668,8 +5119,31 @@ function normalizePurchaseResponseInput(input) {
     helperNote: optionalText(input.helperNote),
     idempotencyKey: requiredText(input.idempotencyKey, "idempotencyKey"),
     purchaseTaskId: requiredText(input.purchaseTaskId, "purchaseTaskId"),
+    reportPhotos: normalizeRebuyPhotos(input.reportPhotos, "report"),
     remainingResolution,
     unavailableQuantity,
+  };
+}
+
+function normalizePurchaseBatchResponseInput(input) {
+  const action = requiredText(input.action || "complete", "action");
+  if (!["complete", "cancel"].includes(action)) {
+    throw new HelperAppServiceError("invalid_input", "Invalid purchase batch response action.");
+  }
+  const completedText = optionalText(input.completedQuantity);
+  const completedQuantity = completedText == null ? null : Number(completedText);
+  if (completedQuantity != null && (!Number.isInteger(completedQuantity) || completedQuantity < 0)) {
+    throw new HelperAppServiceError("invalid_input", "Completed quantity must be a non-negative integer.");
+  }
+  return {
+    action,
+    authUserId: requiredText(input.authUserId, "authUserId"),
+    completedQuantity,
+    helperNote: optionalText(input.helperNote),
+    idempotencyKey: requiredText(input.idempotencyKey, "idempotencyKey"),
+    purchaseBatchId: requiredText(input.purchaseBatchId, "purchaseBatchId"),
+    purchaseTaskId: optionalText(input.purchaseTaskId),
+    reportPhotos: normalizeRebuyPhotos(input.reportPhotos, "report"),
   };
 }
 
@@ -4877,13 +5351,20 @@ async function getQuoteTaskById(client, taskId) {
 }
 
 async function insertPurchaseTask(client, input) {
+  const purchaseBatch = await getOrCreatePurchaseBatch(client, {
+    helperId: input.helperId,
+    originalPriceJpy: input.originalPriceJpy,
+    productName: input.productName,
+    requiresFaceCheck: input.requiresFaceCheck,
+    tripId: input.tripId,
+  });
   const result = await client.query(
     `insert into helper_app.purchase_tasks
        (trip_id, helper_id, source_quote_task_id, source_quote_task_photo_id,
         source_quote_reply_id, line_community_name, product_name, quantity,
         original_price_jpy, sale_price_twd, note, requires_face_check,
-        created_by_user_id, source_rebuy_task_id)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+        created_by_user_id, source_rebuy_task_id, purchase_batch_id)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
      returning *`,
     [
       input.tripId,
@@ -4900,9 +5381,11 @@ async function insertPurchaseTask(client, input) {
       input.requiresFaceCheck,
       input.actorUserId,
       input.sourceRebuyTaskId || null,
+      purchaseBatch?.id || null,
     ],
   );
   const task = result.rows[0];
+  if (!task) return null;
   await insertAuditEvent(client, {
     action: "admin_purchase_task_created",
     actor_role: "admin",
@@ -4917,6 +5400,72 @@ async function insertPurchaseTask(client, input) {
     trip_id: task.trip_id,
   });
   return task;
+}
+
+async function getOrCreatePurchaseBatch(client, input) {
+  const groupKey = normalizePurchaseBatchKey(input);
+  const result = await client.query(
+    `insert into helper_app.purchase_batches
+       (trip_id, helper_id, group_key, product_name, original_price_jpy,
+        requires_face_check, sequence)
+     select $1, $2, $3, $4, $5, $6,
+            coalesce(max(sequence), -1) + 1
+     from helper_app.purchase_batches
+     where trip_id = $1 and group_key = $3
+     on conflict (trip_id, group_key) where status = 'open'
+     do update set updated_at = now()
+     returning *`,
+    [
+      input.tripId,
+      input.helperId,
+      groupKey,
+      input.productName,
+      input.originalPriceJpy,
+      Boolean(input.requiresFaceCheck),
+    ],
+  );
+  return result.rows[0] || null;
+}
+
+async function refreshPurchaseBatch(client, batchId) {
+  if (!batchId) return null;
+  const result = await client.query(
+    `with stats as (
+       select coalesce(sum(pt.quantity) filter (where pt.status not in ('canceled', 'unavailable', 'not_found')), 0)::int as requested_quantity,
+              coalesce(sum(pt.completed_quantity) filter (where pt.status not in ('canceled', 'unavailable', 'not_found')), 0)::int as reported_quantity,
+              coalesce(sum(greatest(pt.quantity - coalesce(pt.completed_quantity, 0), 0)) filter (where pt.status not in ('canceled', 'unavailable', 'not_found')), 0)::int as remaining_quantity,
+              count(*) filter (where pt.status in ('open', 'review_pending', 'approved_pending_helper_confirmation'))::int as pending_task_count
+       from helper_app.purchase_tasks pt
+       where pt.purchase_batch_id = $1
+     ), updated as (
+       update helper_app.purchase_batches pb
+       set status = case when stats.pending_task_count = 0 and stats.remaining_quantity = 0 then 'completed' else 'open' end,
+           reported_quantity = stats.reported_quantity,
+           version = pb.version + 1,
+           updated_at = now(),
+           closed_at = case
+             when stats.pending_task_count = 0 and stats.remaining_quantity = 0 then coalesce(pb.closed_at, now())
+             else null
+           end
+       from stats
+       where pb.id = $1
+       returning pb.*, stats.requested_quantity as calculated_requested_quantity,
+                 stats.reported_quantity as calculated_reported_quantity,
+                 stats.remaining_quantity as calculated_remaining_quantity,
+                 stats.pending_task_count as calculated_pending_task_count
+     )
+     select * from updated`,
+    [batchId],
+  );
+  const batch = result.rows[0];
+  if (!batch) return null;
+  return {
+    ...batch,
+    requested_quantity: Number(batch.calculated_requested_quantity || 0),
+    reported_quantity: Number(batch.calculated_reported_quantity || 0),
+    remaining_quantity: Number(batch.calculated_remaining_quantity || 0),
+    pending_task_count: Number(batch.calculated_pending_task_count || 0),
+  };
 }
 
 async function insertSitePhotoBatchRows(client, { batchId, helperId, photos, tripId }) {
@@ -5015,33 +5564,77 @@ async function insertQuoteTaskPhotosBatch(
   );
 }
 
-async function upsertPurchaseReferenceMediaBatch(client, photos) {
+async function insertPurchaseReferencePhotosBatch(
+  client,
+  { helperId, photos, purchaseTaskId, sourceTaskId, tripId },
+) {
   if (!photos.length) return;
-  await client.query(
-    `insert into helper_app.media_objects
-       (storage_key, media_kind, retention_status, original_filename,
-        content_type, byte_size)
-     select input.storage_key,
-            'purchase_reference_photo',
-            'order_evidence',
-            input.original_filename,
-            input.content_type,
-            input.byte_size
-     from unnest($1::text[], $2::text[], $3::text[], $4::bigint[])
-       as input(storage_key, original_filename, content_type, byte_size)
-     on conflict (storage_key) do update
-     set media_kind = 'purchase_reference_photo',
-         retention_status = 'order_evidence',
-         original_filename = coalesce(excluded.original_filename, helper_app.media_objects.original_filename),
-         content_type = coalesce(excluded.content_type, helper_app.media_objects.content_type),
-         byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)`,
+  const result = await client.query(
+    `with input as (
+       select *
+       from unnest($1::text[], $2::text[], $3::text[], $4::bigint[], $5::int[], $6::boolean[])
+         as input(storage_key, original_filename, content_type, byte_size, sort_order, reused)
+     ), validated_input as (
+       select input.*
+       from input
+       where input.reused = false
+       union all
+       select input.*
+       from input
+       join helper_app.purchase_task_photos source_photo
+         on source_photo.storage_key = input.storage_key
+        and source_photo.photo_role <> 'face_check_report'
+       join helper_app.purchase_tasks source_task
+         on source_task.id = source_photo.purchase_task_id
+        and source_task.trip_id = $8
+       where input.reused = true
+         and source_task.id = $7
+     ), upserted_media as (
+       insert into helper_app.media_objects
+         (storage_key, media_kind, retention_status, original_filename,
+          content_type, byte_size)
+       select input.storage_key,
+              'purchase_reference_photo',
+              'order_evidence',
+              input.original_filename,
+              input.content_type,
+              input.byte_size
+       from validated_input input
+       on conflict (storage_key) do update
+       set media_kind = 'purchase_reference_photo',
+           retention_status = 'order_evidence',
+           original_filename = coalesce(excluded.original_filename, helper_app.media_objects.original_filename),
+           content_type = coalesce(excluded.content_type, helper_app.media_objects.content_type),
+           byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)
+       returning storage_key
+     )
+     insert into helper_app.purchase_task_photos
+       (purchase_task_id, trip_id, helper_id, storage_key, photo_role, sort_order)
+     select $9, $8, $10, input.storage_key, 'manual_reference', input.sort_order
+     from validated_input input
+     join upserted_media using (storage_key)
+     on conflict (purchase_task_id, photo_role, sort_order) do nothing
+     returning storage_key`,
     [
       photos.map((photo) => photo.storageKey),
       photos.map((photo) => photo.originalFilename || null),
       photos.map((photo) => photo.contentType || null),
       photos.map((photo) => Number.isFinite(Number(photo.byteSize)) ? Number(photo.byteSize) : null),
+      photos.map((photo, index) => Number.isInteger(photo.sortOrder) ? photo.sortOrder : index),
+      photos.map((photo) => Boolean(photo.reused)),
+      sourceTaskId || null,
+      tripId,
+      purchaseTaskId,
+      helperId,
     ],
   );
+  const insertedCount = result.rowCount ?? result.rows.length;
+  if (photos.some((photo) => photo.reused) && insertedCount !== photos.length) {
+    if (!sourceTaskId) {
+      throw new HelperAppServiceError("invalid_input", "Reused purchase photos require a source task.");
+    }
+    throw new HelperAppServiceError("forbidden", "Selected purchase photos are not available in this connection.");
+  }
 }
 
 async function insertPurchasePhotosBatch(client, photos) {
@@ -5060,6 +5653,48 @@ async function insertPurchasePhotosBatch(client, photos) {
       photos.map((photo) => photo.storageKey),
       photos.map((photo) => photo.photoRole),
       photos.map((photo) => photo.sortOrder),
+    ],
+  );
+}
+
+async function insertPurchaseReportPhotosBatch(client, { helperId, photos, purchaseTaskId, tripId }) {
+  if (!photos.length) return;
+  await client.query(
+    `with input as (
+       select *
+       from unnest($1::text[], $2::text[], $3::text[], $4::bigint[], $5::int[])
+         as input(storage_key, original_filename, content_type, byte_size, sort_order)
+     ), upserted_media as (
+       insert into helper_app.media_objects
+         (storage_key, media_kind, retention_status, original_filename,
+          content_type, byte_size, uploaded_by_helper_id)
+       select input.storage_key, 'purchase_report_photo', 'order_evidence',
+              input.original_filename, input.content_type, input.byte_size, $6
+       from input
+       on conflict (storage_key) do update
+       set media_kind = 'purchase_report_photo',
+           retention_status = 'order_evidence',
+           original_filename = coalesce(excluded.original_filename, helper_app.media_objects.original_filename),
+           content_type = coalesce(excluded.content_type, helper_app.media_objects.content_type),
+           byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)
+       returning storage_key
+     )
+     insert into helper_app.purchase_task_photos
+       (purchase_task_id, trip_id, helper_id, storage_key, photo_role, sort_order)
+     select $7, $8, $6, input.storage_key, 'purchase_report', input.sort_order
+     from input
+     join upserted_media using (storage_key)
+     on conflict (purchase_task_id, photo_role, sort_order) do update
+     set storage_key = excluded.storage_key`,
+    [
+      photos.map((photo) => photo.storageKey),
+      photos.map((photo) => photo.originalFilename || null),
+      photos.map((photo) => photo.contentType || null),
+      photos.map((photo) => Number.isFinite(Number(photo.byteSize)) ? Number(photo.byteSize) : null),
+      photos.map((photo, index) => Number.isInteger(photo.sortOrder) ? photo.sortOrder : index),
+      helperId,
+      purchaseTaskId,
+      tripId,
     ],
   );
 }
@@ -5114,7 +5749,7 @@ async function lockPurchaseTaskForHelper(client, { authUserId, purchaseTaskId })
      join helper_app.trips t on t.id = pt.trip_id
      join helper_app.helper_profiles hp on hp.auth_user_id = $2
      where pt.id = $1
-     for update of pt, t, hp`,
+     for update of pt`,
     [purchaseTaskId, authUserId],
   );
   const row = result.rows[0];
@@ -5126,6 +5761,32 @@ async function lockPurchaseTaskForHelper(client, { authUserId, purchaseTaskId })
   if (!helper.id) throw new HelperAppServiceError("helper_not_found", "Helper profile was not found.");
   if (!helper.is_active) throw new HelperAppServiceError("helper_inactive", "Helper profile is inactive.");
   return { helper, task: row };
+}
+
+async function lockPurchaseBatchForHelper(client, { authUserId, purchaseBatchId }) {
+  const result = await client.query(
+    `select pb.*,
+            hp.id as authorized_helper_id,
+            hp.is_active as authorized_helper_is_active,
+            t.status as authorized_trip_status
+     from helper_app.purchase_batches pb
+     join helper_app.trips t on t.id = pb.trip_id
+     join helper_app.helper_profiles hp on hp.auth_user_id = $2
+     where pb.id = $1
+       and pb.helper_id = hp.id
+       and t.assigned_helper_id = hp.id
+     for update of pb, t, hp`,
+    [purchaseBatchId, authUserId],
+  );
+  const row = result.rows[0];
+  if (!row) throw new HelperAppServiceError("purchase_batch_not_found", "Purchase batch was not found.");
+  const helper = {
+    id: row.authorized_helper_id,
+    is_active: row.authorized_helper_is_active,
+  };
+  if (!helper.id) throw new HelperAppServiceError("helper_not_found", "Helper profile was not found.");
+  if (!helper.is_active) throw new HelperAppServiceError("helper_inactive", "Helper profile is inactive.");
+  return { helper, batch: row };
 }
 
 async function syncStagingOrderPreview(client, task) {
@@ -5536,6 +6197,7 @@ module.exports = {
   attachSignedStagingMergeJobUrls,
   authorizeAdminTaskPhotoUpload,
   authorizePurchaseFaceCheckUpload,
+  authorizePurchaseReportUpload,
   authorizeQuoteReplyUpload,
   authorizeRebuyReportUpload,
   authorizeSettlementEvidenceUpload,
@@ -5558,8 +6220,11 @@ module.exports = {
   getPurchaseTaskDetail,
   getHelperWorkspace,
   groupTripsByLocalDate,
+  groupPurchaseTasksForHelper,
   isHelperAppServiceError,
   listPurchaseTasks,
+  listHelperPurchaseBatches,
+  listPurchaseProductSuggestions,
   listAuthorizedHelperRebuyTasks,
   listAuthorizedHelperQuoteTaskSummaries,
   listAdminQuoteTaskSummaries,
@@ -5583,6 +6248,7 @@ module.exports = {
   repairTrip,
   recordSettlementPayment,
   respondPurchaseTask,
+  respondPurchaseBatch,
   searchCustomerNicknames,
   reviewSettlement,
   rejectStagingMergeJob,

@@ -17,6 +17,10 @@ import { useAdminLiveTrips, type AdminLiveTrip } from "./useAdminLiveTrips";
 type Trip = AdminLiveTrip;
 
 type PurchaseTaskSummary = {
+  purchase_batch_id?: string | null;
+  purchase_batch_sequence?: number | null;
+  purchase_batch_status?: string | null;
+  purchase_batch_group_key?: string | null;
   completed_quantity?: number | null;
   helper_display_name?: string | null;
   helper_note?: string | null;
@@ -378,10 +382,14 @@ function PurchaseTaskLane({
           type="button"
         >
           <span className="min-w-0">
-            <strong className="block truncate">{task.product_name || "未命名採買"}</strong>
+            <strong className="block truncate">
+              {task.product_name || "未命名採買"}
+              {Number(task.purchase_batch_sequence || 0) > 0 ? `－加單${Number(task.purchase_batch_sequence)}` : ""}
+            </strong>
             <span className="mt-0.5 block text-xs text-muted-foreground">
               {purchaseTypeLabel(task)}
               {task.line_community_name ? ` · ${task.line_community_name}` : ""}
+              {task.purchase_batch_id ? " · 同品項批次" : ""}
             </span>
           </span>
           <StatusBadge tone={tone}>
@@ -417,6 +425,9 @@ function PurchaseTaskDetail({
           <div className="min-w-0">
             <p className="text-sm text-muted-foreground">{purchaseTypeLabel(task)}</p>
             <h3 className="truncate text-xl font-semibold">{task.product_name || "未命名採買"}</h3>
+            {task.purchase_batch ? (
+              <p className="mt-1 text-xs font-medium text-primary">{task.purchase_batch.title}</p>
+            ) : null}
             <p className="mt-1 text-sm text-muted-foreground">
               {task.line_community_name || "未填客人"} · {task.helper_display_name || "未指派"}
             </p>
@@ -615,13 +626,13 @@ function adminPrimaryPurchasePhotos(photos: any[]) {
     .sort(compareNewestPhotoFirst)[0];
   if (latestFaceCheck) return [latestFaceCheck];
   return photos.filter((photo) =>
-    String(photo.photo_role || "") === "detail_reply",
+    ["detail_reply", "purchase_report"].includes(String(photo.photo_role || "")),
   );
 }
 
 function adminHiddenPurchasePhotos(photos: any[]) {
   return photos.filter((photo) =>
-    !["detail_reply", "face_check_report"].includes(String(photo.photo_role || "")),
+    !["detail_reply", "purchase_report", "face_check_report"].includes(String(photo.photo_role || "")),
   );
 }
 

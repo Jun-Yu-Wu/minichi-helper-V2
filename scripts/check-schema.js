@@ -14,6 +14,7 @@ async function main() {
       "helper_profiles",
       "media_objects",
       "purchase_task_photos",
+      "purchase_batches",
       "purchase_tasks",
       "quote_photo_replies",
       "quote_task_photos",
@@ -54,10 +55,10 @@ async function main() {
       `select table_name, column_name
        from information_schema.columns
        where table_schema = 'helper_app'
-         and table_name in ('purchase_tasks', 'settlements', 'staging_order_previews')
+         and table_name in ('purchase_batches', 'purchase_tasks', 'settlements', 'staging_order_previews')
          and column_name = any($1::text[])
        order by column_name`,
-      [["source_rebuy_task_id", "transport_claim_note"]],
+      [["purchase_batch_id", "source_rebuy_task_id", "transport_claim_note"]],
     );
     console.log(
       JSON.stringify(
