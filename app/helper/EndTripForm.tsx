@@ -20,7 +20,7 @@ export function EndTripForm({
 
   if (!confirming) {
     return (
-      <div className="grid gap-1">
+    <div className="trip-end-form grid gap-1 rounded-lg border p-3">
         <Button
           className="mx-auto w-fit"
           disabled={pending}
@@ -37,7 +37,7 @@ export function EndTripForm({
   }
 
   return (
-    <form action={action} className="grid gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-3">
+    <form action={action} className="trip-end-form grid gap-3 rounded-lg border p-3">
       <input name="tripId" type="hidden" value={tripId} />
       <input name="expectedVersion" type="hidden" value={expectedVersion} />
       <p className="text-sm font-semibold text-destructive">確認要結束這趟行程？</p>

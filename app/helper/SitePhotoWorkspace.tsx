@@ -46,7 +46,7 @@ export function SitePhotoWorkspace({
   const batches = batchesResource.data || [];
 
   return (
-    <section className="grid gap-4 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
+    <section className="workspace-block trip-task-surface grid gap-4 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
       {!localBatchDetailOpen ? (
         <BackButton
           label="返回連線"
@@ -55,9 +55,10 @@ export function SitePhotoWorkspace({
           variant="outline"
         />
       ) : null}
-      <div>
-        <p className="text-xs font-semibold uppercase text-muted-foreground">區塊一</p>
-        <h5 className="mt-1 text-xl font-semibold tracking-tight">現場大圖</h5>
+      <div className="trip-panel-heading">
+        <p className="trip-panel-heading__kicker">Block 01 · field photos</p>
+        <h5 className="display-type mt-1 text-xl font-semibold tracking-tight">現場大圖</h5>
+        <p className="mt-1 max-w-xl text-sm leading-6 text-muted-foreground">先拍全貌，再把需要管理員看的批次送出。</p>
       </div>
       <SitePhotoUploader
         onBatchSubmitted={() => void batchesResource.refresh()}
@@ -90,7 +91,7 @@ export function SitePhotoWorkspace({
         <div className="grid gap-3 border-t pt-4">
           {batches.map((batch) => (
             <Link
-              className="flex items-center justify-between gap-3 rounded-lg border bg-background p-3 transition hover:border-primary/30 hover:bg-accent/40"
+              className="trip-photo-batch-row flex items-center justify-between gap-3 rounded-lg border bg-background p-3"
               href={`/helper?tripId=${tripId}&panel=site&batchId=${batch.id}`}
               key={batch.id}
             >

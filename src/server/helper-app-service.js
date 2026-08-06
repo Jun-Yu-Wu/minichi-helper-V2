@@ -18,6 +18,22 @@ class HelperAppServiceError extends Error {
   }
 }
 
+const uploadAuthorizationInflight = new Map();
+
+function shareUploadAuthorization(key, loader) {
+  const existing = uploadAuthorizationInflight.get(key);
+  if (existing) return existing;
+  const request = Promise.resolve()
+    .then(loader)
+    .finally(() => {
+      if (uploadAuthorizationInflight.get(key) === request) {
+        uploadAuthorizationInflight.delete(key);
+      }
+    });
+  uploadAuthorizationInflight.set(key, request);
+  return request;
+}
+
 const ADMIN_DASHBOARD_SECTIONS = [
   "helpers",
   "trips",
@@ -1973,7 +1989,14 @@ async function createTrip(database, input) {
   return result.rows[0];
 }
 
-async function authorizeSitePhotoUpload(database, { authUserId, tripId }) {
+async function authorizeSitePhotoUpload(database, input) {
+  return shareUploadAuthorization(
+    `site:${input.authUserId}:${input.tripId}`,
+    () => authorizeSitePhotoUploadUncached(database, input),
+  );
+}
+
+async function authorizeSitePhotoUploadUncached(database, { authUserId, tripId }) {
   const result = await database.query(
     `select t.id, t.status, t.business_date, t.timezone, t.assigned_helper_id,
             hp.id as helper_id, hp.is_active
@@ -2097,59 +2120,100 @@ async function createQuoteTask(
       }));
     }
 
-    const taskResult = await client.query(
-      `insert into helper_app.quote_tasks
-         (trip_id, helper_id, task_type, product_name, instruction, created_by_user_id)
-       values ($1, $2, $3, $4, $5, $6)
-       returning *`,
-      [
-        trip.id,
-        trip.assigned_helper_id,
-        normalized.taskType,
-        normalized.productName,
-        normalized.instruction,
-        actorUserId,
-      ],
-    );
-    const task = taskResult.rows[0];
-
-    if (normalized.uploadedPhotos.length > 0) {
-      await upsertQuoteTaskMediaBatch(client, taskPhotos);
-    } else {
-      await client.query(
-        `update helper_app.media_objects
-         set media_kind = 'quote_task_photo',
-             retention_status = 'task_evidence'
-         where storage_key = any($1::text[])`,
-        [taskPhotos.map((photo) => photo.storageKey)],
-      );
-    }
-    await insertQuoteTaskPhotosBatch(client, {
+    const taskResult = await insertQuoteTaskWithPhotos(client, {
+      actorUserId,
       instruction: normalized.instruction,
       photos: taskPhotos,
       productName: normalized.productName,
-      taskId: task.id,
+      taskType: normalized.taskType,
       tripId: trip.id,
       helperId: trip.assigned_helper_id,
+      uploaded: normalized.uploadedPhotos.length > 0,
     });
-
-    await insertAuditEvent(client, {
-      action: "admin_quote_task_created",
-      actor_role: "admin",
-      actor_user_id: actorUserId,
-      after_state: {
-        photoCount: taskPhotos.length,
-        taskId: task.id,
-        taskType: task.task_type,
-      },
-      before_state: {},
-      trip_id: trip.id,
-    });
+    const task = taskResult.rows[0];
     // The create action only needs the inserted task acknowledgement. Avoid a
     // second aggregate read of every task photo on the publish critical path;
     // the scoped quote-task detail route reads the full task when needed.
     return task;
   });
+}
+
+async function insertQuoteTaskWithPhotos(
+  client,
+  { actorUserId, helperId, instruction, photos, productName, taskType, tripId, uploaded },
+) {
+  return client.query(
+    `with task as (
+       insert into helper_app.quote_tasks
+         (trip_id, helper_id, task_type, product_name, instruction, created_by_user_id)
+       values ($1, $2, $3, $4, $5, $6)
+       returning *
+     ), upserted_media as (
+       insert into helper_app.media_objects
+         (storage_key, media_kind, retention_status, original_filename,
+          content_type, byte_size)
+       select input.storage_key, 'quote_task_photo', 'task_evidence',
+              input.original_filename, input.content_type, input.byte_size
+       from unnest($7::text[], $8::text[], $9::text[], $10::bigint[])
+         as input(storage_key, original_filename, content_type, byte_size)
+       where $14::boolean
+       on conflict (storage_key) do update
+       set media_kind = 'quote_task_photo',
+           retention_status = 'task_evidence',
+           original_filename = excluded.original_filename,
+           content_type = excluded.content_type,
+           byte_size = excluded.byte_size
+       returning storage_key
+     ), updated_media as (
+       update helper_app.media_objects
+       set media_kind = 'quote_task_photo',
+           retention_status = 'task_evidence'
+       where not $14::boolean
+         and storage_key = any($7::text[])
+       returning storage_key
+     ), task_photos as (
+       insert into helper_app.quote_task_photos
+         (quote_task_id, trip_id, helper_id, source_site_photo_id, storage_key,
+          product_name, instruction, sort_order)
+       select task.id, $1, $2, input.source_site_photo_id, input.storage_key,
+              $4, $5, input.sort_order
+       from task
+       cross join unnest($11::uuid[], $7::text[], $12::int[])
+         as input(source_site_photo_id, storage_key, sort_order)
+       returning id
+     ), audit as (
+       insert into helper_app.trip_audit_events
+         (trip_id, actor_user_id, actor_helper_id, actor_role, action,
+          before_state, after_state, reason)
+       select task.trip_id, $6, null, 'admin', 'admin_quote_task_created',
+              '{}'::jsonb,
+              jsonb_build_object(
+                'photoCount', $13::int,
+                'taskId', task.id,
+                'taskType', task.task_type
+              ),
+              null
+       from task
+       returning id
+     )
+     select * from task`,
+    [
+      tripId,
+      helperId,
+      taskType,
+      productName,
+      instruction,
+      actorUserId,
+      photos.map((photo) => photo.storageKey),
+      photos.map((photo) => photo.originalFilename || null),
+      photos.map((photo) => photo.contentType || null),
+      photos.map((photo) => Number.isFinite(Number(photo.byteSize)) ? Number(photo.byteSize) : null),
+      photos.map((photo) => photo.sourceSitePhotoId || null),
+      photos.map((photo, index) => Number.isInteger(photo.sortOrder) ? photo.sortOrder : index),
+      photos.length,
+      Boolean(uploaded),
+    ],
+  );
 }
 
 async function createPurchaseTask(database, input) {
@@ -3033,7 +3097,14 @@ async function reviewFaceCheckPurchaseTask(database, input) {
   });
 }
 
-async function authorizeAdminTaskPhotoUpload(database, { tripId }) {
+async function authorizeAdminTaskPhotoUpload(database, input) {
+  return shareUploadAuthorization(
+    `admin-task:${input.tripId}`,
+    () => authorizeAdminTaskPhotoUploadUncached(database, input),
+  );
+}
+
+async function authorizeAdminTaskPhotoUploadUncached(database, { tripId }) {
   const result = await database.query(
     `select id, status
      from helper_app.trips
@@ -3050,7 +3121,14 @@ async function authorizeAdminTaskPhotoUpload(database, { tripId }) {
   return trip;
 }
 
-async function authorizeQuoteReplyUpload(database, { authUserId, quoteTaskPhotoId }) {
+async function authorizeQuoteReplyUpload(database, input) {
+  return shareUploadAuthorization(
+    `quote-reply:${input.authUserId}:${input.quoteTaskPhotoId}`,
+    () => authorizeQuoteReplyUploadUncached(database, input),
+  );
+}
+
+async function authorizeQuoteReplyUploadUncached(database, { authUserId, quoteTaskPhotoId }) {
   const result = await database.query(
     `select qtp.id, qtp.trip_id, qtp.helper_id, t.status, t.business_date, t.timezone,
             hp.is_active
@@ -3068,7 +3146,14 @@ async function authorizeQuoteReplyUpload(database, { authUserId, quoteTaskPhotoI
   return row;
 }
 
-async function authorizePurchaseFaceCheckUpload(database, { authUserId, purchaseTaskId }) {
+async function authorizePurchaseFaceCheckUpload(database, input) {
+  return shareUploadAuthorization(
+    `purchase-face:${input.authUserId}:${input.purchaseTaskId}`,
+    () => authorizePurchaseFaceCheckUploadUncached(database, input),
+  );
+}
+
+async function authorizePurchaseFaceCheckUploadUncached(database, { authUserId, purchaseTaskId }) {
   const result = await database.query(
     `select pt.id, pt.trip_id, pt.helper_id, pt.status, pt.requires_face_check,
             t.status as trip_status, hp.is_active
@@ -3089,7 +3174,14 @@ async function authorizePurchaseFaceCheckUpload(database, { authUserId, purchase
   return row;
 }
 
-async function authorizePurchaseReportUpload(database, { authUserId, purchaseTaskId }) {
+async function authorizePurchaseReportUpload(database, input) {
+  return shareUploadAuthorization(
+    `purchase-report:${input.authUserId}:${input.purchaseTaskId}`,
+    () => authorizePurchaseReportUploadUncached(database, input),
+  );
+}
+
+async function authorizePurchaseReportUploadUncached(database, { authUserId, purchaseTaskId }) {
   const result = await database.query(
     `select pt.id, pt.trip_id, pt.helper_id, pt.status, pt.requires_face_check,
             t.status as trip_status, hp.is_active
@@ -3110,7 +3202,14 @@ async function authorizePurchaseReportUpload(database, { authUserId, purchaseTas
   return row;
 }
 
-async function authorizeRebuyReportUpload(database, { authUserId, rebuyTaskId }) {
+async function authorizeRebuyReportUpload(database, input) {
+  return shareUploadAuthorization(
+    `rebuy-report:${input.authUserId}:${input.rebuyTaskId}`,
+    () => authorizeRebuyReportUploadUncached(database, input),
+  );
+}
+
+async function authorizeRebuyReportUploadUncached(database, { authUserId, rebuyTaskId }) {
   const result = await database.query(
     `select rt.id, rt.status, rt.assigned_helper_id, rt.claimed_helper_id,
             hp.id as helper_id, hp.is_active
@@ -3190,56 +3289,90 @@ async function submitQuotePhotoReply(
     }
     assertReplyMatchesTaskType(taskPhoto.task_type, replyToSave);
 
-    if (normalized.detailPhotos.length) {
-      await client.query(
-        `insert into helper_app.media_objects
+    const replyResult = await client.query(
+      `with upserted_media as (
+         insert into helper_app.media_objects
            (storage_key, media_kind, retention_status, original_filename,
             content_type, byte_size, uploaded_by_helper_id)
-         select photo.storage_key,
-                'quote_detail_reply_photo',
-                'task_evidence',
-                photo.original_filename,
-                photo.content_type,
-                photo.byte_size,
-                $2
+         select photo.storage_key, 'quote_detail_reply_photo', 'task_evidence',
+                photo.original_filename, photo.content_type, photo.byte_size, $2
          from jsonb_to_recordset($1::jsonb) as photo(
            storage_key text,
            original_filename text,
            content_type text,
            byte_size bigint
          )
+         where $13::boolean
          on conflict (storage_key) do update
          set media_kind = 'quote_detail_reply_photo',
              retention_status = 'task_evidence',
              original_filename = coalesce(excluded.original_filename, helper_app.media_objects.original_filename),
              content_type = coalesce(excluded.content_type, helper_app.media_objects.content_type),
-             byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)`,
-        [
-          JSON.stringify(normalized.detailPhotos),
-          taskPhoto.authorized_helper_id,
-        ],
-      );
-    }
-
-    const replyResult = await client.query(
-      `with inserted as (
+             byte_size = coalesce(excluded.byte_size, helper_app.media_objects.byte_size)
+       ), inserted as (
          insert into helper_app.quote_photo_replies
            (quote_task_photo_id, quote_task_id, trip_id, helper_id, idempotency_key,
             price_jpy, note, detail_photos)
-         values ($1, $2, $3, $4, $5, $6, $7, $8::jsonb)
+         values ($3, $4, $5, $6, $7, $8, $9, $10::jsonb)
          on conflict (quote_task_photo_id, helper_id, idempotency_key) do nothing
          returning *
+       ), reply as (
+         select * from inserted
+         union all
+         select *
+         from helper_app.quote_photo_replies
+         where quote_task_photo_id = $3
+           and helper_id = $6
+           and idempotency_key = $7
+           and not exists (select 1 from inserted)
+         limit 1
+       ), updated_photo as (
+         update helper_app.quote_task_photos
+         set reply_status = 'replied',
+             needs_review = false,
+             updated_at = now()
+         where id = $3
+         returning quote_task_id
+       ), summary as (
+         select u.quote_task_id,
+                count(qtp.id)::int as total,
+                count(qtp.id) filter (where qtp.reply_status = 'replied')::int as replied,
+                bool_or(qtp.needs_review)::boolean as has_review
+         from updated_photo u
+         join helper_app.quote_task_photos qtp on qtp.quote_task_id = u.quote_task_id
+         group by u.quote_task_id
+       ), updated_task as (
+         update helper_app.quote_tasks qt
+         set status = case
+               when summary.has_review then 'needs_review'
+               when summary.total > 0 and summary.total = summary.replied then 'completed'
+               else 'open'
+             end,
+             updated_at = now()
+         from summary
+         where qt.id = summary.quote_task_id
+         returning qt.id
+       ), audit as (
+         insert into helper_app.trip_audit_events
+           (trip_id, actor_user_id, actor_helper_id, actor_role, action,
+            before_state, after_state, reason)
+         select $5, $11, $6, 'helper', 'helper_quote_photo_replied',
+                '{}'::jsonb,
+                jsonb_build_object(
+                  'detailPhotoCount', $12::int,
+                  'priceJpy', $8,
+                  'quoteTaskId', $4,
+                  'quoteTaskPhotoId', $3,
+                  'replyId', reply.id
+                ),
+                null
+         from reply
+         returning id
        )
-       select * from inserted
-       union all
-       select *
-       from helper_app.quote_photo_replies
-       where quote_task_photo_id = $1
-         and helper_id = $4
-         and idempotency_key = $5
-         and not exists (select 1 from inserted)
-       limit 1`,
+       select * from reply`,
       [
+        JSON.stringify(normalized.detailPhotos),
+        taskPhoto.authorized_helper_id,
         taskPhoto.id,
         taskPhoto.quote_task_id,
         taskPhoto.trip_id,
@@ -3248,54 +3381,12 @@ async function submitQuotePhotoReply(
         replyToSave.priceJpy,
         replyToSave.note,
         JSON.stringify(replyToSave.detailPhotos),
+        authUserId,
+        replyToSave.detailPhotos.length,
+        Boolean(normalized.detailPhotos.length),
       ],
     );
     const reply = replyResult.rows[0];
-
-    await client.query(
-      `with updated_photo as (
-         update helper_app.quote_task_photos
-         set reply_status = 'replied',
-             needs_review = false,
-             updated_at = now()
-         where id = $1
-         returning quote_task_id
-       ),
-       summary as (
-         select u.quote_task_id,
-                count(qtp.id)::int as total,
-                count(qtp.id) filter (where qtp.reply_status = 'replied')::int as replied,
-                bool_or(qtp.needs_review)::boolean as has_review
-         from updated_photo u
-         join helper_app.quote_task_photos qtp on qtp.quote_task_id = u.quote_task_id
-         group by u.quote_task_id
-       )
-       update helper_app.quote_tasks qt
-       set status = case
-             when summary.has_review then 'needs_review'
-             when summary.total > 0 and summary.total = summary.replied then 'completed'
-             else 'open'
-           end,
-           updated_at = now()
-       from summary
-       where qt.id = summary.quote_task_id`,
-      [taskPhoto.id],
-    );
-    await insertAuditEvent(client, {
-      action: "helper_quote_photo_replied",
-      actor_helper_id: taskPhoto.authorized_helper_id,
-      actor_role: "helper",
-      actor_user_id: authUserId,
-      after_state: {
-        detailPhotoCount: replyToSave.detailPhotos.length,
-        priceJpy: replyToSave.priceJpy,
-        quoteTaskId: taskPhoto.quote_task_id,
-        quoteTaskPhotoId: taskPhoto.id,
-        replyId: reply.id,
-      },
-      before_state: {},
-      trip_id: taskPhoto.trip_id,
-    });
     return reply;
   });
 }
@@ -5351,24 +5442,52 @@ async function getQuoteTaskById(client, taskId) {
 }
 
 async function insertPurchaseTask(client, input) {
-  const purchaseBatch = await getOrCreatePurchaseBatch(client, {
-    helperId: input.helperId,
-    originalPriceJpy: input.originalPriceJpy,
-    productName: input.productName,
-    requiresFaceCheck: input.requiresFaceCheck,
-    tripId: input.tripId,
-  });
   const result = await client.query(
-    `insert into helper_app.purchase_tasks
-       (trip_id, helper_id, source_quote_task_id, source_quote_task_photo_id,
-        source_quote_reply_id, line_community_name, product_name, quantity,
-        original_price_jpy, sale_price_twd, note, requires_face_check,
-        created_by_user_id, source_rebuy_task_id, purchase_batch_id)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-     returning *`,
+    `with purchase_batch as (
+       insert into helper_app.purchase_batches
+         (trip_id, helper_id, group_key, product_name, original_price_jpy,
+          requires_face_check, sequence)
+       select $1, $2, $3, $4, $5, $6,
+              coalesce(max(sequence), -1) + 1
+       from helper_app.purchase_batches
+       where trip_id = $1 and group_key = $3
+       on conflict (trip_id, group_key) where status = 'open'
+       do update set updated_at = now()
+       returning id
+     ), task as (
+       insert into helper_app.purchase_tasks
+         (trip_id, helper_id, source_quote_task_id, source_quote_task_photo_id,
+          source_quote_reply_id, line_community_name, product_name, quantity,
+          original_price_jpy, sale_price_twd, note, requires_face_check,
+          created_by_user_id, source_rebuy_task_id, purchase_batch_id)
+       select $1, $2, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18,
+              purchase_batch.id
+       from purchase_batch
+       returning *
+     ), audit as (
+       insert into helper_app.trip_audit_events
+         (trip_id, actor_user_id, actor_helper_id, actor_role, action,
+          before_state, after_state, reason)
+       select task.trip_id, $17, null, 'admin', 'admin_purchase_task_created',
+              '{}'::jsonb,
+              jsonb_build_object(
+                'purchaseTaskId', task.id,
+                'requiresFaceCheck', task.requires_face_check,
+                'sourceRebuyTaskId', task.source_rebuy_task_id,
+                'sourceQuoteTaskPhotoId', task.source_quote_task_photo_id
+              ),
+              null
+       from task
+       returning id
+     )
+     select * from task`,
     [
       input.tripId,
       input.helperId,
+      normalizePurchaseBatchKey(input),
+      input.productName,
+      input.originalPriceJpy,
+      Boolean(input.requiresFaceCheck),
       input.sourceQuoteTaskId || null,
       input.sourceQuoteTaskPhotoId || null,
       input.sourceQuoteReplyId || null,
@@ -5378,27 +5497,12 @@ async function insertPurchaseTask(client, input) {
       input.originalPriceJpy,
       input.salePriceTwd,
       input.note,
-      input.requiresFaceCheck,
+      Boolean(input.requiresFaceCheck),
       input.actorUserId,
       input.sourceRebuyTaskId || null,
-      purchaseBatch?.id || null,
     ],
   );
   const task = result.rows[0];
-  if (!task) return null;
-  await insertAuditEvent(client, {
-    action: "admin_purchase_task_created",
-    actor_role: "admin",
-    actor_user_id: input.actorUserId,
-    after_state: {
-      purchaseTaskId: task.id,
-      requiresFaceCheck: task.requires_face_check,
-      sourceRebuyTaskId: task.source_rebuy_task_id,
-      sourceQuoteTaskPhotoId: task.source_quote_task_photo_id,
-    },
-    before_state: {},
-    trip_id: task.trip_id,
-  });
   return task;
 }
 

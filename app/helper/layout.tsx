@@ -15,7 +15,7 @@ export default async function HelperLayout({
   return (
     <SitePhotoUploadProvider>
       <SessionBar email={user.email || ""} role="小幫手" title="小幫手工作台" />
-      <main className="mx-auto grid w-full max-w-7xl gap-6 px-4 py-5 sm:px-5 sm:py-7">
+      <main className="app-main helper-main mx-auto grid w-full gap-6 px-4 py-6 sm:px-5 sm:py-8">
         <HelperWorkspaceNavigation />
         {children}
       </main>

@@ -41,16 +41,21 @@ editor. Any photo that the current role is allowed to open can expose the same
 edit entry point, while the available workflow actions remain restricted by
 photo context, role, and existing authorization rules.
 
-- The original photo is immutable. Saving an edit creates a derived photo
-  version and never overwrites the original media record or R2 object.
+- The original photo is immutable once it is a formal workflow media record.
+  For an already-persisted photo, completing an edit exports a separate local
+  file for Web Share or device saving and never overwrites the original media
+  record or R2 object. For a newly selected but not-yet-submitted draft photo,
+  completing an edit replaces the draft file, and only the edited file is sent
+  through the workflow upload path.
 - The first version includes text, freehand pen, line/arrow, rectangle,
   circle/ellipse, color and stroke width controls, undo/redo, and clearing the
   current annotations.
 - The editor is mobile-first and must support touch-oriented editing with clear
   pending, success, failure, and retry states.
-- The first version provides saving the edited version, sharing, and download.
-  Workflow attachment is phased and is not treated as a universal first-version
-  replacement action.
+- The first version provides sharing and device saving for edits of existing
+  photos, with download fallback. Workflow attachment is phased and is not
+  treated as a universal replacement action. Draft-photo editing happens before
+  the normal workflow upload, so the edited draft is the uploaded source.
 - Sharing and device saving use the Web Share API where supported. Because a
   browser cannot guarantee direct writing to every phone photo library, the
   implementation must retain a download or equivalent system-share fallback.

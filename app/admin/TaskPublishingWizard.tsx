@@ -129,9 +129,9 @@ function TaskStep({
   title: string;
 }) {
   return (
-    <section className="grid gap-3 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
+    <section className="admin-step grid gap-3 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
       <div className="flex items-center gap-2">
-        <span className="flex size-7 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+        <span className="admin-step__number flex size-7 items-center justify-center rounded-full text-xs font-semibold text-primary-foreground">
           {number}
         </span>
         <h3 className="font-semibold">{title}</h3>
@@ -157,7 +157,7 @@ function SelectionCard({
   return (
     <button
       aria-pressed={active}
-      className={`rounded-xl border p-4 text-left shadow-sm transition ${
+      className={`admin-selection-card rounded-xl border p-4 text-left shadow-sm ${
         active
           ? "border-primary bg-primary/5 ring-1 ring-primary"
           : "bg-card hover:border-primary/30 hover:bg-accent/40"

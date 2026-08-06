@@ -10,6 +10,7 @@ import {
   ChevronRight,
   ImageUp,
   LoaderCircle,
+  Pencil,
   RefreshCw,
   Send,
   X,
@@ -22,6 +23,7 @@ import {
 import { BackButton } from "../components/BackButton";
 import { InsightBanner, StatusBadge } from "../components/OperationsUi";
 import { PhotoFileInput } from "../components/PhotoFileInput";
+import { PhotoDraftEditor } from "../components/PhotoAnnotationEditor";
 import { Button } from "../components/ui/button";
 import {
   type BatchStatus,
@@ -34,6 +36,11 @@ import {
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
 const MAX_IMAGE_EDGE = 2400;
 const JPEG_QUALITY = 0.84;
+
+type PendingSitePhotoUpload = {
+  file: File;
+  promise: Promise<SelectedPhoto>;
+};
 
 export function SitePhotoUploader({
   onBatchSubmitted,
@@ -50,9 +57,11 @@ export function SitePhotoUploader({
   const [photos, setPhotos] = useState<SelectedPhoto[]>(() => savedSession?.photos || []);
   const [batches, setBatches] = useState<LocalBatch[]>(() => savedSession?.batches || []);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
+  const [editingPhotoId, setEditingPhotoId] = useState<string | null>(null);
   const [isPreparing, setIsPreparing] = useState(false);
   const photosRef = useRef<SelectedPhoto[]>([]);
   const batchesRef = useRef<LocalBatch[]>([]);
+  const uploadPromisesRef = useRef(new Map<string, PendingSitePhotoUpload>());
 
   useEffect(() => {
     photosRef.current = photos;
@@ -68,19 +77,22 @@ export function SitePhotoUploader({
       const preparedPhotos = await Promise.all(
         imageFiles.map((file, index) => preparePhoto(file, photosRef.current.length + index)),
       );
+      const nextPhotos = preparedPhotos.map((photo, index) => ({
+        ...photo,
+        sortOrder: photosRef.current.length + index,
+      }));
       setPhotos((current) => [
         ...current,
-        ...preparedPhotos.map((photo, index) => ({
-          ...photo,
-          sortOrder: current.length + index,
-        })),
+        ...nextPhotos.map((photo, index) => ({ ...photo, sortOrder: current.length + index })),
       ]);
+      for (const photo of nextPhotos) void startPhotoUpload(photo).catch(() => undefined);
     } finally {
       setIsPreparing(false);
     }
   }
 
   function removePhoto(clientPhotoId: string) {
+    if (editingPhotoId === clientPhotoId) setEditingPhotoId(null);
     setPhotos((current) => {
       const removed = current.find((photo) => photo.clientPhotoId === clientPhotoId);
       if (removed) URL.revokeObjectURL(removed.objectUrl);
@@ -88,6 +100,33 @@ export function SitePhotoUploader({
         current.filter((photo) => photo.clientPhotoId !== clientPhotoId),
       );
     });
+  }
+
+  function saveEditedPhoto(file: File) {
+    if (!editingPhotoId) return;
+    const currentPhoto = photos.find((photo) => photo.clientPhotoId === editingPhotoId);
+    if (!currentPhoto) return;
+    const editedPhoto: SelectedPhoto = {
+      ...currentPhoto,
+      byteSize: file.size,
+      contentType: file.type || "image/png",
+      error: file.size > MAX_UPLOAD_BYTES
+        ? "編輯後照片超過 8MB，請減少標註或縮小照片。"
+        : undefined,
+      file,
+      objectUrl: URL.createObjectURL(file),
+      originalFilename: file.name,
+      storageKey: undefined,
+      uploadError: undefined,
+      uploadStatus: "pending",
+    };
+    URL.revokeObjectURL(currentPhoto.objectUrl);
+    setPhotos((current) => current.map((photo) => {
+      if (photo.clientPhotoId !== editingPhotoId) return photo;
+      return editedPhoto;
+    }));
+    setEditingPhotoId(null);
+    if (!editedPhoto.error) void startPhotoUpload(editedPhoto).catch(() => undefined);
   }
 
   function movePhoto(clientPhotoId: string, direction: -1 | 1) {
@@ -109,7 +148,7 @@ export function SitePhotoUploader({
       photos: photos.map((photo) => ({
         ...photo,
         uploadError: undefined,
-        uploadStatus: photo.storageKey ? "uploaded" : "pending",
+        uploadStatus: photo.storageKey ? "uploaded" : photo.uploadStatus,
       })),
       status: "uploading",
     };
@@ -142,7 +181,10 @@ export function SitePhotoUploader({
           uploadStatus: "uploading",
         });
         try {
-          const uploaded = await uploadPhoto(photo);
+          const pendingUpload = uploadPromisesRef.current.get(photo.clientPhotoId);
+          const uploaded = pendingUpload && pendingUpload.file === photo.file
+            ? await pendingUpload.promise
+            : await startPhotoUpload(photo);
           updateBatchPhoto(batch.id, uploaded);
           return uploaded;
         } catch (error) {
@@ -188,7 +230,7 @@ export function SitePhotoUploader({
       uploadStatus: "uploading",
     });
     try {
-      const uploaded = await uploadPhoto(photo);
+      const uploaded = await startPhotoUpload(photo);
       const nextPhotos = batch.photos.map((item) =>
         item.clientPhotoId === clientPhotoId ? uploaded : item,
       );
@@ -281,6 +323,37 @@ export function SitePhotoUploader({
       uploadError: undefined,
       uploadStatus: "uploaded",
     };
+  }
+
+  function startPhotoUpload(photo: SelectedPhoto) {
+    const existing = uploadPromisesRef.current.get(photo.clientPhotoId);
+    if (existing && existing.file === photo.file) return existing.promise;
+    const file = photo.file;
+    updateCurrentPhoto(photo.clientPhotoId, { uploadError: undefined, uploadStatus: "uploading" }, file);
+    const uploadPromise = uploadPhoto(photo)
+      .then((uploaded) => {
+        updateCurrentPhoto(photo.clientPhotoId, uploaded, file);
+        const pending = uploadPromisesRef.current.get(photo.clientPhotoId);
+        if (pending?.file === file && pending.promise === uploadPromise) uploadPromisesRef.current.delete(photo.clientPhotoId);
+        return uploaded;
+      })
+      .catch((error) => {
+        const message = errorMessage(error, "照片上傳失敗。");
+        updateCurrentPhoto(photo.clientPhotoId, { uploadError: message, uploadStatus: "failed" }, file);
+        const pending = uploadPromisesRef.current.get(photo.clientPhotoId);
+        if (pending?.file === file && pending.promise === uploadPromise) uploadPromisesRef.current.delete(photo.clientPhotoId);
+        throw error;
+      });
+    uploadPromisesRef.current.set(photo.clientPhotoId, { file, promise: uploadPromise });
+    return uploadPromise;
+  }
+
+  function updateCurrentPhoto(clientPhotoId: string, patch: Partial<SelectedPhoto>, file?: File) {
+    setPhotos((current) => current.map((photo) =>
+      photo.clientPhotoId === clientPhotoId && (!file || photo.file === file)
+        ? { ...photo, ...patch }
+        : photo,
+    ));
   }
 
   function updateBatch(batchId: string, patch: Partial<LocalBatch>) {
@@ -378,7 +451,13 @@ export function SitePhotoUploader({
                   </span>
                 </div>
                 <div className="mt-2 grid gap-2">
-                  <div className="grid grid-cols-3 gap-1">
+                  <div className="grid grid-cols-4 gap-1">
+                    <IconButton
+                      label="編輯照片"
+                      onClick={() => setEditingPhotoId(photo.clientPhotoId)}
+                    >
+                      <Pencil className="size-4" />
+                    </IconButton>
                     <IconButton
                       disabled={index === 0}
                       label="往前移"
@@ -393,10 +472,7 @@ export function SitePhotoUploader({
                     >
                       <ArrowRight className="size-4" />
                     </IconButton>
-                    <IconButton
-                      label="移除照片"
-                      onClick={() => removePhoto(photo.clientPhotoId)}
-                    >
+                    <IconButton label="移除照片" onClick={() => removePhoto(photo.clientPhotoId)}>
                       <X className="size-4" />
                     </IconButton>
                   </div>
@@ -449,6 +525,19 @@ export function SitePhotoUploader({
           })}
         </div>
       ) : null}
+
+      {editingPhotoId ? (() => {
+        const photo = photos.find((item) => item.clientPhotoId === editingPhotoId);
+        return photo ? (
+          <PhotoDraftEditor
+            alt="現場照片"
+            file={photo.file}
+            objectUrl={photo.objectUrl}
+            onCancel={() => setEditingPhotoId(null)}
+            onSaved={saveEditedPhoto}
+          />
+        ) : null;
+      })() : null}
     </div>
   );
 }

@@ -25,11 +25,15 @@ Any photo that the current role is authorized to open can expose the same edit
 entry point, while workflow actions after editing remain restricted by the
 photo's context and role permissions.
 
-The original photo is immutable. Saving an edit creates a derived media version
-linked to the original photo and never overwrites the original media record or
-R2 object. The derived version should retain source linkage, editor identity,
-creation time, durable private R2 `storage_key`, and the annotation/edit
-manifest needed for future re-editing or audit inspection.
+The original photo is immutable once it is a formal workflow media record. For
+an already-persisted photo, completing an edit exports a separate local file for
+sharing or device saving and never overwrites the original media record or R2
+object. For a newly selected but not-yet-submitted draft photo, completing an
+edit replaces the draft `File`; the edited file is the only file sent through
+the workflow's normal upload and commit path. A later explicit in-app save
+feature may create a durable derived media version with source linkage, editor
+identity, creation time, durable private R2 `storage_key`, and the
+annotation/edit manifest needed for future re-editing or audit inspection.
 
 The first editor version includes:
 

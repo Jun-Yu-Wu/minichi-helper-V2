@@ -1,8 +1,21 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
+function envFiles(rootDir) {
+  const explicitFile = String(process.env.MINICHI_ENV_FILE || "").trim();
+  if (!explicitFile) return [".env.local", ".env"];
+  if (path.basename(explicitFile) !== explicitFile) {
+    throw new Error("MINICHI_ENV_FILE must be a file name inside the application root.");
+  }
+  const fullPath = path.join(rootDir, explicitFile);
+  if (!fs.existsSync(fullPath)) {
+    throw new Error(`MINICHI_ENV_FILE does not exist: ${explicitFile}`);
+  }
+  return [explicitFile];
+}
+
 function loadLocalEnv(rootDir = process.cwd()) {
-  for (const file of [".env.local", ".env"]) {
+  for (const file of envFiles(rootDir)) {
     const fullPath = path.join(rootDir, file);
     if (!fs.existsSync(fullPath)) continue;
     const lines = fs.readFileSync(fullPath, "utf8").split(/\r?\n/);
@@ -34,5 +47,6 @@ function loadLocalEnv(rootDir = process.cwd()) {
 }
 
 module.exports = {
+  envFiles,
   loadLocalEnv,
 };

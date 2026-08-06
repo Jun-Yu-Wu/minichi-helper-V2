@@ -1,14 +1,14 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Camera, Check, ChevronLeft, ChevronRight, PackageCheck, RefreshCw, ShoppingBag, X } from "lucide-react";
+import { Camera, Check, ChevronLeft, ChevronRight, PackageCheck, Pencil, RefreshCw, ShoppingBag, X } from "lucide-react";
 
 import { BackButton } from "../components/BackButton";
 import { EmptyState, InsightBanner, StatusBadge, Surface } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
 import { PhotoFileInput } from "../components/PhotoFileInput";
-import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
+import { PhotoDraftEditor, PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
 import { useStaleResource } from "../../src/lib/client-resource-cache";
 import { preparePhotoForUpload } from "../../src/lib/client-photo-upload";
@@ -25,6 +25,11 @@ type FaceCheckPhoto = {
   originalFilename: string;
   status: "selected" | "uploading" | "uploaded" | "failed";
   storageKey?: string;
+};
+
+type PendingPurchasePhotoUpload = {
+  file: File;
+  promise: Promise<FaceCheckPhoto>;
 };
 
 type PurchaseResponseState = {
@@ -208,7 +213,7 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
     },
   ];
   return (
-    <Surface className="grid gap-4">
+    <Surface className="trip-task-surface grid gap-4">
       <BackButton label="返回連線" onClick={() => navigation?.openWork()} type="button" variant="outline" />
       {taskResource.error ? (
         <RetryableError message={taskResource.error} onRetry={() => void taskResource.refresh()} />
@@ -240,7 +245,7 @@ function PurchaseTaskGroup({
   title: string;
 }) {
   return (
-    <section className="grid gap-2">
+    <section className="trip-task-lane grid gap-2">
       <div className="flex items-center justify-between gap-3">
         <h3 className="text-sm font-semibold text-foreground">{title}</h3>
         <span className="text-xs font-medium text-muted-foreground">{tasks.length} 筆</span>
@@ -272,12 +277,12 @@ function PurchaseTaskCard({
   const tone = purchaseTaskTone(task);
   return (
     <button
-      className={`flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-foreground/20 hover:bg-accent/30 ${
+      className={`trip-task-card flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left shadow-sm ${
         tone === "green"
-          ? "border-emerald-200 bg-emerald-50/60"
+          ? "trip-task-card--complete"
           : tone === "red"
             ? "border-red-200 bg-red-50/60"
-            : "bg-background"
+            : ""
       }`}
       type="button"
       onClick={() => onOpenTask(task.id)}
@@ -571,10 +576,11 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
   const [helperNote, setHelperNote] = useState("");
   const [faceCheckPhoto, setFaceCheckPhoto] = useState<FaceCheckPhoto | null>(null);
   const [reportPhotos, setReportPhotos] = useState<FaceCheckPhoto[]>([]);
+  const [editingPhoto, setEditingPhoto] = useState<{ kind: "face" | "report"; id: string } | null>(null);
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientId("purchase-response"));
   const [cancelingCompleted, setCancelingCompleted] = useState(false);
-  const faceCheckUploadPromises = useRef(new Map<string, Promise<FaceCheckPhoto>>());
-  const reportUploadPromises = useRef(new Map<string, Promise<FaceCheckPhoto>>());
+  const faceCheckUploadPromises = useRef(new Map<string, PendingPurchasePhotoUpload>());
+  const reportUploadPromises = useRef(new Map<string, PendingPurchasePhotoUpload>());
   const faceCheckPhotoRef = useRef<FaceCheckPhoto | null>(null);
   const reportPhotosRef = useRef<FaceCheckPhoto[]>([]);
 
@@ -679,13 +685,60 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
     void uploadFaceCheckPhoto(nextPhoto).catch(() => undefined);
   }
 
+  function saveEditedPhoto(file: File) {
+    if (!editingPhoto) return;
+    if (editingPhoto.kind === "face") {
+      const currentPhoto = faceCheckPhoto;
+      if (!currentPhoto || currentPhoto.clientPhotoId !== editingPhoto.id) return;
+      const editedPhoto: FaceCheckPhoto = {
+        ...currentPhoto,
+        byteSize: file.size,
+        contentType: file.type || "image/png",
+        error: undefined,
+        file,
+        objectUrl: URL.createObjectURL(file),
+        originalFilename: file.name,
+        status: "selected",
+        storageKey: undefined,
+      };
+      URL.revokeObjectURL(currentPhoto.objectUrl);
+      setFaceCheckPhoto((current) => {
+        if (!current || current.clientPhotoId !== editingPhoto.id) return current;
+        return editedPhoto;
+      });
+      void uploadFaceCheckPhoto(editedPhoto).catch(() => undefined);
+    } else {
+      const currentPhoto = reportPhotos.find((photo) => photo.clientPhotoId === editingPhoto.id);
+      if (!currentPhoto) return;
+      const editedPhoto: FaceCheckPhoto = {
+        ...currentPhoto,
+        byteSize: file.size,
+        contentType: file.type || "image/png",
+        error: undefined,
+        file,
+        objectUrl: URL.createObjectURL(file),
+        originalFilename: file.name,
+        status: "selected",
+        storageKey: undefined,
+      };
+      URL.revokeObjectURL(currentPhoto.objectUrl);
+      setReportPhotos((current) => current.map((photo) => {
+        if (photo.clientPhotoId !== editingPhoto.id) return photo;
+        return editedPhoto;
+      }));
+      void uploadReportPhoto(editedPhoto).catch(() => undefined);
+    }
+    setEditingPhoto(null);
+  }
+
   async function uploadFaceCheckPhoto(photo = faceCheckPhoto): Promise<FaceCheckPhoto | null> {
     if (!photo) return null;
     if (photo.status === "uploaded" && photo.storageKey) return photo;
     const existingUpload = faceCheckUploadPromises.current.get(photo.clientPhotoId);
-    if (existingUpload) return existingUpload;
+    if (existingUpload && existingUpload.file === photo.file) return existingUpload.promise;
+    const file = photo.file;
     setFaceCheckPhoto((current) =>
-      current?.clientPhotoId === photo.clientPhotoId
+      current?.clientPhotoId === photo.clientPhotoId && current.file === file
         ? { ...current, error: undefined, status: "uploading" }
         : current,
     );
@@ -720,18 +773,18 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
         storageKey: presignBody.storageKey,
       };
       setFaceCheckPhoto((current) =>
-        current?.clientPhotoId === photo.clientPhotoId
+        current?.clientPhotoId === photo.clientPhotoId && current.file === file
           ? uploadedPhoto
           : current,
       );
       return uploadedPhoto;
     })();
-    faceCheckUploadPromises.current.set(photo.clientPhotoId, uploadPromise);
+    faceCheckUploadPromises.current.set(photo.clientPhotoId, { file, promise: uploadPromise });
     try {
       return await uploadPromise;
     } catch (error) {
       setFaceCheckPhoto((current) =>
-        current?.clientPhotoId === photo.clientPhotoId
+        current?.clientPhotoId === photo.clientPhotoId && current.file === file
           ? {
               ...current,
               error: error instanceof Error ? error.message : "上傳失敗。",
@@ -741,7 +794,10 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
       );
       throw error;
     } finally {
-      faceCheckUploadPromises.current.delete(photo.clientPhotoId);
+      const pending = faceCheckUploadPromises.current.get(photo.clientPhotoId);
+      if (pending?.file === file && pending.promise === uploadPromise) {
+        faceCheckUploadPromises.current.delete(photo.clientPhotoId);
+      }
     }
   }
 
@@ -768,9 +824,10 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
   async function uploadReportPhoto(photo: FaceCheckPhoto): Promise<FaceCheckPhoto> {
     if (photo.status === "uploaded" && photo.storageKey) return photo;
     const existingUpload = reportUploadPromises.current.get(photo.clientPhotoId);
-    if (existingUpload) return existingUpload;
+    if (existingUpload && existingUpload.file === photo.file) return existingUpload.promise;
+    const file = photo.file;
     setReportPhotos((current) => current.map((item) =>
-      item.clientPhotoId === photo.clientPhotoId
+      item.clientPhotoId === photo.clientPhotoId && item.file === file
         ? { ...item, error: undefined, status: "uploading" }
         : item,
     ));
@@ -806,26 +863,30 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
         storageKey: presignBody.storageKey,
       };
       setReportPhotos((current) => current.map((item) =>
-        item.clientPhotoId === photo.clientPhotoId ? uploadedPhoto : item,
+        item.clientPhotoId === photo.clientPhotoId && item.file === file ? uploadedPhoto : item,
       ));
       return uploadedPhoto;
     })();
-    reportUploadPromises.current.set(photo.clientPhotoId, uploadPromise);
+    reportUploadPromises.current.set(photo.clientPhotoId, { file, promise: uploadPromise });
     try {
       return await uploadPromise;
     } catch (error) {
       setReportPhotos((current) => current.map((item) =>
-        item.clientPhotoId === photo.clientPhotoId
+        item.clientPhotoId === photo.clientPhotoId && item.file === file
           ? { ...item, error: error instanceof Error ? error.message : "上傳失敗。", status: "failed" }
           : item,
       ));
       throw error;
     } finally {
-      reportUploadPromises.current.delete(photo.clientPhotoId);
+      const pending = reportUploadPromises.current.get(photo.clientPhotoId);
+      if (pending?.file === file && pending.promise === uploadPromise) {
+        reportUploadPromises.current.delete(photo.clientPhotoId);
+      }
     }
   }
 
   function removeReportPhoto(clientPhotoId: string) {
+    if (editingPhoto?.kind === "report" && editingPhoto.id === clientPhotoId) setEditingPhoto(null);
     setReportPhotos((current) => {
       const removed = current.find((photo) => photo.clientPhotoId === clientPhotoId);
       if (removed) URL.revokeObjectURL(removed.objectUrl);
@@ -835,6 +896,7 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
   }
 
   function removeFaceCheckPhoto() {
+    if (editingPhoto?.kind === "face") setEditingPhoto(null);
     if (faceCheckPhoto) URL.revokeObjectURL(faceCheckPhoto.objectUrl);
     setFaceCheckPhoto(null);
   }
@@ -972,6 +1034,10 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
                 <div className={`grid gap-2 rounded-md border p-2 ${faceCheckPhoto.status === "uploaded" ? "border-emerald-400 bg-emerald-50/40" : "bg-background"}`}>
                   <img alt="挑臉確認照" className="aspect-square w-full max-w-48 rounded-md object-cover" src={faceCheckPhoto.objectUrl} />
                   <div className="mt-2 flex flex-wrap gap-2">
+                    <Button size="sm" type="button" variant="outline" onClick={() => setEditingPhoto({ kind: "face", id: faceCheckPhoto.clientPhotoId })}>
+                      <Pencil className="mr-2 size-4" />
+                      編輯
+                    </Button>
                     {faceCheckPhoto.status !== "uploaded" ? (
                       <Button disabled={faceCheckPhoto.status === "uploading"} size="sm" type="button" variant="outline" onClick={() => uploadFaceCheckPhoto()}>
                         <RefreshCw className="mr-2 size-4" />
@@ -1023,6 +1089,9 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
                       <div className="flex items-center justify-between gap-1">
                         <span className="text-xs text-muted-foreground">{purchasePhotoUploadStatusLabel(photo.status)}</span>
                         <div className="flex items-center gap-1">
+                          <button aria-label="編輯回報照片" className="rounded p-1 text-muted-foreground hover:bg-muted" type="button" onClick={() => setEditingPhoto({ kind: "report", id: photo.clientPhotoId })}>
+                            <Pencil className="size-4" />
+                          </button>
                           {photo.status === "failed" ? (
                             <button className="rounded px-1.5 py-1 text-xs font-medium text-primary hover:bg-muted" type="button" onClick={() => void uploadReportPhoto(photo).catch(() => undefined)}>
                               重試
@@ -1080,6 +1149,20 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
               送出
             </Button>
           </form>
+          {editingPhoto ? (() => {
+            const photo = editingPhoto.kind === "face"
+              ? faceCheckPhoto
+              : reportPhotos.find((item) => item.clientPhotoId === editingPhoto.id);
+            return photo ? (
+              <PhotoDraftEditor
+                alt={editingPhoto.kind === "face" ? "挑臉確認照" : "採買回報照片"}
+                file={photo.file}
+                objectUrl={photo.objectUrl}
+                onCancel={() => setEditingPhoto(null)}
+                onSaved={saveEditedPhoto}
+              />
+            ) : null;
+          })() : null}
         </>
       ) : null}
     </section>

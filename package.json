@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start --port 4300",
     "test": "node --test test/**/*.test.js",
+    "db:check-target": "node scripts/check-migration-target.js",
     "db:migrate": "node scripts/apply-migrations.js",
     "db:check": "node scripts/check-schema.js",
     "acceptance:create-fixture": "node scripts/create-acceptance-fixture.js",

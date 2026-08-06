@@ -333,7 +333,7 @@ function AdminCheckout({
   return (
     <AdminSection icon={<CreditCard className="size-5" />} title="結帳">
       {settlements.length ? (
-        <Surface className="grid gap-5">
+        <Surface className="admin-queue-surface grid gap-5">
           {groups.map((group) => {
             const records = settlements.filter((settlement) => group.statuses.includes(settlement.status));
             return (
@@ -347,7 +347,7 @@ function AdminCheckout({
                   const needsAdmin = adminSettlementNeedsAction(settlement);
                   return (
                     <Link
-                      className="flex items-center justify-between gap-3 rounded-2xl border bg-card px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-foreground/20 hover:bg-accent/30"
+                      className="admin-queue-row flex items-center justify-between gap-3 rounded-2xl border bg-card px-4 py-3 text-left shadow-sm"
                       href={href}
                       key={settlement.id}
                     >
@@ -943,7 +943,7 @@ function AdminHome({ dashboard }: { dashboard: any }) {
   const openWork = activeTrips + arrivedTrips + openQuoteTasks + faceCheckPending + settlementPending + mergePending;
 
   return (
-    <section className="grid gap-5">
+    <section className="admin-home grid gap-5">
       <PageHeader
         actions={
           <Button asChild>
@@ -960,7 +960,7 @@ function AdminHome({ dashboard }: { dashboard: any }) {
         subtitle="先處理會阻塞現場或金流的事項；建立資料與低頻設定放在主頁面。"
         title="今日營運總覽"
       />
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+      <div className="home-action-list">
         <AdminShortcut href="/admin?view=main" icon={<Home className="size-5" />} label="行程與小幫手" value={`${activeHelpers} 位`} />
         <AdminShortcut href="/admin?view=checkout" icon={<CreditCard className="size-5" />} label="結帳" value={`${settlementPending} 待處理`} />
         <AdminShortcut href="/admin?view=tasks" icon={<ClipboardList className="size-5" />} label="任務發布" value={`${openQuoteTasks} 任務中`} />
@@ -1008,7 +1008,7 @@ function AdminMain({
         subtitle="這裡只處理行程排程、現場連線開通與小幫手資料；任務發布、結帳與合併維持在各自工作區。"
         title="行程與小幫手管理"
       />
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="home-action-list">
         <SelectionCard
           active={section === "trips"}
           body="依狀態展開；點開某一組才載入行程。"
@@ -1128,7 +1128,7 @@ function AdminLiveReturn({
         )
       ) : (
         <>
-          <nav aria-label="即時回傳工作區" className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+          <nav aria-label="即時回傳工作區" className="admin-live-nav grid grid-cols-2 gap-2 lg:grid-cols-4">
             {[
               { id: "photos", label: "現場照片" },
               { id: "quote", label: "詢價回覆" },
@@ -1158,7 +1158,7 @@ function AdminLiveReturn({
           {selectedSection === "purchase" ? (
           <section className="grid gap-3">
             <SectionTitle eyebrow={selectedTrip.trip_name} title="採買回傳" />
-            <div className="grid grid-cols-2 gap-2 lg:grid-cols-5">
+            <div className="admin-queue-surface grid grid-cols-2 gap-2 rounded-2xl border bg-card p-2 lg:grid-cols-5">
               <Surface className="p-3 text-center">
                 <p className="text-xs text-muted-foreground">待處理</p>
                 <p className="text-xl font-semibold">{openPurchaseCount}</p>
@@ -1185,7 +1185,7 @@ function AdminLiveReturn({
             ) : (
               <div className="grid gap-3">
                 {visiblePurchaseTasks.map((task: any) => (
-                  <article key={task.id} className="rounded-xl border bg-card p-4 shadow-sm">
+                  <article key={task.id} className="admin-lane-card rounded-xl border bg-card p-4 shadow-sm">
                     <div className="flex flex-wrap items-start justify-between gap-3">
                       <div>
                         <div className="flex flex-wrap items-center gap-2">
@@ -1390,7 +1390,7 @@ function AdminStagingReview({
                 <div className="grid gap-2">
                   {jobs.map((job: any) => (
                     <Link
-                      className="flex items-center justify-between gap-4 rounded-2xl border bg-card px-4 py-4 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-primary/40 hover:bg-accent/30"
+                      className="admin-queue-row flex items-center justify-between gap-4 rounded-2xl border bg-card px-4 py-4 text-left shadow-sm"
                       href={`/admin?view=merge&mergeJobId=${encodeURIComponent(job.id)}`}
                       key={job.id}
                     >
@@ -1438,7 +1438,7 @@ function StagingMergeJobDetail({ job, selectedOrderId }: { job: any; selectedOrd
         {!selectedOrderId ? <BackLink href="/admin?view=merge" label="返回批次清單" /> : null}
         <StatusBadge tone={mergeStatusTone(job.status)}>{mergeStatusLabel(job.status)}</StatusBadge>
       </div>
-      <Surface className="grid gap-4">
+      <Surface className="admin-detail-surface grid gap-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
             <p className="text-xs font-semibold uppercase text-muted-foreground">選取的審核批次</p>
@@ -1821,12 +1821,13 @@ function AdminSection({
   title: string;
 }) {
   return (
-    <section className="grid gap-4">
-      <div className="flex items-center gap-2">
-        <span className="flex size-9 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
-          {icon}
-        </span>
-        <h2 className="text-2xl font-semibold tracking-tight">{title}</h2>
+    <section className="admin-section grid gap-6">
+      <div className="admin-section__heading flex items-center gap-3">
+        <span className="text-admin-accent">{icon}</span>
+        <div>
+          <p className="text-xs font-medium tracking-wide text-muted-foreground">管理工作區</p>
+          <h2 className="mt-0.5 text-2xl font-semibold tracking-[-0.03em]">{title}</h2>
+        </div>
       </div>
       {children}
     </section>
@@ -1843,9 +1844,9 @@ function TaskStep({
   title: string;
 }) {
   return (
-    <section className="grid gap-3 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
+    <section className="admin-step surface grid gap-3 rounded-xl border bg-card p-4 sm:p-5">
       <div className="flex items-center gap-2">
-        <span className="flex size-7 items-center justify-center rounded-full bg-primary text-xs font-semibold text-primary-foreground">
+        <span className="admin-step__number flex size-7 items-center justify-center rounded-md text-xs font-semibold text-primary-foreground">
           {number}
         </span>
         <h3 className="font-semibold">{title}</h3>
@@ -1870,22 +1871,23 @@ function SelectionCard({
 }) {
   return (
     <Link
-      className={`rounded-xl border p-4 shadow-sm transition ${
+      className={`admin-selection-card selection-row flex items-start gap-3 rounded-xl border p-4 ${
         active
           ? "border-primary bg-primary/5 ring-1 ring-primary"
           : "bg-card hover:border-primary/30 hover:bg-accent/40"
       }`}
       href={href}
     >
-      <div className="flex items-center gap-2">
-        {icon ? (
-          <span className="flex size-9 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
-            {icon}
-          </span>
-        ) : null}
+      {icon ? (
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
+          {icon}
+        </span>
+      ) : null}
+      <span className="min-w-0 flex-1">
         <p className="font-semibold">{title}</p>
-      </div>
-      <p className="mt-2 text-sm text-muted-foreground">{body}</p>
+        <p className="mt-1 text-sm text-muted-foreground">{body}</p>
+      </span>
+      <span aria-hidden="true" className="ml-auto text-lg text-muted-foreground">›</span>
     </Link>
   );
 }
@@ -1902,12 +1904,15 @@ function AdminShortcut({
   value: string;
 }) {
   return (
-    <Link className="rounded-xl border bg-card p-4 shadow-sm transition hover:border-primary/30 hover:bg-accent/40" href={href}>
-      <span className="flex size-10 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
+    <Link className="admin-selection-card home-action-row flex items-center gap-3 border px-3 py-3.5" href={href}>
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
         {icon}
       </span>
-      <h3 className="mt-3 font-semibold">{label}</h3>
-      <p className="mt-1 text-sm text-muted-foreground">{value}</p>
+      <span className="min-w-0 flex-1">
+        <h3 className="font-semibold">{label}</h3>
+        <p className="mt-0.5 text-sm text-muted-foreground">{value}</p>
+      </span>
+      <span aria-hidden="true" className="text-lg text-muted-foreground">›</span>
     </Link>
   );
 }

@@ -15,7 +15,7 @@ type BackLinkProps = {
   variant?: ButtonProps["variant"];
 };
 
-const backButtonClassName = "size-10 shrink-0 p-0";
+const backButtonClassName = "size-11 shrink-0 p-0";
 
 export function BackButton({ className, label, ...props }: BackButtonProps) {
   return (

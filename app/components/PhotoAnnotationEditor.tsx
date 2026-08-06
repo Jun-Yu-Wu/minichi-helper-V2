@@ -92,6 +92,34 @@ function preloadPhotoSource(storageKey: string) {
   return request;
 }
 
+type ShareNavigation = Navigator & {
+  canShare?: (data: ShareData) => boolean;
+  share?: (data: ShareData) => Promise<void>;
+};
+
+async function shareOrDownloadFile(file: File, title: string) {
+  const nav = navigator as ShareNavigation;
+  try {
+    if (nav.share && (!nav.canShare || nav.canShare({ files: [file] }))) {
+      await nav.share({ files: [file], title });
+      return "shared" as const;
+    }
+  } catch (error) {
+    if ((error as DOMException)?.name === "AbortError") return "cancelled" as const;
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = file.name;
+  link.rel = "noreferrer";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+  return "downloaded" as const;
+}
+
 export function PhotoLightbox({
   alt,
   onClose,
@@ -168,6 +196,16 @@ export function PhotoLightbox({
     }
   }, [photo]);
 
+  const handleEditedFile = useCallback(async (file: File) => {
+    setEditing(false);
+    const result = await shareOrDownloadFile(file, "分享 MINICHI 編輯照片");
+    if (result === "shared") {
+      setMessage("已開啟手機系統選單，可選擇儲存到照片或分享至 LINE。");
+    } else if (result === "downloaded") {
+      setMessage("已送出編輯後照片下載。若手機沒有直接存入圖庫，請從系統分享選單選擇儲存圖片。");
+    }
+  }, []);
+
   return (
     <div className="fixed inset-0 z-50 bg-black text-white" role="dialog" aria-modal="true" aria-label="照片檢視器">
       {editing ? (
@@ -175,13 +213,10 @@ export function PhotoLightbox({
           alt={alt}
           fileName={photo.original_filename || "minichi-photo.jpg"}
           imageUrl={photo.signed_url}
+          mode="existing"
           sourceStorageKey={photo.storage_key || ""}
           onCancel={() => setEditing(false)}
-          onSaved={(savedPhoto) => {
-            setPhoto(savedPhoto);
-            setEditing(false);
-            setMessage("編輯版本已保存；原始照片保持不變。");
-          }}
+          onEditedFile={(file) => void handleEditedFile(file)}
         />
       ) : (
         <div className="flex h-full flex-col">
@@ -211,6 +246,34 @@ export function PhotoLightbox({
         </div>
       )}
       {message ? <p aria-live="polite" className="mx-auto mt-3 max-w-xl text-center text-sm text-white/80" role="status">{message}</p> : null}
+    </div>
+  );
+}
+
+export function PhotoDraftEditor({
+  alt,
+  file,
+  objectUrl,
+  onCancel,
+  onSaved,
+}: {
+  alt: string;
+  file: File;
+  objectUrl: string;
+  onCancel: () => void;
+  onSaved: (file: File) => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 bg-black text-white" role="dialog" aria-modal="true" aria-label="編輯待上傳照片">
+      <PhotoAnnotationEditor
+        alt={alt}
+        fileName={file.name || "minichi-photo.jpg"}
+        imageUrl={objectUrl}
+        mode="draft"
+        onCancel={onCancel}
+        onDraftSaved={onSaved}
+        sourceStorageKey=""
+      />
     </div>
   );
 }
@@ -248,15 +311,19 @@ function PhotoAnnotationEditor({
   alt,
   fileName,
   imageUrl,
+  mode,
   onCancel,
-  onSaved,
+  onDraftSaved,
+  onEditedFile,
   sourceStorageKey,
 }: {
   alt: string;
   fileName: string;
   imageUrl: string;
+  mode: "draft" | "existing";
   onCancel: () => void;
-  onSaved: (photo: EditablePhoto) => void;
+  onDraftSaved?: (file: File) => void;
+  onEditedFile?: (file: File) => void;
   sourceStorageKey: string;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -317,7 +384,8 @@ function PhotoAnnotationEditor({
       handleLoad();
     };
     image.onerror = () => {
-      loadProxySource();
+      if (sourceStorageKey) loadProxySource();
+      else showLoadError(new Error("照片無法載入編輯器。"));
     };
     async function loadImage() {
       try {
@@ -633,65 +701,19 @@ function PhotoAnnotationEditor({
   }
 
   async function save() {
-    if (!sourceStorageKey) {
-      setError("這張照片缺少來源識別，暫時無法保存編輯版本。");
-      return;
-    }
     const canvas = canvasRef.current;
     if (!canvas) return;
     setSaving(true);
     setError("");
     try {
       const blob = await exportCanvasBlob(canvas, imageRef.current, annotations, canvasSize, viewport);
-      const clientPhotoId = crypto.randomUUID();
-      const idempotencyKey = crypto.randomUUID();
-      const outputFileName = `${fileNameWithoutExtension(fileName)}-annotated.png`;
-      const presignResponse = await fetch("/api/media/photo-annotations/presign", {
-        body: JSON.stringify({
-          byteSize: blob.size,
-          clientPhotoId,
-          contentType: "image/png",
-          fileName: outputFileName,
-          sourceStorageKey,
-        }),
-        headers: { "content-type": "application/json" },
-        method: "POST",
+      const outputFileName = `${fileNameWithoutExtension(fileName)}-edited.png`;
+      const editedFile = new File([blob], outputFileName, {
+        lastModified: Date.now(),
+        type: "image/png",
       });
-      const presign = await presignResponse.json();
-      if (!presignResponse.ok) throw new Error(presign.error || "無法建立編輯照片上傳。 ");
-      const uploadResponse = await fetch(presign.uploadUrl, {
-        body: blob,
-        headers: { "content-type": "image/png" },
-        method: "PUT",
-      });
-      if (!uploadResponse.ok) throw new Error("編輯照片上傳失敗，請重試。");
-      const commitResponse = await fetch("/api/media/photo-annotations/commit", {
-        body: JSON.stringify({
-          annotationManifest: {
-            version: 1,
-            canvas: canvasSize,
-            annotations,
-            viewport,
-          },
-          byteSize: blob.size,
-          contentType: "image/png",
-          idempotencyKey,
-          originalFilename: outputFileName,
-          sourceStorageKey,
-          storageKey: presign.storageKey,
-        }),
-        headers: { "content-type": "application/json" },
-        method: "POST",
-      });
-      const committed = await commitResponse.json();
-      if (!commitResponse.ok) throw new Error(committed.error || "編輯照片保存失敗，請重試。");
-      onSaved({
-        content_type: committed.media.content_type,
-        id: committed.media.id,
-        original_filename: committed.media.original_filename,
-        signed_url: committed.media.signed_url,
-        storage_key: committed.media.storage_key,
-      });
+      if (mode === "draft") onDraftSaved?.(editedFile);
+      else onEditedFile?.(editedFile);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "編輯照片保存失敗，請重試。");
     } finally {
@@ -720,7 +742,7 @@ function PhotoAnnotationEditor({
           <button aria-label="上一動" className="grid size-11 place-items-center rounded-full hover:bg-white/10 disabled:opacity-30" disabled={!annotations.length} onClick={undo} type="button"><Undo2 className="size-5" /></button>
           <button aria-label="重做" className="grid size-11 place-items-center rounded-full hover:bg-white/10 disabled:opacity-30" disabled={!future.length} onClick={redo} type="button"><Redo2 className="size-5" /></button>
         </div>
-        <button aria-label="完成並保存編輯版本" className="grid size-11 place-items-center rounded-full text-[#00c300] hover:bg-white/10 disabled:opacity-40" disabled={saving || loading} onClick={() => void save()} type="button">
+        <button aria-label="完成編輯" className="grid size-11 place-items-center rounded-full text-[#00c300] hover:bg-white/10 disabled:opacity-40" disabled={saving || loading} onClick={() => void save()} type="button">
           <Check className="size-6" />
         </button>
       </header>

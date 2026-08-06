@@ -179,7 +179,7 @@ export function AdminLivePurchaseWorkspace({
   }
 
   return (
-    <section className="grid gap-4">
+    <section className="admin-live-workspace grid gap-4">
       <div className="grid gap-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-lg font-semibold">選擇要監聽的行程</h3>
@@ -205,7 +205,7 @@ export function AdminLivePurchaseWorkspace({
             {trips.map((trip) => (
               <button
                 className={cn(
-                  "rounded-lg border bg-card p-3 text-left shadow-sm transition",
+                  "admin-selection-card rounded-lg border bg-card p-3 text-left shadow-sm",
                   selectedTripId === trip.id
                     ? "border-primary ring-2 ring-primary/20"
                     : "hover:border-primary/50",
@@ -229,7 +229,7 @@ export function AdminLivePurchaseWorkspace({
       </div>
 
       {selectedTripId ? (
-        <nav aria-label="即時回傳工作區" className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+        <nav aria-label="即時回傳工作區" className="admin-live-nav grid grid-cols-2 gap-2 lg:grid-cols-4">
           <Button asChild variant="outline">
             <Link href={`/admin?view=live&liveTripId=${encodeURIComponent(selectedTripId)}&liveSection=photos`}>
               現場照片
@@ -317,7 +317,7 @@ function PurchaseTaskList({
 
   return (
     <section className="grid gap-4">
-      <div className="grid gap-2 rounded-2xl border bg-card p-4 shadow-sm">
+      <div className="admin-detail-surface grid gap-2 rounded-2xl border bg-card p-4 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div>
             <p className="text-sm text-muted-foreground">{selectedTrip?.trip_name || "即時回傳"}</p>
@@ -370,13 +370,13 @@ function PurchaseTaskLane({
   tone: "amber" | "blue" | "green" | "red";
 }) {
   return (
-    <section className="grid gap-2">
+    <section className="admin-lane grid gap-2">
       <p className={`text-sm font-semibold ${tone === "green" ? "text-emerald-700" : tone === "red" ? "text-red-700" : ""}`}>
         {title}
       </p>
       {tasks.map((task) => (
         <button
-          className="flex items-center justify-between gap-3 rounded-2xl border bg-card px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-foreground/20 hover:bg-accent/30"
+          className="admin-lane-card flex items-center justify-between gap-3 rounded-2xl border bg-card px-4 py-3 text-left shadow-sm"
           key={task.id}
           onClick={() => onOpenTask(task.id)}
           type="button"
@@ -419,7 +419,7 @@ function PurchaseTaskDetail({
   const primaryPhotos = adminPrimaryPurchasePhotos(task.photos || []);
   const hiddenPhotos = adminHiddenPurchasePhotos(task.photos || []);
   return (
-    <section className="grid gap-4">
+    <section className="admin-live-workspace grid gap-4">
       <div className="rounded-2xl border bg-card p-4 shadow-sm">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div className="min-w-0">

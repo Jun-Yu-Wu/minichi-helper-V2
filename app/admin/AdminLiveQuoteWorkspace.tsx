@@ -189,7 +189,7 @@ export function AdminLiveQuoteWorkspace({
   }
 
   return (
-    <section className="grid gap-4">
+    <section className="admin-live-workspace grid gap-4">
       <div className="grid gap-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-lg font-semibold">選擇要監聽的行程</h3>
@@ -215,7 +215,7 @@ export function AdminLiveQuoteWorkspace({
             {trips.map((trip) => (
               <button
                 className={cn(
-                  "rounded-lg border bg-card p-3 text-left shadow-sm transition",
+                  "admin-selection-card rounded-lg border bg-card p-3 text-left shadow-sm",
                   selectedTripId === trip.id
                     ? "border-primary ring-2 ring-primary/20"
                     : "hover:border-primary/50",
@@ -239,7 +239,7 @@ export function AdminLiveQuoteWorkspace({
       </div>
 
       {selectedTripId ? (
-        <nav aria-label="即時回傳工作區" className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+        <nav aria-label="即時回傳工作區" className="admin-live-nav grid grid-cols-2 gap-2 lg:grid-cols-4">
           <Button asChild variant="outline">
             <Link href={`/admin?view=live&liveTripId=${encodeURIComponent(selectedTripId)}&liveSection=photos`}>
               現場照片
@@ -362,7 +362,7 @@ function QuoteTaskLane({
 }) {
   if (!tasks.length) {
     return (
-      <section className="grid gap-2">
+      <section className="admin-lane grid gap-2">
         <p className="text-sm font-semibold">{title}</p>
         <div className="rounded-lg border border-dashed bg-card p-3 text-sm text-muted-foreground">
           目前沒有。
@@ -371,11 +371,11 @@ function QuoteTaskLane({
     );
   }
   return (
-    <section className="grid gap-2">
+    <section className="admin-lane grid gap-2">
       <p className="text-sm font-semibold">{title}</p>
       {tasks.map((task) => (
         <button
-          className="flex items-center justify-between gap-3 rounded-2xl border bg-card px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-foreground/20 hover:bg-accent/30"
+          className="admin-lane-card flex items-center justify-between gap-3 rounded-2xl border bg-card px-4 py-3 text-left shadow-sm"
           key={task.id}
           onClick={() => onOpenTask(task.id)}
           type="button"
@@ -425,8 +425,8 @@ function QuoteTaskDetail({
   const latestReply = photo?.latest_reply;
   const shareablePhotos = collectShareablePhotosForPhoto(photo);
   return (
-    <section className="grid gap-4">
-      <div className="rounded-2xl border bg-card p-4 shadow-sm">
+    <section className="admin-live-workspace grid gap-4">
+      <div className="admin-detail-surface rounded-2xl border bg-card p-4 shadow-sm">
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <p className="text-sm text-muted-foreground">{taskTypeLabel(task.task_type)}</p>

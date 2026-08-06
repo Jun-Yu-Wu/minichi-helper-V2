@@ -25,10 +25,14 @@ export function ConnectionPanel({
 
   return (
     <section className="grid gap-3">
-      <h3 className="text-lg font-semibold tracking-tight">連線工作</h3>
+      <div>
+        <p className="trip-panel-heading__kicker">Live workflow</p>
+        <h3 className="mt-1 text-xl font-semibold tracking-tight">現在要做的事</h3>
+        <p className="mt-1 max-w-xl text-sm leading-6 text-muted-foreground">先處理有待回傳的區塊；完成後再回到總覽確認整趟行程。</p>
+      </div>
       <div className="grid gap-3">
         <button
-          className="grid gap-3 rounded-xl border bg-card p-4 text-left shadow-sm transition hover:border-primary/30 hover:bg-accent/40"
+          className={`trip-work-entry grid gap-3 rounded-xl border p-4 text-left shadow-sm ${unfinishedCounts.site > 0 ? "trip-work-entry--priority" : ""}`}
           onClick={() => {
             if (navigation) {
               navigation.openSite();
@@ -42,10 +46,11 @@ export function ConnectionPanel({
             count={unfinishedCounts.site}
             icon={<Camera className="size-5" />}
             title="現場大圖"
+            description="把現場看到的商品先完整回傳。"
           />
         </button>
         <button
-          className="grid gap-3 rounded-xl border bg-card p-4 text-left shadow-sm transition hover:border-primary/30 hover:bg-accent/40"
+          className={`trip-work-entry grid gap-3 rounded-xl border p-4 text-left shadow-sm ${unfinishedCounts.quote > 0 ? "trip-work-entry--priority" : ""}`}
           onClick={() => {
             if (navigation) {
               navigation.openQuote();
@@ -59,10 +64,11 @@ export function ConnectionPanel({
             count={unfinishedCounts.quote}
             icon={<ClipboardList className="size-5" />}
             title="細圖 / 報價"
+            description="逐張完成報價或補拍細節。"
           />
         </button>
         <button
-          className="grid gap-3 rounded-xl border bg-card p-4 text-left shadow-sm transition hover:border-primary/30 hover:bg-accent/40"
+          className={`trip-work-entry grid gap-3 rounded-xl border p-4 text-left shadow-sm ${unfinishedCounts.purchase > 0 ? "trip-work-entry--priority" : ""}`}
           onClick={() => {
             if (navigation) {
               navigation.openPurchase();
@@ -76,6 +82,7 @@ export function ConnectionPanel({
             count={unfinishedCounts.purchase}
             icon={<ShoppingBag className="size-5" />}
             title="採買任務"
+            description="完成採買、部分回報或取消。"
           />
         </button>
       </div>
@@ -86,21 +93,24 @@ export function ConnectionPanel({
 function WorkEntryContent({
   count,
   icon,
+  description,
   title,
 }: {
   count: number;
+  description: string;
   icon: React.ReactNode;
   title: string;
 }) {
   return (
     <>
       <span className="flex items-center justify-between gap-3">
-        <span className="flex size-10 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
+        <span className="trip-work-entry__icon flex size-10 items-center justify-center rounded-lg">
           {icon}
         </span>
         <StatusBadge tone={count > 0 ? "amber" : "neutral"}>{count}</StatusBadge>
       </span>
       <strong className="block text-base">{title}</strong>
+      <span className="block text-sm leading-6 text-muted-foreground">{description}</span>
     </>
   );
 }

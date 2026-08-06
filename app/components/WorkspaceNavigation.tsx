@@ -31,7 +31,7 @@ export function HelperWorkspaceNavigation() {
     { href: "/helper?view=rebuy", icon: <PackageSearch className="size-4" />, id: "rebuy", label: "補買" },
     { href: "/helper?view=warehouse", icon: <Truck className="size-4" />, id: "warehouse", label: "集運倉" },
   ];
-  return <WorkspaceNav activeId={activeView} ariaLabel="小幫手主要導覽" items={items} />;
+  return <WorkspaceNav activeId={activeView} ariaLabel="小幫手主要導覽" items={items} variant="helper" />;
 }
 
 export function AdminWorkspaceNavigation() {
@@ -56,5 +56,5 @@ export function AdminWorkspaceNavigation() {
     { href: "/admin?view=live", icon: <Radio className="size-4" />, id: "live", label: "即時回傳" },
     { href: "/admin?view=merge", icon: <Merge className="size-4" />, id: "merge", label: "審核合併" },
   ];
-  return <WorkspaceNav activeId={activeView} ariaLabel="管理員主要導覽" items={items} />;
+  return <WorkspaceNav activeId={activeView} ariaLabel="管理員主要導覽" items={items} variant="admin" />;
 }

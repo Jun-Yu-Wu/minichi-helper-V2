@@ -410,10 +410,20 @@ function HelperHome({
       />
 
       {nextAction ? (
-        <Surface className="grid gap-4">
-          <div>
-            <h3 className="text-xl font-semibold tracking-tight">{nextAction.title}</h3>
-            {primaryTrip ? <TripMiniFacts trip={primaryTrip} /> : null}
+        <Surface className="helper-next-action grid gap-4">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
+                {activeTrip ? "現場工作" : "下一個行程"}
+              </p>
+              <h3 className="display-type mt-1 text-xl font-semibold tracking-tight">{nextAction.title}</h3>
+              {primaryTrip ? <TripMiniFacts trip={primaryTrip} /> : null}
+            </div>
+            <Button asChild className="w-full sm:w-auto">
+              <Link href={`/helper?tripId=${encodeURIComponent(primaryTrip.id)}`}>
+                {activeTrip ? "繼續現場工作" : "查看行程"}
+              </Link>
+            </Button>
           </div>
         </Surface>
       ) : (
@@ -421,8 +431,8 @@ function HelperHome({
       )}
 
       <section className="grid gap-3">
-        <SectionTitle eyebrow="Shortcuts" title="其他工作入口" />
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+        <SectionTitle eyebrow="Quick routes" title="其他工作入口" />
+        <div className="home-action-list">
           <HomeShortcut body="查看進行中與歷史結帳。" href="/helper?view=settlement" icon={<CreditCard className="size-5" />} title="行程結帳" />
           <HomeShortcut body="接公開補買或回報自己的補買。" href="/helper?view=rebuy" icon={<PackageSearch className="size-5" />} title="補買區" />
           <HomeShortcut body="付款後回報送達集運倉照片。" href="/helper?view=warehouse" icon={<Truck className="size-5" />} title="集運倉回報" />
@@ -825,12 +835,13 @@ function ActiveTripChrome({ trip }: { trip: any }) {
   return (
     <>
       <ReturnToTripsButton />
-      <Surface className="grid gap-3">
-        <div>
+      <Surface className="trip-chrome grid gap-3">
+        <div className="flex items-center justify-between gap-3">
+          <p className="trip-chrome__kicker">Live trip</p>
           <StatusBadge tone="green">連線中</StatusBadge>
         </div>
         <div>
-          <h2 className="text-2xl font-semibold tracking-tight">{trip.trip_name}</h2>
+          <h2 className="display-type text-2xl font-semibold tracking-tight">{trip.trip_name}</h2>
           <p className="mt-1 text-sm text-muted-foreground">
             {service.dateOnly(trip.business_date, trip.timezone)} {trip.scheduled_time || ""}
             {" · "}
@@ -864,7 +875,7 @@ function TripOverview({
   const completedPurchases = Math.max(purchaseTaskCount - openPurchases, 0);
   return (
     <section className="grid gap-3">
-      <Surface className="grid gap-3">
+      <Surface className="trip-task-surface trip-overview-card grid gap-3">
         <div className="grid gap-2 text-sm">
           <CompactStatusLine label="現場照片" value={`${batchCount} 批`} />
           <CompactStatusLine
@@ -902,7 +913,7 @@ function TripEndGate({
 }) {
   if (!canEnd) {
     return (
-      <Surface className="grid gap-3 border-amber-200 bg-amber-50/70">
+      <Surface className="trip-end-gate grid gap-3 border-amber-200 bg-amber-50/70">
         <div className="flex items-start gap-2 text-amber-950">
           <AlertCircle className="mt-0.5 size-4 shrink-0" aria-hidden="true" />
           <div>
@@ -935,7 +946,7 @@ function CompactStatusLine({
   value: string;
 }) {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-lg border bg-background px-3 py-2">
+    <div className="compact-status-line flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
       <span className="text-muted-foreground">{label}</span>
       <span className={urgent ? "font-semibold text-amber-700" : "font-semibold"}>
         {value}
@@ -967,12 +978,15 @@ function HomeShortcut({
   title: string;
 }) {
   return (
-    <Link className="rounded-xl border bg-card p-4 shadow-sm transition hover:border-primary/30 hover:bg-accent/40" href={href}>
-      <span className="flex size-10 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
+    <Link className="home-action-row flex items-center gap-3 border px-3 py-3.5" href={href}>
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-secondary-foreground">
         {icon}
       </span>
-      <h3 className="mt-3 font-semibold">{title}</h3>
-      <p className="mt-1 text-sm leading-6 text-muted-foreground">{body}</p>
+      <span className="min-w-0 flex-1">
+        <h3 className="font-semibold">{title}</h3>
+        <p className="mt-0.5 text-sm leading-5 text-muted-foreground">{body}</p>
+      </span>
+      <span aria-hidden="true" className="text-lg text-muted-foreground">›</span>
     </Link>
   );
 }
@@ -989,15 +1003,15 @@ function UnavailableShortcut({
   return (
     <div
       aria-disabled="true"
-      className="grid gap-4 rounded-xl border border-dashed bg-muted/35 p-4 text-muted-foreground"
+      className="home-action-row flex items-center gap-3 border border-dashed px-3 py-3.5 text-muted-foreground"
     >
       <div className="flex items-center justify-between gap-3">
-        <span className="flex size-10 items-center justify-center rounded-lg bg-background text-foreground">
+        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary text-foreground">
           {icon}
         </span>
         <StatusBadge tone="neutral">尚未開放</StatusBadge>
       </div>
-      <div>
+      <div className="min-w-0 flex-1">
         <h3 className="font-semibold text-foreground">{title}</h3>
         <p className="mt-1 text-sm leading-6">{body}</p>
       </div>
@@ -1009,7 +1023,7 @@ function SectionHeader({ eyebrow, title }: { eyebrow: string; title: string }) {
   return (
     <div>
       <p className="text-sm font-medium text-muted-foreground">{eyebrow}</p>
-      <h2 className="mt-1 text-2xl font-semibold tracking-tight">{title}</h2>
+      <h2 className="display-type mt-1 text-2xl font-semibold tracking-tight">{title}</h2>
     </div>
   );
 }
@@ -1024,7 +1038,7 @@ function WorkspaceBlock({
   title: string;
 }) {
   return (
-    <section className="grid gap-4 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
+    <section className="workspace-block grid gap-4 rounded-xl border bg-card p-4 shadow-sm sm:p-5">
       <div>
         <p className="text-xs font-semibold uppercase text-muted-foreground">{eyebrow}</p>
         <h5 className="mt-1 text-xl font-semibold tracking-tight">{title}</h5>
@@ -1037,11 +1051,11 @@ function WorkspaceBlock({
 function TripMiniFacts({ trip }: { trip: any }) {
   return (
     <div className="mt-3 flex flex-wrap gap-2 text-xs text-muted-foreground">
-      <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2.5 py-1">
+      <span className="fact-chip inline-flex items-center gap-1 rounded-full px-2.5 py-1">
         <CalendarDays className="size-3.5" />
         {service.dateOnly(trip.business_date, trip.timezone)} {trip.scheduled_time || ""}
       </span>
-      <span className="inline-flex items-center gap-1 rounded-full bg-secondary px-2.5 py-1">
+      <span className="fact-chip inline-flex items-center gap-1 rounded-full px-2.5 py-1">
         <MapPin className="size-3.5" />
         {trip.location || "未填地點"}
       </span>

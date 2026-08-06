@@ -1502,6 +1502,7 @@ test("admin quote task creation uses selected trip photos as task evidence", asy
           },
         ],
       },
+      { rows: [] },
     ],
     queries,
   );
@@ -1527,7 +1528,7 @@ test("admin quote task creation uses selected trip photos as task evidence", asy
     String(query.sql).includes("insert into helper_app.trip_audit_events"),
   );
   assert.ok(auditQuery);
-  assert.equal(auditQuery.params[4], "admin_quote_task_created");
+  assert.match(String(auditQuery.sql), /'admin_quote_task_created'/);
 });
 
 test("all admin quote task types accept uploaded photos as task evidence", async () => {
@@ -1590,12 +1591,12 @@ test("all admin quote task types accept uploaded photos as task evidence", async
       String(query.sql).includes("insert into helper_app.media_objects"),
     );
     assert.ok(mediaQuery);
-    assert.deepEqual(mediaQuery.params[0], [storageKey]);
+    assert.deepEqual(mediaQuery.params[6], [storageKey]);
     const taskPhotoQuery = queries.find((query) =>
       String(query.sql).includes("insert into helper_app.quote_task_photos"),
     );
     assert.ok(taskPhotoQuery);
-    assert.equal(taskPhotoQuery.params[3], null);
+    assert.deepEqual(taskPhotoQuery.params[10], [null]);
   }
 });
 
@@ -1618,7 +1619,6 @@ test("quote and detail reply validates active ownership and writes durable detai
           },
         ],
       },
-      { rows: [] },
       {
         rows: [
           {
@@ -1673,7 +1673,7 @@ test("quote and detail reply validates active ownership and writes durable detai
     String(query.sql).includes("insert into helper_app.trip_audit_events"),
   );
   assert.ok(auditQuery);
-  assert.equal(auditQuery.params[4], "helper_quote_photo_replied");
+  assert.match(String(auditQuery.sql), /'helper_quote_photo_replied'/);
 });
 
 test("editing a quote detail reply can keep the previous detail photo", async () => {
@@ -1728,15 +1728,12 @@ test("editing a quote detail reply can keep the previous detail photo", async ()
   });
 
   assert.equal(reply.id, "reply-2");
-  assert.equal(
-    queries.some((query) => String(query.sql).includes("insert into helper_app.media_objects")),
-    false,
-  );
-  const insertReplyQuery = queries.find((query) =>
+  const combinedReplyQuery = queries.find((query) =>
     String(query.sql).includes("insert into helper_app.quote_photo_replies"),
   );
-  assert.ok(insertReplyQuery);
-  assert.deepEqual(JSON.parse(insertReplyQuery.params[7]), [previousDetailPhoto]);
+  assert.ok(combinedReplyQuery);
+  assert.equal(combinedReplyQuery.params[12], false);
+  assert.deepEqual(JSON.parse(combinedReplyQuery.params[9]), [previousDetailPhoto]);
 });
 
 test("admin manual purchase task creation writes an open staging workflow task", async () => {
@@ -1750,15 +1747,6 @@ test("admin manual purchase task creation writes an open staging workflow task",
             id: "trip-1",
             status: "active",
             ...todayTripFields(),
-          },
-        ],
-      },
-      {
-        rows: [
-          {
-            id: "purchase-batch-1",
-            sequence: 0,
-            status: "open",
           },
         ],
       },
@@ -1811,7 +1799,7 @@ test("admin manual purchase task creation writes an open staging workflow task",
     String(query.sql).includes("insert into helper_app.trip_audit_events"),
   );
   assert.ok(auditQuery);
-  assert.equal(auditQuery.params[4], "admin_purchase_task_created");
+  assert.match(String(auditQuery.sql), /'admin_purchase_task_created'/);
 });
 
 test("helper completes a purchase task and creates completed-only staging preview", async () => {

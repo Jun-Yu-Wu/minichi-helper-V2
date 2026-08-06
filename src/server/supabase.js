@@ -7,6 +7,37 @@ import config from "./config";
 
 const ACCESS_COOKIE = "minichi_helper_access";
 const REFRESH_COOKIE = "minichi_helper_refresh";
+const AUTH_CACHE_TTL_MS = 5_000;
+const AUTH_CACHE_MAX_ENTRIES = 256;
+const privilegedClient = createPrivilegedSupabaseClient();
+const userCache = new Map();
+
+function cachedUser(accessToken) {
+  const entry = userCache.get(accessToken);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    userCache.delete(accessToken);
+    return null;
+  }
+  return entry.promise;
+}
+
+function rememberUser(accessToken, promise) {
+  if (userCache.size >= AUTH_CACHE_MAX_ENTRIES) {
+    const oldestKey = userCache.keys().next().value;
+    if (oldestKey) userCache.delete(oldestKey);
+  }
+  const cachedPromise = Promise.resolve(promise).then((result) => {
+    if (result?.error) userCache.delete(accessToken);
+    return result;
+  });
+  const entry = { expiresAt: Date.now() + AUTH_CACHE_TTL_MS, promise: cachedPromise };
+  userCache.set(accessToken, entry);
+  cachedPromise.catch(() => {
+    if (userCache.get(accessToken) === entry) userCache.delete(accessToken);
+  });
+  return cachedPromise;
+}
 
 export function createPrivilegedSupabaseClient() {
   const { secretKey, url } = config.authServerConfig();
@@ -21,7 +52,6 @@ export function createPrivilegedSupabaseClient() {
 
 export async function createServerSupabaseClient() {
   const cookieStore = await cookies();
-  const client = createPrivilegedSupabaseClient();
 
   return {
     auth: {
@@ -31,7 +61,11 @@ export async function createServerSupabaseClient() {
         // getUser() performs a server-side Auth check. Do not use getClaims()
         // here as the only guard: locally valid JWTs can outlive a logout or
         // account deactivation until their expiry time.
-        const current = await client.auth.getUser(accessToken);
+        const currentRequest = cachedUser(accessToken) || rememberUser(
+          accessToken,
+          privilegedClient.auth.getUser(accessToken),
+        );
+        const current = await currentRequest;
         if (!current.error && current.data?.user?.id) {
           return {
             data: {
@@ -41,11 +75,17 @@ export async function createServerSupabaseClient() {
           };
         }
 
+        // A transport error (for example a Supabase Auth connect timeout) is
+        // not evidence that the refresh token is expired. Retrying refresh in
+        // that case doubles the latency of every protected request.
+        if (!shouldRefreshAfterAuthError(current.error)) {
+          return { data: { user: null }, error: current.error };
+        }
         const refreshToken = cookieStore.get(REFRESH_COOKIE)?.value;
         if (!refreshToken) {
           return { data: { user: null }, error: current.error };
         }
-        const refreshed = await client.auth.refreshSession({
+        const refreshed = await privilegedClient.auth.refreshSession({
           refresh_token: refreshToken,
         });
         if (refreshed.error || !refreshed.data.session) {
@@ -57,6 +97,11 @@ export async function createServerSupabaseClient() {
       },
     },
   };
+}
+
+function shouldRefreshAfterAuthError(error) {
+  const status = Number(error?.status || error?.context?.status || 0);
+  return status === 401 || status === 403;
 }
 
 export function setAuthCookies(cookieStore, session, { requestUrl } = {}) {

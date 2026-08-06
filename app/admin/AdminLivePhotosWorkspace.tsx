@@ -151,7 +151,7 @@ export function AdminLivePhotosWorkspace({
   }
 
   return (
-    <section className="grid gap-4">
+    <section className="admin-live-workspace grid gap-4">
       <div className="grid gap-3">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <h3 className="text-lg font-semibold">選擇要監聽的行程</h3>
@@ -179,7 +179,7 @@ export function AdminLivePhotosWorkspace({
             {trips.map((trip) => (
               <button
                 className={cn(
-                  "rounded-lg border bg-card p-3 text-left shadow-sm transition",
+                  "admin-selection-card rounded-lg border bg-card p-3 text-left shadow-sm",
                   selectedTripId === trip.id ? "border-primary ring-2 ring-primary/20" : "hover:border-primary/50",
                 )}
                 key={trip.id}
@@ -197,7 +197,7 @@ export function AdminLivePhotosWorkspace({
       </div>
 
       {selectedTripId ? (
-        <nav aria-label="即時回傳工作區" className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+        <nav aria-label="即時回傳工作區" className="admin-live-nav grid grid-cols-2 gap-2 lg:grid-cols-4">
           <Button type="button">現場照片</Button>
           <Button asChild variant="outline"><Link href={`/admin?view=live&liveTripId=${encodeURIComponent(selectedTripId)}&liveSection=quote`}>詢價回覆</Link></Button>
           <Button asChild variant="outline"><Link href={`/admin?view=live&liveTripId=${encodeURIComponent(selectedTripId)}&liveSection=purchase`}>採買任務</Link></Button>
@@ -242,7 +242,7 @@ export function AdminLivePhotosWorkspace({
                 {activeBatch.photos.map((photo) => {
                   const selected = selectedPhotoIds.has(photo.id);
                   return (
-                    <button className="group relative aspect-square overflow-hidden rounded-md bg-muted" key={photo.id} onClick={() => selectedPhotoIds.size ? togglePhoto(photo.id) : setPreviewPhoto(photo)} type="button">
+                    <button className="admin-photo-tile group relative aspect-square overflow-hidden rounded-md bg-muted" key={photo.id} onClick={() => selectedPhotoIds.size ? togglePhoto(photo.id) : setPreviewPhoto(photo)} type="button">
                       <img alt={photo.original_filename || "現場照片"} className="size-full object-cover transition group-hover:scale-[1.02]" loading="lazy" src={photo.signed_url} />
                       <span className={cn("absolute right-2 top-2 grid size-7 place-items-center rounded-full border text-xs", selected ? "border-primary bg-primary text-primary-foreground" : "border-white/80 bg-black/35 text-white")} onClick={(event) => { event.stopPropagation(); togglePhoto(photo.id); }}>{selected ? <Check className="size-4" /> : ""}</span>
                       <span className="absolute bottom-2 right-2 grid size-7 place-items-center rounded-full bg-black/45 text-white opacity-0 transition group-hover:opacity-100"><Maximize2 className="size-4" /></span>
@@ -260,7 +260,7 @@ export function AdminLivePhotosWorkspace({
           <div className="grid gap-2">
             <h4 className="font-semibold">照片批次</h4>
             {batches.map((batch) => (
-              <button className="flex items-center justify-between gap-3 rounded-lg border bg-card p-3 text-left transition hover:border-primary/50" key={batch.id} onClick={() => selectBatch(batch.id)} type="button">
+              <button className="admin-queue-row flex items-center justify-between gap-3 rounded-lg border bg-card p-3 text-left" key={batch.id} onClick={() => selectBatch(batch.id)} type="button">
                 <span className="min-w-0"><span className="block truncate font-semibold">{batchNames.get(batch.id) || batch.note || "照片批次"}</span><span className="mt-1 block text-xs text-muted-foreground">{formatBatchTime(batch.created_at)}</span></span>
                 <span className="shrink-0 text-sm text-muted-foreground">{batch.photo_count} 張照片</span>
               </button>

@@ -34,12 +34,12 @@ function normalizeCertificate(value) {
   return `${begin}\n${body}\n${end}`;
 }
 
-function databaseConfig() {
+function databaseConfig({ connectionString: connectionStringOverride } = {}) {
   const connectionString = String(
-    process.env.SUPABASE_DB_URL || process.env.DATABASE_URL || "",
+    connectionStringOverride || process.env.SUPABASE_DB_URL || process.env.DATABASE_URL || "",
   ).trim();
   if (!connectionString) {
-    throw new Error("SUPABASE_DB_URL or DATABASE_URL is required.");
+    throw new Error("A database connection string is required.");
   }
   const sslMode = optionalEnv("SUPABASE_DB_SSL", "require").toLowerCase();
   if (["0", "false", "disable"].includes(sslMode)) {

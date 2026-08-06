@@ -9,7 +9,7 @@ import { EmptyState, StatusBadge, Surface } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
 import { PhotoFileInput } from "../components/PhotoFileInput";
-import { PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
+import { PhotoDraftEditor, PhotoViewerTrigger } from "../components/PhotoAnnotationEditor";
 import { useStaleResource } from "../../src/lib/client-resource-cache";
 import { useTripSectionNavigation } from "./TripSectionSwitcher";
 import { preparePhotoForUpload } from "../../src/lib/client-photo-upload";
@@ -27,6 +27,11 @@ type DetailPhoto = {
   sortOrder: number;
   status: UploadStatus;
   storageKey?: string;
+};
+
+type PendingDetailUpload = {
+  file: File;
+  promise: Promise<Partial<DetailPhoto>>;
 };
 
 export function QuoteTaskWorkspace({ tripId }: { tripId: string }) {
@@ -179,7 +184,7 @@ function QuoteTaskList({
   const taskNames = buildTaskNames(tasks);
 
   return (
-    <Surface className="grid gap-4">
+    <Surface className="trip-task-surface grid gap-4">
       <BackButton label="返回連線" onClick={onBack} type="button" variant="outline" />
       <div className="flex items-start justify-between gap-3">
         <div>
@@ -240,15 +245,15 @@ function QuoteTaskLane({
   title: string;
 }) {
   return (
-    <section className="grid gap-2">
+    <section className="trip-task-lane grid gap-2">
       <p className={`text-sm font-semibold ${completed ? "text-emerald-700" : ""}`}>{title}</p>
       {tasks.length ? tasks.map((task) => {
         const completedPhotos = Number(task.replied_photo_count || 0);
         const photoCount = Number(task.photo_count || task.photos?.length || 0);
         return (
           <button
-            className={`flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-foreground/20 hover:bg-accent/30 ${
-              completed ? "border-emerald-200 bg-emerald-50/60" : "bg-background"
+            className={`trip-task-card flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left shadow-sm ${
+              completed ? "trip-task-card--complete" : ""
             }`}
             key={task.id}
             type="button"
@@ -301,7 +306,7 @@ function QuoteTaskDetail({
   const doneCount = completedPhotoCount(photos);
 
   return (
-    <Surface className="grid gap-4">
+    <Surface className="trip-task-surface grid gap-4">
       <BackButton label="返回任務列表" onClick={onBack} type="button" />
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
@@ -414,7 +419,7 @@ function QuotePhotoReplyForm({
   taskType: string;
 }) {
   const [detailPhotos, setDetailPhotos] = useState<DetailPhoto[]>([]);
-  const uploadPromisesRef = useRef(new Map<string, Promise<Partial<DetailPhoto>>>());
+  const uploadPromisesRef = useRef(new Map<string, PendingDetailUpload>());
   const [error, setError] = useState("");
   const [idempotencyKey, setIdempotencyKey] = useState(() => createClientId("quote-reply"));
   const [note, setNote] = useState(() => String(photo.latest_reply?.note || ""));
@@ -424,6 +429,7 @@ function QuotePhotoReplyForm({
   );
   const [isEditing, setIsEditing] = useState(() => !photo.latest_reply);
   const [justSubmitted, setJustSubmitted] = useState(false);
+  const [editingPhotoId, setEditingPhotoId] = useState<string | null>(null);
 
   function completeLocalSubmit(uploadedPhotos = detailPhotos) {
     const uploadedDetailPhotos = uploadedPhotos
@@ -437,6 +443,7 @@ function QuotePhotoReplyForm({
         storage_key: detailPhoto.storageKey,
       }));
     const nextDetailPhotos = uploadedDetailPhotos.length ? uploadedDetailPhotos : existingDetailPhotos;
+    for (const detailPhoto of uploadedPhotos) URL.revokeObjectURL(detailPhoto.objectUrl);
     setDetailPhotos([]);
     setIsEditing(false);
     setIdempotencyKey(createClientId("quote-reply"));
@@ -483,9 +490,31 @@ function QuotePhotoReplyForm({
       ...current,
       ...selected.map((photo, index) => ({ ...photo, sortOrder: current.length + index })),
     ]);
-    for (const detailPhoto of selected) {
-      void startDetailPhotoUpload(detailPhoto).catch(() => undefined);
-    }
+    for (const detailPhoto of selected) uploadDetailPhoto(detailPhoto);
+  }
+
+  function saveEditedPhoto(file: File) {
+    if (!editingPhotoId) return;
+    const currentPhoto = detailPhotos.find((detailPhoto) => detailPhoto.clientPhotoId === editingPhotoId);
+    if (!currentPhoto) return;
+    const editedPhoto: DetailPhoto = {
+      ...currentPhoto,
+      byteSize: file.size,
+      contentType: file.type || "image/png",
+      error: undefined,
+      file,
+      objectUrl: URL.createObjectURL(file),
+      originalFilename: file.name,
+      status: "selected",
+      storageKey: undefined,
+    };
+    URL.revokeObjectURL(currentPhoto.objectUrl);
+    setDetailPhotos((current) => current.map((detailPhoto) => {
+      if (detailPhoto.clientPhotoId !== editingPhotoId) return detailPhoto;
+      return editedPhoto;
+    }));
+    setEditingPhotoId(null);
+    uploadDetailPhoto(editedPhoto);
   }
 
   function uploadDetailPhoto(detailPhoto: DetailPhoto) {
@@ -494,10 +523,11 @@ function QuotePhotoReplyForm({
 
   function startDetailPhotoUpload(detailPhoto: DetailPhoto) {
     const existing = uploadPromisesRef.current.get(detailPhoto.clientPhotoId);
-    if (existing) return existing;
+    if (existing && existing.file === detailPhoto.file) return existing.promise;
+    const file = detailPhoto.file;
     setDetailPhotos((current) =>
       current.map((item) =>
-        item.clientPhotoId === detailPhoto.clientPhotoId
+        item.clientPhotoId === detailPhoto.clientPhotoId && item.file === file
           ? { ...item, error: undefined, status: "uploading" }
           : item,
       ),
@@ -526,7 +556,7 @@ function QuotePhotoReplyForm({
       if (!upload.ok) throw new Error(`R2 上傳失敗 (${upload.status})。`);
       setDetailPhotos((current) =>
         current.map((item) =>
-          item.clientPhotoId === detailPhoto.clientPhotoId
+          item.clientPhotoId === detailPhoto.clientPhotoId && item.file === file
             ? { ...item, status: "uploaded", storageKey: presignBody.storageKey }
           : item,
         ),
@@ -540,26 +570,33 @@ function QuotePhotoReplyForm({
       };
     })()
       .then((uploaded) => {
-        uploadPromisesRef.current.delete(detailPhoto.clientPhotoId);
+        const pending = uploadPromisesRef.current.get(detailPhoto.clientPhotoId);
+        if (pending?.file === file && pending.promise === uploadPromise) {
+          uploadPromisesRef.current.delete(detailPhoto.clientPhotoId);
+        }
         return uploaded;
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : "上傳失敗。";
         setDetailPhotos((current) =>
           current.map((item) =>
-            item.clientPhotoId === detailPhoto.clientPhotoId
+            item.clientPhotoId === detailPhoto.clientPhotoId && item.file === file
               ? { ...item, error: message, status: "failed" }
               : item,
           ),
         );
-        uploadPromisesRef.current.delete(detailPhoto.clientPhotoId);
+        const pending = uploadPromisesRef.current.get(detailPhoto.clientPhotoId);
+        if (pending?.file === file && pending.promise === uploadPromise) {
+          uploadPromisesRef.current.delete(detailPhoto.clientPhotoId);
+        }
         throw error;
       });
-    uploadPromisesRef.current.set(detailPhoto.clientPhotoId, uploadPromise);
+    uploadPromisesRef.current.set(detailPhoto.clientPhotoId, { file, promise: uploadPromise });
     return uploadPromise;
   }
 
   function removeDetailPhoto(clientPhotoId: string) {
+    if (editingPhotoId === clientPhotoId) setEditingPhotoId(null);
     setDetailPhotos((current) => {
       const removed = current.find((detailPhoto) => detailPhoto.clientPhotoId === clientPhotoId);
       if (removed) URL.revokeObjectURL(removed.objectUrl);
@@ -580,8 +617,8 @@ function QuotePhotoReplyForm({
         detailPhotos.map(async (detailPhoto) => {
           if (detailPhoto.storageKey) return detailPhoto;
           const pendingUpload = uploadPromisesRef.current.get(detailPhoto.clientPhotoId);
-          const uploaded = pendingUpload
-            ? await pendingUpload
+          const uploaded = pendingUpload && pendingUpload.file === detailPhoto.file
+            ? await pendingUpload.promise
             : await startDetailPhotoUpload(detailPhoto);
           return { ...detailPhoto, ...uploaded };
         }),
@@ -765,17 +802,28 @@ function QuotePhotoReplyForm({
                   <div className="mt-2 grid gap-2">
                     <div className="flex items-start justify-between gap-2">
                       <p className="min-w-0 truncate text-sm">
-                        {detailPhoto.status === "uploaded" ? "" : statusLabel(detailPhoto.status)}
+                      {detailPhoto.status === "uploaded" ? "" : statusLabel(detailPhoto.status)}
                       </p>
-                      <button
-                        aria-label="移除細節照"
-                        className="rounded-md p-1 text-muted-foreground hover:bg-muted"
-                        disabled={formLocked || pending}
-                        type="button"
-                        onClick={() => removeDetailPhoto(detailPhoto.clientPhotoId)}
-                      >
-                        <X className="size-4" />
-                      </button>
+                      <div className="flex items-center gap-1">
+                        <button
+                          aria-label="編輯細節照"
+                          className="rounded-md p-1 text-muted-foreground hover:bg-muted"
+                          disabled={formLocked || pending}
+                          type="button"
+                          onClick={() => setEditingPhotoId(detailPhoto.clientPhotoId)}
+                        >
+                          <Pencil className="size-4" />
+                        </button>
+                        <button
+                          aria-label="移除細節照"
+                          className="rounded-md p-1 text-muted-foreground hover:bg-muted"
+                          disabled={formLocked || pending}
+                          type="button"
+                          onClick={() => removeDetailPhoto(detailPhoto.clientPhotoId)}
+                        >
+                          <X className="size-4" />
+                        </button>
+                      </div>
                     </div>
                     {detailPhoto.error ? <p className="text-xs text-destructive">{detailPhoto.error}</p> : null}
                     {detailPhoto.status === "failed" ? (
@@ -812,6 +860,19 @@ function QuotePhotoReplyForm({
           </Button>
         </form>
       ) : null}
+
+      {editingPhotoId ? (() => {
+        const detailPhoto = detailPhotos.find((item) => item.clientPhotoId === editingPhotoId);
+        return detailPhoto ? (
+          <PhotoDraftEditor
+            alt="細節照"
+            file={detailPhoto.file}
+            objectUrl={detailPhoto.objectUrl}
+            onCancel={() => setEditingPhotoId(null)}
+            onSaved={saveEditedPhoto}
+          />
+        ) : null;
+      })() : null}
     </div>
   );
 }

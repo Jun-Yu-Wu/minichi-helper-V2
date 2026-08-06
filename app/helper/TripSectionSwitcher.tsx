@@ -66,7 +66,7 @@ export function TripSectionSwitcher({
         openWork: () => setActiveSection("work"),
       }}
     >
-      <div className={`grid gap-5 ${shouldHideNav ? "" : "pb-28"}`}>
+      <div className={`trip-shell grid gap-5 ${shouldHideNav ? "" : "pb-28"}`}>
         {(activeSection === "detail" && hideChromeInDetail) ||
         activeSection === "site" ||
         activeSection === "quote"
@@ -90,7 +90,7 @@ export function TripSectionSwitcher({
         {shouldHideNav ? null : (
           <nav
             aria-label="行程主要操作"
-            className="fixed inset-x-0 bottom-0 z-50 border-t bg-background/95 px-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 shadow-[0_-12px_30px_rgba(15,23,42,0.12)] backdrop-blur sm:left-1/2 sm:right-auto sm:w-[min(42rem,calc(100%-2rem))] sm:-translate-x-1/2 sm:rounded-xl sm:border sm:p-2"
+            className="trip-bottom-nav fixed inset-x-0 bottom-0 z-50 border-t bg-background/95 px-4 pb-[calc(0.75rem+env(safe-area-inset-bottom))] pt-3 shadow-[0_-12px_30px_rgba(15,23,42,0.12)] backdrop-blur sm:left-1/2 sm:right-auto sm:w-[min(42rem,calc(100%-2rem))] sm:-translate-x-1/2 sm:rounded-xl sm:border sm:p-2"
           >
             <div className="mx-auto grid max-w-2xl grid-cols-2 gap-2">
               {items.map((item) => {
@@ -105,6 +105,7 @@ export function TripSectionSwitcher({
                     onClick={() => setActiveSection(item.section)}
                     size="lg"
                     type="button"
+                    className="trip-bottom-nav__button"
                     variant={isActive ? "default" : "outline"}
                   >
                     {item.icon}

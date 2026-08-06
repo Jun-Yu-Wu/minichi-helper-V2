@@ -6,13 +6,13 @@ export default function HelperLoading() {
       className="grid gap-4"
       role="status"
     >
-      <div className="h-32 animate-pulse rounded-xl border bg-card" />
+      <div className="skeleton-block h-32 rounded-xl border" />
       <div className="grid gap-3 sm:grid-cols-2">
         {[0, 1].map((item) => (
-          <div className="h-24 animate-pulse rounded-xl border bg-card" key={item} />
+          <div className="skeleton-block h-24 rounded-xl border" key={item} />
         ))}
       </div>
-      <div className="h-48 animate-pulse rounded-xl border bg-card" />
+      <div className="skeleton-block h-48 rounded-xl border" />
       <p className="text-center text-sm text-muted-foreground">正在載入你的工作狀態…</p>
     </div>
   );

@@ -1,7 +1,7 @@
 "use client";
 
 import { useActionState, useEffect, useRef, useState } from "react";
-import { ChevronDown, ImageUp, PackagePlus, X } from "lucide-react";
+import { ChevronDown, ImageUp, PackagePlus, Pencil, X } from "lucide-react";
 
 import {
   createHelperAction,
@@ -16,6 +16,7 @@ import {
 } from "../actions/admin";
 import { Button } from "../components/ui/button";
 import { PhotoFileInput } from "../components/PhotoFileInput";
+import { PhotoDraftEditor } from "../components/PhotoAnnotationEditor";
 import { preparePhotoForUpload } from "../../src/lib/client-photo-upload";
 
 const initialState: AdminActionResult = {};
@@ -362,9 +363,11 @@ export function CreateRebuyTaskForm({
 }) {
   const [photos, setPhotos] = useState<AdminTaskUploadPhoto[]>([]);
   const photosRef = useRef<AdminTaskUploadPhoto[]>([]);
+  const uploadPromisesRef = useRef(new Map<string, PendingAdminPhotoUpload>());
   const [state, setState] = useState<AdminActionResult>({});
   const [pending, setPending] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
+  const [editingPhotoId, setEditingPhotoId] = useState<string | null>(null);
   const sourceCandidates = purchaseTasks.filter((task) => ["canceled", "unavailable", "not_found"].includes(task.status));
 
   useEffect(() => {
@@ -400,9 +403,37 @@ export function CreateRebuyTaskForm({
       ...current,
       ...selected.map((photo, index) => ({ ...photo, sortOrder: current.length + index })),
     ]);
+    for (const photo of selected) {
+      if (!photo.error) void startPhotoUpload(photo).catch(() => undefined);
+    }
+  }
+
+  function saveEditedPhoto(file: File) {
+    if (!editingPhotoId) return;
+    const currentPhoto = photos.find((photo) => photo.clientPhotoId === editingPhotoId);
+    if (!currentPhoto || !currentPhoto.file) return;
+    const editedPhoto: AdminTaskUploadPhoto = {
+      ...currentPhoto,
+      byteSize: file.size,
+      contentType: file.type || "image/png",
+      error: undefined,
+      file,
+      objectUrl: URL.createObjectURL(file),
+      originalFilename: file.name,
+      status: "selected",
+      storageKey: undefined,
+    };
+    URL.revokeObjectURL(currentPhoto.objectUrl);
+    setPhotos((current) => current.map((photo) => {
+      if (photo.clientPhotoId !== editingPhotoId) return photo;
+      return editedPhoto;
+    }));
+    setEditingPhotoId(null);
+    void startPhotoUpload(editedPhoto).catch(() => undefined);
   }
 
   function removePhoto(clientPhotoId: string) {
+    if (editingPhotoId === clientPhotoId) setEditingPhotoId(null);
     setPhotos((current) => {
       const removed = current.find((photo) => photo.clientPhotoId === clientPhotoId);
       if (removed) URL.revokeObjectURL(removed.objectUrl);
@@ -412,12 +443,36 @@ export function CreateRebuyTaskForm({
     });
   }
 
-  function updatePhoto(clientPhotoId: string, patch: Partial<AdminTaskUploadPhoto>) {
+  function updatePhoto(clientPhotoId: string, patch: Partial<AdminTaskUploadPhoto>, file?: File) {
     setPhotos((current) =>
       current.map((photo) =>
-        photo.clientPhotoId === clientPhotoId ? { ...photo, ...patch } : photo,
+        photo.clientPhotoId === clientPhotoId && (!file || photo.file === file) ? { ...photo, ...patch } : photo,
       ),
     );
+  }
+
+  function startPhotoUpload(photo: AdminTaskUploadPhoto) {
+    const file = photo.file;
+    if (!file) return Promise.resolve({ ...photo, status: "uploaded" as const });
+    const existing = uploadPromisesRef.current.get(photo.clientPhotoId);
+    if (existing && existing.file === file) return existing.promise;
+    updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" }, file);
+    const uploadPromise = uploadAdminRebuyReferencePhoto(photo)
+      .then((uploaded) => {
+        updatePhoto(photo.clientPhotoId, uploaded, file);
+        const pending = uploadPromisesRef.current.get(photo.clientPhotoId);
+        if (pending?.file === file && pending.promise === uploadPromise) uploadPromisesRef.current.delete(photo.clientPhotoId);
+        return uploaded;
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : "照片上傳失敗。";
+        updatePhoto(photo.clientPhotoId, { error: message, status: "failed" }, file);
+        const pending = uploadPromisesRef.current.get(photo.clientPhotoId);
+        if (pending?.file === file && pending.promise === uploadPromise) uploadPromisesRef.current.delete(photo.clientPhotoId);
+        throw error;
+      });
+    uploadPromisesRef.current.set(photo.clientPhotoId, { file, promise: uploadPromise });
+    return uploadPromise;
   }
 
   async function submitRebuyTask(event: React.FormEvent<HTMLFormElement>) {
@@ -430,10 +485,11 @@ export function CreateRebuyTaskForm({
       const uploadedPhotos = await Promise.all(
         photos.map(async (photo) => {
           if (photo.storageKey) return photo;
-          updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" });
           try {
-            const uploaded = await uploadAdminRebuyReferencePhoto(photo);
-            updatePhoto(photo.clientPhotoId, uploaded);
+            const pendingUpload = uploadPromisesRef.current.get(photo.clientPhotoId);
+            const uploaded = pendingUpload && pendingUpload.file === photo.file
+              ? await pendingUpload.promise
+              : await startPhotoUpload(photo);
             return { ...photo, ...uploaded };
           } catch (error) {
             const message = error instanceof Error ? error.message : "照片上傳失敗。";
@@ -574,14 +630,14 @@ export function CreateRebuyTaskForm({
                     ) : null}
                   </div>
                   {!pending ? (
-                    <button
-                      aria-label="移除照片"
-                      className="rounded-md p-1 text-muted-foreground hover:bg-muted"
-                      type="button"
-                      onClick={() => removePhoto(photo.clientPhotoId)}
-                    >
-                      <X className="size-4" />
-                    </button>
+                    <div className="flex items-center gap-1">
+                      <button aria-label="編輯照片" className="rounded-md p-1 text-muted-foreground hover:bg-muted" type="button" onClick={() => setEditingPhotoId(photo.clientPhotoId)}>
+                        <Pencil className="size-4" />
+                      </button>
+                      <button aria-label="移除照片" className="rounded-md p-1 text-muted-foreground hover:bg-muted" type="button" onClick={() => removePhoto(photo.clientPhotoId)}>
+                        <X className="size-4" />
+                      </button>
+                    </div>
                   ) : null}
                 </div>
                 {photo.error ? <p className="mt-1 text-xs text-destructive">{photo.error}</p> : null}
@@ -595,6 +651,18 @@ export function CreateRebuyTaskForm({
         送出
       </Button>
       </> : null}
+      {editingPhotoId ? (() => {
+        const photo = photos.find((item) => item.clientPhotoId === editingPhotoId);
+        return photo?.file ? (
+          <PhotoDraftEditor
+            alt="補買參考照"
+            file={photo.file}
+            objectUrl={photo.objectUrl}
+            onCancel={() => setEditingPhotoId(null)}
+            onSaved={saveEditedPhoto}
+          />
+        ) : null;
+      })() : null}
     </form>
   );
 }
@@ -629,9 +697,10 @@ export function CreatePurchaseTaskForm({
 }) {
   const [photos, setPhotos] = useState<AdminTaskUploadPhoto[]>([]);
   const photosRef = useRef<AdminTaskUploadPhoto[]>([]);
-  const uploadPromisesRef = useRef(new Map<string, Promise<Partial<AdminTaskUploadPhoto>>>());
+  const uploadPromisesRef = useRef(new Map<string, PendingAdminPhotoUpload>());
   const [state, setState] = useState<AdminActionResult>({});
   const [pending, setPending] = useState(false);
+  const [editingPhotoId, setEditingPhotoId] = useState<string | null>(null);
   const [formResetKey, setFormResetKey] = useState(0);
   const [lineCommunityName, setLineCommunityName] = useState("");
   const [productName, setProductName] = useState("");
@@ -710,12 +779,37 @@ export function CreatePurchaseTaskForm({
       ...current,
       ...selected.map((photo, index) => ({ ...photo, sortOrder: current.length + index })),
     ]);
-    for (const photo of selected.filter((item) => !item.error)) {
-      void startPhotoUpload(photo).catch(() => undefined);
+    for (const photo of selected) {
+      if (!photo.error) void startPhotoUpload(photo).catch(() => undefined);
     }
   }
 
+  function saveEditedPhoto(file: File) {
+    if (!editingPhotoId) return;
+    const currentPhoto = photos.find((photo) => photo.clientPhotoId === editingPhotoId);
+    if (!currentPhoto || !currentPhoto.file) return;
+    const editedPhoto: AdminTaskUploadPhoto = {
+      ...currentPhoto,
+      byteSize: file.size,
+      contentType: file.type || "image/png",
+      error: undefined,
+      file,
+      objectUrl: URL.createObjectURL(file),
+      originalFilename: file.name,
+      status: "selected",
+      storageKey: undefined,
+    };
+    URL.revokeObjectURL(currentPhoto.objectUrl);
+    setPhotos((current) => current.map((photo) => {
+      if (photo.clientPhotoId !== editingPhotoId) return photo;
+      return editedPhoto;
+    }));
+    setEditingPhotoId(null);
+    void startPhotoUpload(editedPhoto).catch(() => undefined);
+  }
+
   function applyProductSuggestion(suggestion: PurchaseProductSuggestion) {
+    setEditingPhotoId(null);
     for (const photo of photosRef.current) {
       if (!photo.reused) URL.revokeObjectURL(photo.objectUrl);
     }
@@ -743,6 +837,7 @@ export function CreatePurchaseTaskForm({
   }
 
   function removePhoto(clientPhotoId: string) {
+    if (editingPhotoId === clientPhotoId) setEditingPhotoId(null);
     setPhotos((current) => {
       const removed = current.find((photo) => photo.clientPhotoId === clientPhotoId);
       if (removed) URL.revokeObjectURL(removed.objectUrl);
@@ -767,10 +862,10 @@ export function CreatePurchaseTaskForm({
       const uploadedPhotos = await Promise.all(
         photos.map(async (photo) => {
           if (photo.storageKey) return photo;
-          const pendingUpload = uploadPromisesRef.current.get(photo.clientPhotoId);
-          try {
-            const uploaded = pendingUpload
-              ? await pendingUpload
+            const pendingUpload = uploadPromisesRef.current.get(photo.clientPhotoId);
+            try {
+            const uploaded = pendingUpload && pendingUpload.file === photo.file
+              ? await pendingUpload.promise
               : await startPhotoUpload(photo);
             return { ...photo, ...uploaded };
           } catch (error) {
@@ -820,28 +915,32 @@ export function CreatePurchaseTaskForm({
 
   function startPhotoUpload(photo: AdminTaskUploadPhoto) {
     const existing = uploadPromisesRef.current.get(photo.clientPhotoId);
-    if (existing) return existing;
-    updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" });
+    if (existing && existing.file === photo.file) return existing.promise;
+    const file = photo.file;
+    if (!file) return Promise.resolve({ ...photo, status: "uploaded" as const });
+    updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" }, file);
     const uploadPromise = uploadAdminTaskPhoto(photo, trip.id, "admin_purchase_task_photo")
       .then((uploaded) => {
-        updatePhoto(photo.clientPhotoId, uploaded);
-        uploadPromisesRef.current.delete(photo.clientPhotoId);
+        updatePhoto(photo.clientPhotoId, uploaded, file);
+        const pending = uploadPromisesRef.current.get(photo.clientPhotoId);
+        if (pending?.file === file && pending.promise === uploadPromise) uploadPromisesRef.current.delete(photo.clientPhotoId);
         return uploaded;
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : "照片上傳失敗。";
-        updatePhoto(photo.clientPhotoId, { error: message, status: "failed" });
-        uploadPromisesRef.current.delete(photo.clientPhotoId);
+        updatePhoto(photo.clientPhotoId, { error: message, status: "failed" }, file);
+        const pending = uploadPromisesRef.current.get(photo.clientPhotoId);
+        if (pending?.file === file && pending.promise === uploadPromise) uploadPromisesRef.current.delete(photo.clientPhotoId);
         throw error;
       });
-    uploadPromisesRef.current.set(photo.clientPhotoId, uploadPromise);
+    uploadPromisesRef.current.set(photo.clientPhotoId, { file, promise: uploadPromise });
     return uploadPromise;
   }
 
-  function updatePhoto(clientPhotoId: string, patch: Partial<AdminTaskUploadPhoto>) {
+  function updatePhoto(clientPhotoId: string, patch: Partial<AdminTaskUploadPhoto>, file?: File) {
     setPhotos((current) =>
       current.map((photo) =>
-        photo.clientPhotoId === clientPhotoId ? { ...photo, ...patch } : photo,
+        photo.clientPhotoId === clientPhotoId && (!file || photo.file === file) ? { ...photo, ...patch } : photo,
       ),
     );
   }
@@ -974,6 +1073,11 @@ export function CreatePurchaseTaskForm({
                   </div>
                   {!pending ? (
                     <div className="flex items-center gap-1">
+                      {!photo.reused && photo.file ? (
+                        <button aria-label="編輯照片" className="rounded-md p-1 text-muted-foreground hover:bg-muted" type="button" onClick={() => setEditingPhotoId(photo.clientPhotoId)}>
+                          <Pencil className="size-4" />
+                        </button>
+                      ) : null}
                       {photo.status === "failed" && !photo.reused ? (
                         <button
                           className="rounded-md px-2 py-1 text-xs font-medium text-primary hover:bg-muted"
@@ -1011,6 +1115,18 @@ export function CreatePurchaseTaskForm({
       >
         送出
       </Button>
+      {editingPhotoId ? (() => {
+        const photo = photos.find((item) => item.clientPhotoId === editingPhotoId);
+        return photo?.file ? (
+          <PhotoDraftEditor
+            alt="採買參考照"
+            file={photo.file}
+            objectUrl={photo.objectUrl}
+            onCancel={() => setEditingPhotoId(null)}
+            onSaved={saveEditedPhoto}
+          />
+        ) : null;
+      })() : null}
     </form>
   );
 }
@@ -1217,6 +1333,11 @@ type AdminTaskUploadPhoto = {
   storageKey?: string;
 };
 
+type PendingAdminPhotoUpload = {
+  file: File;
+  promise: Promise<Partial<AdminTaskUploadPhoto>>;
+};
+
 const MAX_ADMIN_TASK_PHOTO_BYTES = 8 * 1024 * 1024;
 const MAX_ADMIN_TASK_SOURCE_PHOTO_BYTES = 24 * 1024 * 1024;
 
@@ -1229,9 +1350,10 @@ function CreateUploadedQuoteTaskForm({
 }) {
   const [photos, setPhotos] = useState<AdminTaskUploadPhoto[]>([]);
   const photosRef = useRef<AdminTaskUploadPhoto[]>([]);
-  const uploadPromisesRef = useRef(new Map<string, Promise<Partial<AdminTaskUploadPhoto>>>());
+  const uploadPromisesRef = useRef(new Map<string, PendingAdminPhotoUpload>());
   const [state, setState] = useState<AdminActionResult>({});
   const [pending, setPending] = useState(false);
+  const [editingPhotoId, setEditingPhotoId] = useState<string | null>(null);
 
   useEffect(() => {
     photosRef.current = photos;
@@ -1266,12 +1388,37 @@ function CreateUploadedQuoteTaskForm({
       ...current,
       ...selected.map((photo, index) => ({ ...photo, sortOrder: current.length + index })),
     ]);
-    for (const photo of selected.filter((item) => !item.error)) {
-      void startPhotoUpload(photo).catch(() => undefined);
+    for (const photo of selected) {
+      if (!photo.error) void startPhotoUpload(photo).catch(() => undefined);
     }
   }
 
+  function saveEditedPhoto(file: File) {
+    if (!editingPhotoId) return;
+    const currentPhoto = photos.find((photo) => photo.clientPhotoId === editingPhotoId);
+    if (!currentPhoto || !currentPhoto.file) return;
+    const editedPhoto: AdminTaskUploadPhoto = {
+      ...currentPhoto,
+      byteSize: file.size,
+      contentType: file.type || "image/png",
+      error: undefined,
+      file,
+      objectUrl: URL.createObjectURL(file),
+      originalFilename: file.name,
+      status: "selected",
+      storageKey: undefined,
+    };
+    URL.revokeObjectURL(currentPhoto.objectUrl);
+    setPhotos((current) => current.map((photo) => {
+      if (photo.clientPhotoId !== editingPhotoId) return photo;
+      return editedPhoto;
+    }));
+    setEditingPhotoId(null);
+    void startPhotoUpload(editedPhoto).catch(() => undefined);
+  }
+
   function removePhoto(clientPhotoId: string) {
+    if (editingPhotoId === clientPhotoId) setEditingPhotoId(null);
     setPhotos((current) => {
       const removed = current.find((photo) => photo.clientPhotoId === clientPhotoId);
       if (removed) URL.revokeObjectURL(removed.objectUrl);
@@ -1297,8 +1444,8 @@ function CreateUploadedQuoteTaskForm({
           if (photo.storageKey) return photo;
           try {
             const pendingUpload = uploadPromisesRef.current.get(photo.clientPhotoId);
-            const uploaded = pendingUpload
-              ? await pendingUpload
+            const uploaded = pendingUpload && pendingUpload.file === photo.file
+              ? await pendingUpload.promise
               : await startPhotoUpload(photo);
             return { ...photo, ...uploaded };
           } catch (error) {
@@ -1339,28 +1486,32 @@ function CreateUploadedQuoteTaskForm({
 
   function startPhotoUpload(photo: AdminTaskUploadPhoto) {
     const existing = uploadPromisesRef.current.get(photo.clientPhotoId);
-    if (existing) return existing;
-    updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" });
+    if (existing && existing.file === photo.file) return existing.promise;
+    const file = photo.file;
+    if (!file) return Promise.resolve({ ...photo, status: "uploaded" as const });
+    updatePhoto(photo.clientPhotoId, { error: undefined, status: "uploading" }, file);
     const uploadPromise = uploadAdminTaskPhoto(photo, trip.id)
       .then((uploaded) => {
-        updatePhoto(photo.clientPhotoId, uploaded);
-        uploadPromisesRef.current.delete(photo.clientPhotoId);
+        updatePhoto(photo.clientPhotoId, uploaded, file);
+        const pending = uploadPromisesRef.current.get(photo.clientPhotoId);
+        if (pending?.file === file && pending.promise === uploadPromise) uploadPromisesRef.current.delete(photo.clientPhotoId);
         return uploaded;
       })
       .catch((error) => {
         const message = error instanceof Error ? error.message : "照片上傳失敗。";
-        updatePhoto(photo.clientPhotoId, { error: message, status: "failed" });
-        uploadPromisesRef.current.delete(photo.clientPhotoId);
+        updatePhoto(photo.clientPhotoId, { error: message, status: "failed" }, file);
+        const pending = uploadPromisesRef.current.get(photo.clientPhotoId);
+        if (pending?.file === file && pending.promise === uploadPromise) uploadPromisesRef.current.delete(photo.clientPhotoId);
         throw error;
       });
-    uploadPromisesRef.current.set(photo.clientPhotoId, uploadPromise);
+    uploadPromisesRef.current.set(photo.clientPhotoId, { file, promise: uploadPromise });
     return uploadPromise;
   }
 
-  function updatePhoto(clientPhotoId: string, patch: Partial<AdminTaskUploadPhoto>) {
+  function updatePhoto(clientPhotoId: string, patch: Partial<AdminTaskUploadPhoto>, file?: File) {
     setPhotos((current) =>
       current.map((photo) =>
-        photo.clientPhotoId === clientPhotoId ? { ...photo, ...patch } : photo,
+        photo.clientPhotoId === clientPhotoId && (!file || photo.file === file) ? { ...photo, ...patch } : photo,
       ),
     );
   }
@@ -1407,14 +1558,14 @@ function CreateUploadedQuoteTaskForm({
                   ) : null}
                 </div>
                 {!pending ? (
-                  <button
-                    aria-label="移除照片"
-                    className="rounded-md p-1 text-muted-foreground hover:bg-muted"
-                    type="button"
-                    onClick={() => removePhoto(photo.clientPhotoId)}
-                  >
-                    <X className="size-4" />
-                  </button>
+                  <div className="flex items-center gap-1">
+                    <button aria-label="編輯照片" className="rounded-md p-1 text-muted-foreground hover:bg-muted" type="button" onClick={() => setEditingPhotoId(photo.clientPhotoId)}>
+                      <Pencil className="size-4" />
+                    </button>
+                    <button aria-label="移除照片" className="rounded-md p-1 text-muted-foreground hover:bg-muted" type="button" onClick={() => removePhoto(photo.clientPhotoId)}>
+                      <X className="size-4" />
+                    </button>
+                  </div>
                 ) : null}
               </div>
               {photo.error ? <p className="mt-1 text-xs text-destructive">{photo.error}</p> : null}
@@ -1434,6 +1585,18 @@ function CreateUploadedQuoteTaskForm({
       >
         送出
       </Button>
+      {editingPhotoId ? (() => {
+        const photo = photos.find((item) => item.clientPhotoId === editingPhotoId);
+        return photo?.file ? (
+          <PhotoDraftEditor
+            alt="任務照片"
+            file={photo.file}
+            objectUrl={photo.objectUrl}
+            onCancel={() => setEditingPhotoId(null)}
+            onSaved={saveEditedPhoto}
+          />
+        ) : null;
+      })() : null}
     </form>
   );
 }

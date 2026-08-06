@@ -185,6 +185,19 @@ export async function POST(request: Request) {
     const uploadUrl = await r2Store.signedPutUrl(storageKey, contentType);
     const expiresAt = new Date(Date.now() + r2Store.ttlSeconds * 1000).toISOString();
     const completedAt = performance.now();
+    const timing = {
+      authMs: Math.round(authenticatedAt - startedAt),
+      authorizeMs: Math.round(authorizedAt - authenticatedAt),
+      signMs: Math.round(completedAt - authorizedAt),
+      totalMs: Math.round(completedAt - startedAt),
+    };
+    if (timing.totalMs >= 500) {
+      console.info(JSON.stringify({
+        event: "upload_presigned_slow",
+        ...timing,
+        uploadPurpose,
+      }));
+    }
 
     return NextResponse.json({
       expiresAt,
@@ -193,10 +206,10 @@ export async function POST(request: Request) {
     }, {
       headers: {
         "Server-Timing": [
-          `auth;dur=${(authenticatedAt - startedAt).toFixed(1)}`,
-          `authorize;dur=${(authorizedAt - authenticatedAt).toFixed(1)}`,
-          `sign;dur=${(completedAt - authorizedAt).toFixed(1)}`,
-          `total;dur=${(completedAt - startedAt).toFixed(1)}`,
+          `auth;dur=${timing.authMs}`,
+          `authorize;dur=${timing.authorizeMs}`,
+          `sign;dur=${timing.signMs}`,
+          `total;dur=${timing.totalMs}`,
         ].join(", "),
       },
     });

@@ -1,4 +1,5 @@
 import type React from "react";
+import { AlertCircle, CheckCircle2, Info } from "lucide-react";
 
 import { cn } from "@/src/lib/utils";
 
@@ -26,15 +27,15 @@ export function PageHeader({
   title: string;
 }) {
   return (
-    <section className="rounded-xl border bg-card p-5 shadow-sm sm:p-6">
-      <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+    <section className="page-header relative overflow-hidden p-1 pb-7 sm:p-2 sm:pb-8">
+      <div className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
         <div className="min-w-0">
           {eyebrow ? (
-            <p className="text-xs font-semibold uppercase text-muted-foreground">
+            <p className="text-xs font-semibold tracking-wide text-muted-foreground">
               {eyebrow}
             </p>
           ) : null}
-          <h2 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">
+          <h2 className="mt-2 text-3xl font-semibold tracking-[-0.04em] sm:text-5xl">
             {title}
           </h2>
           {subtitle ? (
@@ -46,7 +47,7 @@ export function PageHeader({
         {actions ? <div className="flex shrink-0 flex-wrap gap-2">{actions}</div> : null}
       </div>
       {metrics?.length ? (
-        <div className="mt-5 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="page-header__metrics mt-7 grid grid-cols-2 gap-y-4 pt-5 sm:grid-cols-4 sm:gap-y-0">
           {metrics.map((metric) => (
             <MetricTile key={metric.label} label={metric.label} value={metric.value} />
           ))}
@@ -58,9 +59,9 @@ export function PageHeader({
 
 export function MetricTile({ label, value }: { label: string; value: string }) {
   return (
-    <div className="rounded-lg border bg-background px-4 py-3">
-      <p className="text-2xl font-semibold tracking-tight">{value}</p>
-      <p className="mt-1 text-sm text-muted-foreground">{label}</p>
+    <div className="metric-tile px-4 first:border-l-0 sm:first:border-l-0">
+      <p className="text-xs font-medium text-muted-foreground">{label}</p>
+      <p className="data-type mt-1 text-2xl font-semibold tracking-tight">{value}</p>
     </div>
   );
 }
@@ -76,10 +77,11 @@ export function StatusBadge({
     <span
       aria-label={typeof children === "string" ? children : undefined}
       className={cn(
-        "inline-flex min-h-7 items-center rounded-full border px-2.5 py-1 text-xs font-semibold",
+        "inline-flex min-h-7 items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-semibold",
         toneClasses[tone],
       )}
     >
+      <span aria-hidden="true" className="size-1.5 rounded-full bg-current opacity-70" />
       {children}
     </span>
   );
@@ -93,7 +95,7 @@ export function EmptyState({
   title: string;
 }) {
   return (
-    <div aria-live="polite" className="rounded-xl border border-dashed bg-card p-5 text-sm shadow-sm" role="status">
+    <div aria-live="polite" className="empty-state rounded-xl bg-secondary/55 p-6 text-sm" role="status">
       <p className="font-semibold text-foreground">{title}</p>
       <p className="mt-1 leading-6 text-muted-foreground">{body}</p>
     </div>
@@ -109,10 +111,14 @@ export function InsightBanner({
   title: string;
   tone?: Tone;
 }) {
+  const Icon = tone === "red" ? AlertCircle : tone === "green" ? CheckCircle2 : Info;
   return (
-    <div className={cn("rounded-lg border p-3 text-sm", toneClasses[tone])}>
-      <p className="font-semibold">{title}</p>
-      {body ? <p className="mt-1 leading-6 opacity-85">{body}</p> : null}
+    <div className={cn("flex gap-3 rounded-xl border p-3.5 text-sm", toneClasses[tone])}>
+      <Icon aria-hidden="true" className="mt-0.5 size-4 shrink-0" />
+      <div>
+        <p className="font-semibold">{title}</p>
+        {body ? <p className="mt-1 leading-6 opacity-85">{body}</p> : null}
+      </div>
     </div>
   );
 }
@@ -130,11 +136,11 @@ export function SectionTitle({
     <div className="flex items-end justify-between gap-3">
       <div>
         {eyebrow ? (
-          <p className="text-xs font-semibold uppercase text-muted-foreground">
+            <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.18em] text-muted-foreground">
             {eyebrow}
           </p>
         ) : null}
-        <h3 className="mt-1 text-lg font-semibold tracking-tight">{title}</h3>
+        <h3 className="mt-1 text-xl font-semibold tracking-[-0.02em]">{title}</h3>
       </div>
       {typeof count === "number" ? (
         <span className="text-sm text-muted-foreground">{count} 筆</span>
@@ -151,7 +157,7 @@ export function Surface({
   className?: string;
 }) {
   return (
-    <section className={cn("rounded-xl border bg-card p-4 shadow-sm sm:p-5", className)}>
+    <section className={cn("surface rounded-2xl border bg-card p-4 sm:p-5", className)}>
       {children}
     </section>
   );
