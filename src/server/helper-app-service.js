@@ -31,6 +31,25 @@ const ADMIN_DASHBOARD_SECTIONS = [
   "settlements",
 ];
 
+const PURCHASE_PRODUCT_TYPES = new Set(["standard", "gacha", "blind_box"]);
+const GACHA_PRODUCT_TYPES = new Set(["gacha", "blind_box"]);
+
+function normalizePurchaseProductType(value) {
+  const productType = String(value || "standard").trim().toLowerCase();
+  if (!PURCHASE_PRODUCT_TYPES.has(productType)) {
+    throw new HelperAppServiceError("invalid_input", "Invalid purchase product type.");
+  }
+  return productType;
+}
+
+function purchaseReferencePhotoRole(productType) {
+  return GACHA_PRODUCT_TYPES.has(productType) ? "series_reference" : "manual_reference";
+}
+
+function isGachaProductType(productType) {
+  return GACHA_PRODUCT_TYPES.has(String(productType || "standard"));
+}
+
 /**
  * @param {object} database
  * @param {{
@@ -617,7 +636,7 @@ async function listPurchaseTasks(
               pb.status as purchase_batch_status,
               pt.source_quote_task_id,
               pt.source_quote_task_photo_id, pt.source_quote_reply_id,
-              pt.line_community_name, pt.product_name, pt.quantity,
+              pt.product_type, pt.line_community_name, pt.product_name, pt.quantity,
               pt.original_price_jpy, pt.sale_price_twd, pt.note,
               pt.requires_face_check, pt.status, pt.completed_quantity,
               pt.unavailable_quantity, pt.helper_note, pt.face_check_note,
@@ -660,7 +679,7 @@ async function listPurchaseTasks(
             pb.status as purchase_batch_status,
             pt.source_quote_task_id,
             pt.source_quote_task_photo_id, pt.source_quote_reply_id,
-            pt.line_community_name, pt.product_name, pt.quantity,
+            pt.product_type, pt.line_community_name, pt.product_name, pt.quantity,
             pt.original_price_jpy, pt.sale_price_twd, pt.note,
             pt.requires_face_check, pt.status, pt.completed_quantity,
             pt.unavailable_quantity, pt.helper_note, pt.face_check_note,
@@ -746,7 +765,7 @@ async function getPurchaseTaskDetail(
     ? ""
     : photoMode === "report"
       ? "and ptp.photo_role in ('detail_reply', 'purchase_report', 'face_check_report')"
-      : "and ptp.photo_role in ('manual_reference', 'source')";
+      : "and ptp.photo_role in ('manual_reference', 'series_reference', 'source')";
   const result = await database.query(
     `select pt.id, pt.trip_id, pt.helper_id, pt.purchase_batch_id,
             pb.group_key as purchase_batch_group_key,
@@ -754,7 +773,7 @@ async function getPurchaseTaskDetail(
             pb.status as purchase_batch_status,
             pt.source_quote_task_id,
             pt.source_quote_task_photo_id, pt.source_quote_reply_id,
-            pt.line_community_name, pt.product_name, pt.quantity,
+            pt.product_type, pt.line_community_name, pt.product_name, pt.quantity,
             pt.original_price_jpy, pt.sale_price_twd, pt.note,
             pt.requires_face_check, pt.status, pt.completed_quantity,
             pt.unavailable_quantity, pt.helper_note, pt.face_check_note,
@@ -771,6 +790,7 @@ async function getPurchaseTaskDetail(
        select jsonb_build_object(
                 'id', batch.id,
                 'product_name', batch.product_name,
+                'product_type', batch.product_type,
                 'sequence', batch.sequence,
                 'status', batch.status,
                 'requires_face_check', batch.requires_face_check,
@@ -1021,6 +1041,7 @@ async function listStagingMergeJobs(
                 'id', rso.id,
                 'staging_order_preview_id', rso.staging_order_preview_id,
                 'purchase_task_id', rso.purchase_task_id,
+                'product_type', rso.product_type,
                 'line_community_name', rso.line_community_name,
                 'product_name', rso.product_name,
                 'appearance_notes', rso.appearance_notes,
@@ -1139,6 +1160,11 @@ async function listQuoteTasks(
                   'sort_order', qtp.sort_order,
                   'reply_status', qtp.reply_status,
                   'needs_review', qtp.needs_review,
+                  'purchase_task_count', (
+                    select count(*)::int
+                    from helper_app.purchase_tasks pt
+                    where pt.source_quote_task_photo_id = qtp.id
+                  ),
                   'created_at', qtp.created_at,
                   'latest_reply', reply.latest_reply
                 )
@@ -1521,16 +1547,30 @@ function groupPurchaseTasksByTripId(tasks) {
   return groups;
 }
 
-function normalizePurchaseBatchKey({ productName, originalPriceJpy, requiresFaceCheck }) {
+function normalizePurchaseBatchKey({
+  productName,
+  originalPriceJpy,
+  productType = "standard",
+  referencePhotoSignature,
+  requiresFaceCheck,
+}) {
   const normalizedName = String(productName || "")
     .trim()
     .toLocaleLowerCase()
     .replace(/\s+/g, " ");
-  return [
+  const baseKey = [
     normalizedName,
     originalPriceJpy == null ? "none" : String(originalPriceJpy),
     requiresFaceCheck ? "face-check" : "standard",
-  ].join("|");
+  ];
+  // Keep the legacy key shape for standard products so existing open batches
+  // continue to receive compatible tasks. Gacha and blind-box tasks must not
+  // share a helper batch with an ordinary product or a different series of the
+  // same name/price.
+  if (productType !== "standard") {
+    baseKey.push(productType, referencePhotoSignature || "none");
+  }
+  return baseKey.join("|");
 }
 
 function purchaseBatchTitle(productName, sequence) {
@@ -1625,25 +1665,42 @@ async function listPurchaseProductSuggestions(database, { tripId, query = "", li
   const boundedLimit = Math.max(1, Math.min(Number(limit) || 8, 12));
   const result = await database.query(
     `with candidate_tasks as (
-       select distinct on (
-         pt.trip_id,
-         regexp_replace(lower(btrim(pt.product_name)), '[[:space:]]+', ' ', 'g'),
-         coalesce(pt.original_price_jpy::text, 'none'),
-         case when pt.requires_face_check then 'face-check' else 'standard' end
-       ) pt.*
+       select pt.*,
+              coalesce(series_photo.reference_photo_signature, '') as reference_photo_signature
        from helper_app.purchase_tasks pt
+       left join lateral (
+         select md5(coalesce(string_agg(ptp.storage_key, '|' order by ptp.sort_order, ptp.storage_key), '')) as reference_photo_signature
+         from helper_app.purchase_task_photos ptp
+         where ptp.purchase_task_id = pt.id
+           and (
+             (pt.product_type in ('gacha', 'blind_box') and ptp.photo_role = 'series_reference')
+             or (pt.product_type = 'standard' and ptp.photo_role <> 'face_check_report')
+           )
+       ) series_photo on true
        where pt.trip_id = $1
          and ($2 = '' or lower(pt.product_name) like '%' || lower($2) || '%')
+     ), grouped_candidates as (
+       select distinct on (
+         trip_id,
+         regexp_replace(lower(btrim(product_name)), '[[:space:]]+', ' ', 'g'),
+         product_type,
+         coalesce(original_price_jpy::text, 'none'),
+         case when requires_face_check then 'face-check' else 'standard' end,
+         reference_photo_signature
+       ) candidate_tasks.*
+       from candidate_tasks
        order by
-         pt.trip_id,
-         regexp_replace(lower(btrim(pt.product_name)), '[[:space:]]+', ' ', 'g'),
-         coalesce(pt.original_price_jpy::text, 'none'),
-         case when pt.requires_face_check then 'face-check' else 'standard' end,
-         pt.created_at desc,
-         pt.id desc
+         trip_id,
+         regexp_replace(lower(btrim(product_name)), '[[:space:]]+', ' ', 'g'),
+         product_type,
+         coalesce(original_price_jpy::text, 'none'),
+         case when requires_face_check then 'face-check' else 'standard' end,
+         reference_photo_signature,
+         created_at desc,
+         id desc
      ), limited_tasks as (
        select *
-       from candidate_tasks
+       from grouped_candidates
        order by
          case
            when $2 <> '' and lower(btrim(product_name)) = lower($2) then 0
@@ -1654,7 +1711,7 @@ async function listPurchaseProductSuggestions(database, { tripId, query = "", li
          id desc
        limit $3
      )
-     select lt.id, lt.product_name, lt.quantity, lt.original_price_jpy,
+    select lt.id, lt.product_type, lt.product_name, lt.quantity, lt.original_price_jpy,
             lt.sale_price_twd, lt.note, lt.requires_face_check, lt.created_at,
             coalesce(
               (
@@ -1672,7 +1729,10 @@ async function listPurchaseProductSuggestions(database, { tripId, query = "", li
                 from helper_app.purchase_task_photos ptp
                 left join helper_app.media_objects mo on mo.storage_key = ptp.storage_key
                 where ptp.purchase_task_id = lt.id
-                  and ptp.photo_role <> 'face_check_report'
+                  and (
+                    (lt.product_type in ('gacha', 'blind_box') and ptp.photo_role = 'series_reference')
+                    or (lt.product_type = 'standard' and ptp.photo_role <> 'face_check_report')
+                  )
               ),
               '[]'::jsonb
             ) as photos
@@ -1689,6 +1749,7 @@ async function listPurchaseProductSuggestions(database, { tripId, query = "", li
   );
   return result.rows.map((task) => ({
     sourceTaskId: task.id,
+    productType: task.product_type || "standard",
     productName: task.product_name,
     quantity: task.quantity,
     originalPriceJpy: task.original_price_jpy,
@@ -2163,10 +2224,13 @@ async function createPurchaseTask(database, input) {
     const task = await insertPurchaseTask(client, {
       ...normalized,
       helperId: trip.assigned_helper_id,
+      referencePhotoSignature: purchaseReferencePhotoSignature(normalized.productType, referencePhotos),
     });
     await insertPurchaseReferencePhotosBatch(client, {
       helperId: trip.assigned_helper_id,
       photos: referencePhotos,
+      photoRole: purchaseReferencePhotoRole(normalized.productType),
+      productType: normalized.productType,
       purchaseTaskId: task.id,
       sourceTaskId: normalized.reuseSourceTaskId,
       tripId: trip.id,
@@ -2200,9 +2264,6 @@ async function quickPublishPurchaseTask(database, input) {
     );
     const quotePhoto = quoteResult.rows[0];
     if (!quotePhoto) throw new HelperAppServiceError("photo_not_found", "Quote task photo was not found.");
-    if (quotePhoto.reply_status === "converted_to_purchase") {
-      throw new HelperAppServiceError("already_converted", "This quote photo is already a purchase task.");
-    }
     if (quotePhoto.trip_status !== "active") {
       throw new HelperAppServiceError("trip_not_active", "Purchase tasks can only be created for an active trip.");
     }
@@ -2214,13 +2275,17 @@ async function quickPublishPurchaseTask(database, input) {
       ...normalized,
       helperId: quotePhoto.helper_id,
       originalPriceJpy: normalized.originalPriceJpy ?? quotePhoto.price_jpy,
+      referencePhotoSignature: purchaseReferencePhotoSignature(normalized.productType, [{
+        sortOrder: 0,
+        storageKey: quotePhoto.storage_key,
+      }]),
       sourceQuoteReplyId: quotePhoto.reply_id,
       sourceQuoteTaskId: quotePhoto.quote_task_id,
       sourceQuoteTaskPhotoId: quotePhoto.id,
     });
     const purchasePhotos = [{
       helperId: quotePhoto.helper_id,
-      photoRole: "source",
+      photoRole: isGachaProductType(normalized.productType) ? "series_reference" : "source",
       purchaseTaskId: task.id,
       sortOrder: 0,
       storageKey: quotePhoto.storage_key,
@@ -3425,12 +3490,12 @@ async function prepareStagingReview(database, input) {
     await client.query(
       `insert into helper_app.reviewed_staging_orders
          (merge_job_id, trip_id, helper_id, staging_order_preview_id,
-          purchase_task_id, line_community_name, product_name, quantity,
+          purchase_task_id, product_type, line_community_name, product_name, quantity,
           original_price_jpy, sale_price_twd, source_quote_task_id,
           source_quote_task_photo_id, source_quote_reply_id, source_rebuy_task_id,
           customer_exists)
        select $1, sop.trip_id, sop.helper_id, sop.id, sop.purchase_task_id,
-              sop.line_community_name, sop.product_name, sop.quantity,
+              sop.product_type, sop.line_community_name, sop.product_name, sop.quantity,
               sop.original_price_jpy, sop.sale_price_twd, sop.source_quote_task_id,
               sop.source_quote_task_photo_id, sop.source_quote_reply_id,
               sop.source_rebuy_task_id,
@@ -3480,19 +3545,20 @@ async function editReviewedStagingOrder(database, input) {
       throw new HelperAppServiceError("invalid_input", "Excluded staging rows require a reason.");
     }
     const result = await client.query(
-      `update helper_app.reviewed_staging_orders
-       set line_community_name = $2,
-           product_name = $3,
-           appearance_notes = $4,
-           quantity = $5,
-           original_price_jpy = $6,
-           sale_price_twd = $7,
-           is_excluded = $8,
-           exclusion_reason = $9,
-           customer_confirmed = $10,
+       `update helper_app.reviewed_staging_orders
+       set product_type = $2,
+           line_community_name = $3,
+           product_name = $4,
+           appearance_notes = $5,
+           quantity = $6,
+           original_price_jpy = $7,
+           sale_price_twd = $8,
+           is_excluded = $9,
+           exclusion_reason = $10,
+           customer_confirmed = $11,
            customer_exists = exists (
              select 1 from main.customers c
-             where lower(btrim(c.line_community_name)) = lower(btrim($2))
+             where lower(btrim(c.line_community_name)) = lower(btrim($3))
            ),
            version = version + 1,
            updated_at = now()
@@ -3500,6 +3566,7 @@ async function editReviewedStagingOrder(database, input) {
        returning *`,
       [
         current.id,
+        patch.productType,
         patch.lineCommunityName,
         patch.productName,
         patch.appearanceNotes,
@@ -3896,7 +3963,10 @@ function buildMergeRows(job, snapshot) {
   const sourceLinkRows = orderRows.map((order, index) => {
     const sourceOrder = snapshot.orders[index];
     return {
-      detail: { stagingOrderPreviewId: sourceOrder.stagingOrderPreviewId },
+      detail: {
+        productType: sourceOrder.productType || "standard",
+        stagingOrderPreviewId: sourceOrder.stagingOrderPreviewId,
+      },
       helper_id: order.helper_id,
       merge_job_id: job.id,
       order_id: order.order_id,
@@ -4713,6 +4783,7 @@ async function buildReviewedSnapshot(client, mergeJobId) {
         helperId: row.helper_id,
         lineCommunityName: row.line_community_name,
         originalPriceJpy: row.original_price_jpy,
+        productType: row.product_type || "standard",
         photos: row.photos || [],
         productName: row.product_name,
         purchaseTaskId: row.purchase_task_id,
@@ -5045,6 +5116,7 @@ function normalizePurchaseTaskInput(input, { allowMissingOriginalPriceJpy = fals
     lineCommunityName: requiredText(input.lineCommunityName, "lineCommunityName"),
     note: optionalText(input.note),
     originalPriceJpy,
+    productType: normalizePurchaseProductType(input.productType),
     productName: requiredText(input.productName, "productName"),
     quantity,
     requiresFaceCheck: Boolean(input.requiresFaceCheck),
@@ -5055,6 +5127,22 @@ function normalizePurchaseTaskInput(input, { allowMissingOriginalPriceJpy = fals
     sourceQuoteTaskPhotoId: input.sourceQuoteTaskPhotoId || null,
     tripId: requiredText(input.tripId, "tripId"),
   };
+}
+
+function purchaseReferencePhotoSignature(productType, photos) {
+  if (!isGachaProductType(productType)) return null;
+  const keys = (Array.isArray(photos) ? photos : [])
+    .filter((photo) => photo?.storageKey || photo?.storage_key)
+    .map((photo, index) => ({
+      sortOrder: Number.isInteger(photo.sortOrder ?? photo.sort_order)
+        ? Number(photo.sortOrder ?? photo.sort_order)
+        : index,
+      storageKey: String(photo.storageKey || photo.storage_key),
+    }))
+    .sort((left, right) => left.sortOrder - right.sortOrder || left.storageKey.localeCompare(right.storageKey))
+    .map((photo) => photo.storageKey);
+  if (!keys.length) return null;
+  return crypto.createHash("md5").update(keys.join("|")).digest("hex");
 }
 
 function normalizePurchaseReferencePhotos(photos) {
@@ -5224,6 +5312,7 @@ function normalizeReviewedOrderPatch(input) {
     isExcluded: Boolean(input.isExcluded),
     lineCommunityName: requiredText(input.lineCommunityName, "lineCommunityName"),
     originalPriceJpy,
+    productType: normalizePurchaseProductType(input.productType),
     productName: requiredText(input.productName, "productName"),
     quantity,
     salePriceTwd,
@@ -5354,21 +5443,24 @@ async function insertPurchaseTask(client, input) {
   const purchaseBatch = await getOrCreatePurchaseBatch(client, {
     helperId: input.helperId,
     originalPriceJpy: input.originalPriceJpy,
+    productType: input.productType,
     productName: input.productName,
+    referencePhotoSignature: input.referencePhotoSignature,
     requiresFaceCheck: input.requiresFaceCheck,
     tripId: input.tripId,
   });
   const result = await client.query(
     `insert into helper_app.purchase_tasks
-       (trip_id, helper_id, source_quote_task_id, source_quote_task_photo_id,
+       (trip_id, helper_id, product_type, source_quote_task_id, source_quote_task_photo_id,
         source_quote_reply_id, line_community_name, product_name, quantity,
         original_price_jpy, sale_price_twd, note, requires_face_check,
         created_by_user_id, source_rebuy_task_id, purchase_batch_id)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
      returning *`,
     [
       input.tripId,
       input.helperId,
+      input.productType,
       input.sourceQuoteTaskId || null,
       input.sourceQuoteTaskPhotoId || null,
       input.sourceQuoteReplyId || null,
@@ -5392,6 +5484,7 @@ async function insertPurchaseTask(client, input) {
     actor_user_id: input.actorUserId,
     after_state: {
       purchaseTaskId: task.id,
+      productType: task.product_type,
       requiresFaceCheck: task.requires_face_check,
       sourceRebuyTaskId: task.source_rebuy_task_id,
       sourceQuoteTaskPhotoId: task.source_quote_task_photo_id,
@@ -5406,18 +5499,19 @@ async function getOrCreatePurchaseBatch(client, input) {
   const groupKey = normalizePurchaseBatchKey(input);
   const result = await client.query(
     `insert into helper_app.purchase_batches
-       (trip_id, helper_id, group_key, product_name, original_price_jpy,
+       (trip_id, helper_id, product_type, group_key, product_name, original_price_jpy,
         requires_face_check, sequence)
-     select $1, $2, $3, $4, $5, $6,
+     select $1, $2, $3, $4, $5, $6, $7,
             coalesce(max(sequence), -1) + 1
      from helper_app.purchase_batches
-     where trip_id = $1 and group_key = $3
+     where trip_id = $1 and group_key = $4
      on conflict (trip_id, group_key) where status = 'open'
      do update set updated_at = now()
      returning *`,
     [
       input.tripId,
       input.helperId,
+      input.productType,
       groupKey,
       input.productName,
       input.originalPriceJpy,
@@ -5566,7 +5660,7 @@ async function insertQuoteTaskPhotosBatch(
 
 async function insertPurchaseReferencePhotosBatch(
   client,
-  { helperId, photos, purchaseTaskId, sourceTaskId, tripId },
+  { helperId, photos, photoRole, productType, purchaseTaskId, sourceTaskId, tripId },
 ) {
   if (!photos.length) return;
   const result = await client.query(
@@ -5587,6 +5681,13 @@ async function insertPurchaseReferencePhotosBatch(
        join helper_app.purchase_tasks source_task
          on source_task.id = source_photo.purchase_task_id
         and source_task.trip_id = $8
+        and source_task.product_type = $11
+        and (
+          (source_task.product_type in ('gacha', 'blind_box')
+            and source_photo.photo_role = 'series_reference')
+          or (source_task.product_type = 'standard'
+            and source_photo.photo_role <> 'face_check_report')
+        )
        where input.reused = true
          and source_task.id = $7
      ), upserted_media as (
@@ -5610,7 +5711,7 @@ async function insertPurchaseReferencePhotosBatch(
      )
      insert into helper_app.purchase_task_photos
        (purchase_task_id, trip_id, helper_id, storage_key, photo_role, sort_order)
-     select $9, $8, $10, input.storage_key, 'manual_reference', input.sort_order
+     select $9, $8, $10, input.storage_key, $12, input.sort_order
      from validated_input input
      join upserted_media using (storage_key)
      on conflict (purchase_task_id, photo_role, sort_order) do nothing
@@ -5626,6 +5727,8 @@ async function insertPurchaseReferencePhotosBatch(
       tripId,
       purchaseTaskId,
       helperId,
+      productType,
+      photoRole,
     ],
   );
   const insertedCount = result.rowCount ?? result.rows.length;
@@ -5793,12 +5896,13 @@ async function syncStagingOrderPreview(client, task) {
   if (task.status !== "completed" || !task.completed_quantity || task.completed_quantity <= 0) return null;
   const result = await client.query(
     `insert into helper_app.staging_order_previews
-       (trip_id, helper_id, purchase_task_id, line_community_name, product_name,
+       (trip_id, helper_id, purchase_task_id, product_type, line_community_name, product_name,
         quantity, original_price_jpy, sale_price_twd, source_quote_task_id,
         source_quote_task_photo_id, source_quote_reply_id, source_rebuy_task_id)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
      on conflict (purchase_task_id) do update
-     set line_community_name = excluded.line_community_name,
+     set product_type = excluded.product_type,
+         line_community_name = excluded.line_community_name,
          product_name = excluded.product_name,
          quantity = excluded.quantity,
          original_price_jpy = excluded.original_price_jpy,
@@ -5813,6 +5917,7 @@ async function syncStagingOrderPreview(client, task) {
       task.trip_id,
       task.helper_id,
       task.id,
+      task.product_type || "standard",
       task.line_community_name,
       task.product_name,
       task.completed_quantity,
@@ -6127,7 +6232,7 @@ async function createPhotoAnnotation(database, {
 async function refreshQuoteTaskStatus(client, quoteTaskId) {
   const result = await client.query(
     `select count(*)::int as total,
-            count(*) filter (where reply_status = 'replied')::int as replied,
+            count(*) filter (where reply_status in ('replied', 'converted_to_purchase'))::int as replied,
             bool_or(needs_review)::boolean as has_review
      from helper_app.quote_task_photos
      where quote_task_id = $1`,

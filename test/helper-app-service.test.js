@@ -1814,6 +1814,175 @@ test("admin manual purchase task creation writes an open staging workflow task",
   assert.equal(auditQuery.params[4], "admin_purchase_task_created");
 });
 
+test("admin gacha purchase tasks preserve product type and series reference photo role", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [
+          {
+            assigned_helper_id: "helper-1",
+            id: "trip-1",
+            status: "active",
+            ...todayTripFields(),
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            id: "gacha-batch-1",
+            sequence: 0,
+            status: "open",
+          },
+        ],
+      },
+      {
+        rows: [
+          {
+            id: "gacha-task-1",
+            product_type: "gacha",
+            purchase_batch_id: "gacha-batch-1",
+            requires_face_check: false,
+            status: "open",
+            trip_id: "trip-1",
+          },
+        ],
+      },
+      { rows: [] },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const task = await service.createPurchaseTask(database, {
+    actorUserId: "admin-user-1",
+    lineCommunityName: "客人A",
+    productName: "扭蛋系列A",
+    productType: "gacha",
+    quantity: "2",
+    originalPriceJpy: "500",
+    referencePhotos: [
+      {
+        byteSize: 123,
+        contentType: "image/png",
+        originalFilename: "series-a.png",
+        sortOrder: 0,
+        storageKey: "gacha-series-a",
+      },
+    ],
+    salePriceTwd: "180",
+    tripId: "trip-1",
+  });
+
+  assert.equal(task.product_type, "gacha");
+  const batchInsert = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.purchase_batches"),
+  );
+  assert.ok(batchInsert);
+  assert.equal(batchInsert.params[2], "gacha");
+  assert.match(batchInsert.params[3], /\|gacha\|[0-9a-f]{32}$/);
+
+  const taskInsert = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.purchase_tasks"),
+  );
+  assert.ok(taskInsert);
+  assert.equal(taskInsert.params[2], "gacha");
+
+  const photoInsert = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.purchase_task_photos") &&
+    String(query.sql).includes("purchase_reference_photo"),
+  );
+  assert.ok(photoInsert);
+  assert.equal(photoInsert.params[10], "gacha");
+  assert.equal(photoInsert.params[11], "series_reference");
+});
+
+test("admin can publish multiple independent purchase tasks from one quote reply", async () => {
+  const queries = [];
+  let publishedCount = 0;
+  const database = {
+    async query(sql, params) {
+      queries.push({ params, sql });
+      if (sql === "begin" || sql === "commit" || sql === "rollback") return { rows: [] };
+      if (String(sql).includes("select qtp.id, qtp.quote_task_id")) {
+        return {
+          rows: [{
+            id: "quote-photo-1",
+            quote_task_id: "quote-task-1",
+            trip_id: "trip-1",
+            helper_id: "helper-1",
+            storage_key: "quote-source-1",
+            reply_status: "converted_to_purchase",
+            trip_status: "active",
+            reply_id: "quote-reply-1",
+            price_jpy: 2000,
+            detail_photos: [],
+          }],
+        };
+      }
+      if (String(sql).includes("insert into helper_app.purchase_tasks")) {
+        publishedCount += 1;
+        return {
+          rows: [{
+            id: `purchase-task-${publishedCount}`,
+            trip_id: "trip-1",
+            helper_id: "helper-1",
+            source_quote_task_id: "quote-task-1",
+            source_quote_task_photo_id: "quote-photo-1",
+            source_quote_reply_id: "quote-reply-1",
+            requires_face_check: false,
+            source_rebuy_task_id: null,
+          }],
+        };
+      }
+      if (String(sql).includes("select count(*)::int as total")) {
+        return { rows: [{ total: 1, replied: 1, has_review: false }] };
+      }
+      if (String(sql).includes("insert into helper_app.purchase_batches")) {
+        return { rows: [{ id: `batch-${publishedCount}`, status: "open" }] };
+      }
+      return { rows: [] };
+    },
+    async connect() {
+      return {
+        query: this.query.bind(this),
+        release() {},
+      };
+    },
+  };
+
+  const sharedInput = {
+    actorUserId: "admin-user-1",
+    originalPriceJpy: "2000",
+    productName: "拉拉熊",
+    quantity: "1",
+    quoteTaskPhotoId: "quote-photo-1",
+    salePriceTwd: "900",
+    tripId: "trip-1",
+  };
+  const firstTask = await service.quickPublishPurchaseTask(database, {
+    ...sharedInput,
+    lineCommunityName: "客人A",
+  });
+  const secondTask = await service.quickPublishPurchaseTask(database, {
+    ...sharedInput,
+    lineCommunityName: "客人B",
+  });
+
+  assert.equal(firstTask.id, "purchase-task-1");
+  assert.equal(secondTask.id, "purchase-task-2");
+  assert.equal(publishedCount, 2);
+  assert.equal(
+    queries.filter((query) => String(query.sql).includes("insert into helper_app.purchase_tasks")).length,
+    2,
+  );
+  assert.equal(
+    queries.filter((query) => String(query.sql).includes("update helper_app.quote_task_photos")).length,
+    2,
+  );
+});
+
 test("helper completes a purchase task and creates completed-only staging preview", async () => {
   const queries = [];
   const database = fakeDatabase(
@@ -1968,6 +2137,7 @@ test("purchase product suggestions query only recent grouped candidates and thei
           note: "紅色",
           original_price_jpy: 1200,
           photos: [{ photo_role: "manual_reference", storage_key: "photo-1" }],
+          product_type: "standard",
           product_name: "限定包",
           quantity: 1,
           requires_face_check: false,
@@ -1984,7 +2154,11 @@ test("purchase product suggestions query only recent grouped candidates and thei
   });
 
   assert.equal(suggestions[0].sourceTaskId, "purchase-task-1");
+  assert.equal(suggestions[0].productType, "standard");
   assert.match(queries[0].sql, /with candidate_tasks as/);
+  assert.match(queries[0].sql, /series_reference/);
+  assert.match(queries[0].sql, /reference_photo_signature/);
+  assert.match(queries[0].sql, /product_type/);
   assert.match(queries[0].sql, /limit \$3/);
   assert.deepEqual(queries[0].params, ["trip-1", "限定", 8]);
 });

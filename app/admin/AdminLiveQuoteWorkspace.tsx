@@ -141,6 +141,10 @@ export function AdminLiveQuoteWorkspace({
     setSelectedSharePhotoIds(new Set());
   }
 
+  const handlePurchaseTaskPublished = useCallback(() => {
+    setDetailRefreshNonce((value) => value + 1);
+  }, []);
+
   function toggleSharePhoto(photoId: string) {
     setSelectedSharePhotoIds((current) => {
       const next = new Set(current);
@@ -296,6 +300,7 @@ export function AdminLiveQuoteWorkspace({
             </div>
           ) : activeTask ? (
             <QuoteTaskDetail
+              onPurchaseTaskPublished={handlePurchaseTaskPublished}
               onPhotoIndexChange={setPhotoIndex}
               onSelectAllSharePhotos={selectAllSharePhotos}
               onClearSharePhotos={() => setSelectedSharePhotoIds(new Set())}
@@ -399,6 +404,7 @@ function QuoteTaskLane({
 function QuoteTaskDetail({
   onClearSharePhotos,
   onPhotoIndexChange,
+  onPurchaseTaskPublished,
   onSelectAllSharePhotos,
   onShareSelectedPhotos,
   onSharePhoto,
@@ -410,6 +416,7 @@ function QuoteTaskDetail({
 }: {
   onClearSharePhotos: () => void;
   onPhotoIndexChange: (index: number) => void;
+  onPurchaseTaskPublished: () => void;
   onSelectAllSharePhotos: () => void;
   onShareSelectedPhotos: () => void;
   onSharePhoto: (photo: any) => void | Promise<void>;
@@ -475,7 +482,11 @@ function QuoteTaskDetail({
                       第 {photo.sort_order + 1} 張
                     </StatusBadge>
                     {photo.needs_review ? <StatusBadge tone="amber">需確認</StatusBadge> : null}
-                    {photo.reply_status === "converted_to_purchase" ? <StatusBadge tone="green">已轉採買</StatusBadge> : null}
+                    {photo.reply_status === "converted_to_purchase" ? (
+                      <StatusBadge tone="green">
+                        已發布採買 {Math.max(Number(photo.purchase_task_count || 0), 1)} 次
+                      </StatusBadge>
+                    ) : null}
                   </div>
                   <h4 className="mt-2 truncate text-base font-semibold">
                     {photo.product_name || task.product_name || "詢價照片"}
@@ -553,7 +564,11 @@ function QuoteTaskDetail({
                               JPY {latestReply.price_jpy}
                             </p>
                           </div>
-                          <QuickPublishPurchaseForm photo={photo} task={task} />
+                          <QuickPublishPurchaseForm
+                            onPublished={onPurchaseTaskPublished}
+                            photo={photo}
+                            task={task}
+                          />
                         </div>
                       ) : null}
                     </div>
@@ -587,7 +602,11 @@ function QuoteTaskDetail({
                       </div>
                     ) : null}
                     {latestReply.price_jpy == null ? (
-                      <QuickPublishPurchaseForm photo={photo} task={task} />
+                      <QuickPublishPurchaseForm
+                        onPublished={onPurchaseTaskPublished}
+                        photo={photo}
+                        task={task}
+                      />
                     ) : null}
                   </div>
                 ) : (

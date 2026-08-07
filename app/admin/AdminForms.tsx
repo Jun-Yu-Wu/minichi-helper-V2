@@ -614,11 +614,20 @@ type PurchaseProductSuggestion = {
     storage_key: string;
   }>;
   productName: string;
+  productType?: "standard" | "gacha" | "blind_box";
   quantity?: number | null;
   requiresFaceCheck?: boolean;
   salePriceTwd?: number | null;
   sourceTaskId: string;
 };
+
+type PurchaseProductType = "standard" | "gacha" | "blind_box";
+
+function purchaseProductTypeLabel(productType: PurchaseProductType | string | null | undefined) {
+  if (productType === "gacha") return "扭蛋";
+  if (productType === "blind_box") return "盲抽";
+  return "一般商品";
+}
 
 export function CreatePurchaseTaskForm({
   requiresFaceCheck,
@@ -635,6 +644,7 @@ export function CreatePurchaseTaskForm({
   const [formResetKey, setFormResetKey] = useState(0);
   const [lineCommunityName, setLineCommunityName] = useState("");
   const [productName, setProductName] = useState("");
+  const [productType, setProductType] = useState<PurchaseProductType>("standard");
   const [quantity, setQuantity] = useState("1");
   const [originalPriceJpy, setOriginalPriceJpy] = useState("");
   const [salePriceTwd, setSalePriceTwd] = useState("");
@@ -732,6 +742,7 @@ export function CreatePurchaseTaskForm({
       storageKey: photo.storage_key,
     }));
     setProductName(suggestion.productName || "");
+    setProductType(suggestion.productType || "standard");
     setQuantity(String(suggestion.quantity || 1));
     setOriginalPriceJpy(suggestion.originalPriceJpy == null ? "" : String(suggestion.originalPriceJpy));
     setSalePriceTwd(suggestion.salePriceTwd == null ? "" : String(suggestion.salePriceTwd));
@@ -804,6 +815,7 @@ export function CreatePurchaseTaskForm({
         form.reset();
         setLineCommunityName("");
         setProductName("");
+        setProductType("standard");
         setQuantity("1");
         setOriginalPriceJpy("");
         setSalePriceTwd("");
@@ -913,13 +925,29 @@ export function CreatePurchaseTaskForm({
                   <span className="min-w-0">
                     <strong className="block truncate text-sm">{suggestion.productName}</strong>
                     <span className="mt-0.5 block text-xs text-muted-foreground">
-                      JPY {suggestion.originalPriceJpy ?? "-"} · {suggestion.photos.length} 張照片
+                      {purchaseProductTypeLabel(suggestion.productType)} · JPY {suggestion.originalPriceJpy ?? "-"} · {suggestion.photos.length} 張照片
                     </span>
                   </span>
                 </button>
               ))}
             </div>
           ) : null}
+        </label>
+        <label className="grid gap-1 text-sm">
+          <span className="font-medium">商品類型</span>
+          <select
+            name="productType"
+            value={productType}
+            disabled={!canCreate || pending}
+            onChange={(event) => {
+              setProductType(event.currentTarget.value as PurchaseProductType);
+              setReuseSourceTaskId("");
+            }}
+          >
+            <option value="standard">一般商品</option>
+            <option value="gacha">扭蛋</option>
+            <option value="blind_box">盲抽</option>
+          </select>
         </label>
         <label className="grid gap-1 text-sm">
           <span className="font-medium">採買數量</span>
@@ -1016,20 +1044,27 @@ export function CreatePurchaseTaskForm({
 }
 
 export function QuickPublishPurchaseForm({
+  onPublished,
   photo,
   task,
 }: {
+  onPublished?: () => void;
   photo: any;
   task: any;
 }) {
   const [state, action, pending] = useActionState(quickPublishPurchaseTaskAction, initialState);
   const [expanded, setExpanded] = useState(false);
+  const [productType, setProductType] = useState<PurchaseProductType>("standard");
   const latestReply = photo.latest_reply || {};
   const defaultProductName = photo.product_name || task.product_name || "";
-  const canPublish = photo.reply_status === "replied";
-  if (photo.reply_status === "converted_to_purchase") {
-    return <p className="mt-2 text-sm font-medium text-primary">這張回覆已轉為採買任務。</p>;
-  }
+  const canPublish = ["replied", "converted_to_purchase"].includes(photo.reply_status);
+  const purchaseTaskCount = Math.max(Number(photo.purchase_task_count || 0), photo.reply_status === "converted_to_purchase" ? 1 : 0);
+  const hasPublished = purchaseTaskCount > 0;
+
+  useEffect(() => {
+    if (state.ok) onPublished?.();
+  }, [onPublished, state.ok]);
+
   if (!canPublish) return null;
   if (!expanded) {
     return (
@@ -1040,7 +1075,7 @@ export function QuickPublishPurchaseForm({
         variant="outline"
         onClick={() => setExpanded(true)}
       >
-        轉為採買
+        {hasPublished ? "再次發布採買" : "轉為採買"}
       </Button>
     );
   }
@@ -1051,7 +1086,12 @@ export function QuickPublishPurchaseForm({
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="font-semibold">建立採買任務</p>
-          <p className="text-xs text-muted-foreground">只轉換目前這一張回覆，來源照片與報價會一併保留。</p>
+          <p className="text-xs text-muted-foreground">
+            同一份報價可對不同客人重複發布；每次都會建立獨立採買任務，來源照片與報價會一併保留。
+          </p>
+          {hasPublished ? (
+            <p className="mt-1 text-xs font-medium text-primary">目前已發布 {purchaseTaskCount} 次，可繼續發布。</p>
+          ) : null}
         </div>
         <Button size="sm" type="button" variant="ghost" onClick={() => setExpanded(false)}>
           收合
@@ -1060,6 +1100,19 @@ export function QuickPublishPurchaseForm({
       <div className="grid gap-2 sm:grid-cols-2">
         <CustomerNicknameInput disabled={!canPublish || pending} />
         <input name="productName" placeholder="商品名稱" defaultValue={defaultProductName} required disabled={!canPublish || pending} />
+        <label className="grid gap-1 text-sm">
+          <span className="font-medium">商品類型</span>
+          <select
+            name="productType"
+            value={productType}
+            disabled={!canPublish || pending}
+            onChange={(event) => setProductType(event.currentTarget.value as PurchaseProductType)}
+          >
+            <option value="standard">一般商品</option>
+            <option value="gacha">扭蛋</option>
+            <option value="blind_box">盲抽</option>
+          </select>
+        </label>
         <input name="quantity" inputMode="numeric" min="1" placeholder="數量" defaultValue="1" required disabled={!canPublish || pending} />
         <input
           name="originalPriceJpy"

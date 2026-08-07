@@ -1,6 +1,6 @@
 # New Feature Spec: Purchase Batch Aggregation and Product Reuse
 
-Status: Planning / confirmed product direction
+Status: Confirmed product direction; gacha/blind-box metadata slice implemented
 
 Confirmed: 2026-07-24
 
@@ -33,8 +33,9 @@ settlement, audit, and later merge review remain correct.
 
 The same operational product identity within one connection. The identity should
 come from the selected/reused product data, not from a raw display-name match
-alone. Product name, original JPY price, face-check requirement, and material
-variant/specification must be compatible before tasks can share a batch.
+alone. Product name, product type, original JPY price, face-check requirement,
+and material variant/specification must be compatible before tasks can share a
+batch.
 
 ### Purchase batch
 
@@ -128,6 +129,31 @@ form as the product-name suggestion.
 The quick entrance is a convenience shortcut, not a separate publish workflow.
 It must use the same validation, authorization, photo handling, audit, and
 provenance rules as normal publishing.
+
+### 3.5 Gacha and blind-box product metadata
+
+Administrator publishing accepts three product types:
+
+- `standard`: ordinary purchase item; existing product-reuse behavior remains
+  compatible.
+- `gacha`: capsule-toy product.
+- `blind_box`: blind-box product.
+
+For `gacha` and `blind_box`, the reusable photo set contains only the series
+reference photos. Each helper purchase report still creates its own
+`purchase_report` photo links and is never used as a reusable product photo.
+The product suggestion key includes product type, so an ordinary product,
+gacha, and blind box with the same display name and JPY price are not merged.
+Different series reference-photo sets are also shown as separate suggestion
+cards. Selecting a suggestion copies the series reference photo links and
+metadata, but never copies a previous customer's purchase result or report
+photo.
+
+The helper response UI remains the current quantity, price, and photo flow.
+The helper system carries product type and series-reference role through the
+purchase batch, completed staging preview, reviewed staging order, and source
+provenance only. Per-item gacha styles, result-photo-to-style association,
+transfer, and exchange remain administrator-system responsibilities.
 
 ## 4. Helper: Purchase Batch Behavior
 
@@ -311,6 +337,8 @@ part of the helper aggregate response.
 - Typing filters current-connection products and sorts newest within match quality.
 - Selecting a suggestion fills product data and photos without copying customer
   identity or old workflow status.
+- Gacha and blind-box suggestions are separated by product type, JPY price, and
+  series reference-photo set; purchase report photos never appear in them.
 - Quantity remains editable and is immediately usable after selection.
 - Recent-product quick entrance opens the same validated prefilled form.
 - Reused photos remain durable private media and are linked to the new task

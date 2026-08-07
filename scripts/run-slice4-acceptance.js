@@ -489,6 +489,17 @@ async function main() {
     assert(quickTask.original_price_jpy === 1680, "Quick publish did not carry quoted JPY price.");
     assert(quickTask.photos.some((photo) => photo.photo_role === "source"), "Quick publish did not carry source photo.");
     assert(quickTask.photos.some((photo) => photo.photo_role === "detail_reply"), "Quick publish did not carry detail reply photo.");
+    const repeatedQuickTask = await service.quickPublishPurchaseTask(pool, {
+      actorUserId: fixture.users.admin.id,
+      lineCommunityName: "客人快速二",
+      productName: "Codex Slice 4 Quick",
+      quantity: "1",
+      quoteTaskPhotoId: quoteTask.photos[0].id,
+      salePriceTwd: "560",
+      tripId: activeTrip.id,
+    });
+    assert(repeatedQuickTask.id !== quickTask.id, "Repeated quick publish reused the original purchase task.");
+    assert(repeatedQuickTask.source_quote_reply_id === reply.id, "Repeated quick publish lost quote reply provenance.");
     await assertRejects(
       () =>
         service.submitQuotePhotoReply(pool, {

@@ -55,10 +55,10 @@ async function main() {
       `select table_name, column_name
        from information_schema.columns
        where table_schema = 'helper_app'
-         and table_name in ('purchase_batches', 'purchase_tasks', 'settlements', 'staging_order_previews')
+         and table_name in ('purchase_batches', 'purchase_tasks', 'reviewed_staging_orders', 'settlements', 'staging_order_previews')
          and column_name = any($1::text[])
        order by column_name`,
-      [["purchase_batch_id", "source_rebuy_task_id", "transport_claim_note"]],
+      [["product_type", "purchase_batch_id", "source_rebuy_task_id", "transport_claim_note"]],
     );
     console.log(
       JSON.stringify(

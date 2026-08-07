@@ -14,6 +14,12 @@ function valueOrDash(value: unknown) {
   return value === null || value === undefined || value === "" ? "—" : String(value);
 }
 
+function productTypeLabel(value: unknown) {
+  if (value === "gacha") return "扭蛋";
+  if (value === "blind_box") return "盲抽";
+  return "一般商品";
+}
+
 function StatusPill({ children, tone = "neutral" }: { children: ReactNode; tone?: "green" | "amber" | "neutral" }) {
   const className = tone === "green"
     ? "bg-emerald-100 text-emerald-800"
@@ -49,6 +55,7 @@ export function StagingReviewedOrderEditor({
         <dl className="grid gap-3 text-sm sm:grid-cols-2">
           <div><dt className="text-muted-foreground">LINE 暱稱</dt><dd className="mt-1 font-medium">{valueOrDash(order.line_community_name)}</dd></div>
           <div><dt className="text-muted-foreground">商品</dt><dd className="mt-1 font-medium">{valueOrDash(order.product_name)}</dd></div>
+          <div><dt className="text-muted-foreground">商品類型</dt><dd className="mt-1 font-medium">{productTypeLabel(order.product_type)}</dd></div>
           <div><dt className="text-muted-foreground">外觀備註</dt><dd className="mt-1 whitespace-pre-wrap">{valueOrDash(order.appearance_notes)}</dd></div>
           <div><dt className="text-muted-foreground">數量</dt><dd className="mt-1 font-medium">{valueOrDash(order.quantity)} 件</dd></div>
           <div><dt className="text-muted-foreground">原價</dt><dd className="mt-1 font-medium">JPY {valueOrDash(order.original_price_jpy)}</dd></div>
@@ -92,6 +99,7 @@ export function StagingReviewedOrderEditor({
       <div className="grid gap-3 md:grid-cols-2">
         <label className="grid gap-1 text-sm"><span className="font-medium">LINE 暱稱</span><input name="lineCommunityName" defaultValue={order.line_community_name} required /></label>
         <label className="grid gap-1 text-sm"><span className="font-medium">商品</span><input name="productName" defaultValue={order.product_name} required /></label>
+        <label className="grid gap-1 text-sm"><span className="font-medium">商品類型</span><select name="productType" defaultValue={order.product_type || "standard"}><option value="standard">一般商品</option><option value="gacha">扭蛋</option><option value="blind_box">盲抽</option></select></label>
         <label className="grid gap-1 text-sm"><span className="font-medium">外觀備註</span><input name="appearanceNotes" defaultValue={order.appearance_notes || ""} /></label>
         <div className="grid grid-cols-3 gap-2">
           <label className="grid gap-1 text-sm"><span className="font-medium">數量</span><input inputMode="numeric" name="quantity" defaultValue={order.quantity} required /></label>

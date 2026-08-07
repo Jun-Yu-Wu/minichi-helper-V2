@@ -1195,6 +1195,11 @@ function AdminLiveReturn({
                           <StatusBadge tone={task.requires_face_check ? "amber" : "neutral"}>
                             {task.requires_face_check ? "挑臉採買" : "一般採買"}
                           </StatusBadge>
+                          {task.product_type && task.product_type !== "standard" ? (
+                            <StatusBadge tone="blue">
+                              {task.product_type === "gacha" ? "扭蛋" : "盲抽"}
+                            </StatusBadge>
+                          ) : null}
                         </div>
                         <h3 className="mt-2 text-lg font-semibold">
                           {task.product_name}
@@ -1288,7 +1293,7 @@ function AdminLiveReturn({
                       {preview.line_community_name} · {preview.product_name}
                     </p>
                     <p className="mt-1 text-muted-foreground">
-                      {preview.quantity} 件 · JPY {preview.original_price_jpy ?? "-"} · TWD {preview.sale_price_twd}
+                      {preview.product_type === "gacha" ? "扭蛋" : preview.product_type === "blind_box" ? "盲抽" : "一般商品"} · {preview.quantity} 件 · JPY {preview.original_price_jpy ?? "-"} · TWD {preview.sale_price_twd}
                     </p>
                   </div>
                 ))}

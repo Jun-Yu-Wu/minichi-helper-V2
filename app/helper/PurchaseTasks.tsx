@@ -1211,13 +1211,13 @@ function purchaseProgress(task: any) {
 
 function productPurchasePhotos(photos: any[]) {
   return photos.filter((photo) =>
-    ["manual_reference", "source"].includes(String(photo.photo_role || "")),
+    ["manual_reference", "series_reference", "source"].includes(String(photo.photo_role || "")),
   );
 }
 
 function secondaryPurchasePhotos(photos: any[]) {
   return photos.filter((photo) =>
-    !["manual_reference", "source"].includes(String(photo.photo_role || "")),
+    !["manual_reference", "series_reference", "source"].includes(String(photo.photo_role || "")),
   );
 }
 
