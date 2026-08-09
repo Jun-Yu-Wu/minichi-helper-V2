@@ -176,6 +176,90 @@ test("reports a helper batch total while keeping customer tasks open for later a
   assert.equal(task.purchase_batch.remaining_quantity, 2);
 });
 
+test("a zero batch report resolves the remaining work and preserves partial purchases", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [{
+          authorized_helper_id: "helper-1",
+          authorized_helper_is_active: true,
+          authorized_trip_status: "active",
+          id: "batch-1",
+          status: "open",
+          trip_id: "trip-1",
+        }],
+      },
+      {
+        rows: [
+          {
+            completed_quantity: 1,
+            helper_id: "helper-1",
+            id: "task-partial",
+            quantity: 2,
+            status: "open",
+            trip_id: "trip-1",
+            unavailable_quantity: 1,
+            requires_face_check: false,
+          },
+          {
+            completed_quantity: 0,
+            helper_id: "helper-1",
+            id: "task-empty",
+            quantity: 1,
+            status: "open",
+            trip_id: "trip-1",
+            unavailable_quantity: 0,
+            requires_face_check: false,
+          },
+        ],
+      },
+      { rows: [{ completed_quantity: 1, id: "task-partial", status: "completed", unavailable_quantity: 1 }] },
+      { rows: [{ id: "preview-partial" }] },
+      { rows: [{ completed_quantity: 0, id: "task-empty", status: "canceled", unavailable_quantity: 1 }] },
+      { rows: [] },
+      {
+        rows: [{
+          calculated_pending_task_count: 0,
+          calculated_remaining_quantity: 0,
+          calculated_reported_quantity: 1,
+          calculated_requested_quantity: 2,
+          id: "batch-1",
+          status: "completed",
+        }],
+      },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const task = await service.respondPurchaseBatch(database, {
+    action: "complete",
+    authUserId: "user-1",
+    completedQuantity: "0",
+    helperNote: "現場沒有剩餘可購買數量",
+    idempotencyKey: "batch-zero-1",
+    purchaseBatchId: "batch-1",
+  });
+
+  assert.equal(task.status, "completed");
+  assert.equal(task.completed_quantity, 1);
+  assert.equal(task.batch_status, "completed");
+  assert.equal(task.purchase_batch.remaining_quantity, 0);
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("insert into helper_app.staging_order_previews")),
+    true,
+  );
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("set status = 'canceled'")),
+    true,
+  );
+  const auditQuery = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.trip_audit_events"),
+  );
+  assert.equal(auditQuery.params[4], "helper_purchase_batch_canceled");
+});
+
 test("lists customer nickname suggestions from the Supabase main customer master", async () => {
   const queries = [];
   const database = {
@@ -2927,6 +3011,77 @@ test("ending an eligible trip records quote warnings and creates a staging-based
     queries.some((query) => String(query.sql).includes("from helper_app.staging_order_previews")),
     true,
   );
+});
+
+test("admin can rebuild a missing settlement for an already ended trip", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      {
+        rows: [{
+          assigned_helper_id: "helper-1",
+          departed_at: "2026-08-09T08:52:49.332Z",
+          ended_at: null,
+          id: "trip-1",
+          status: "ended",
+          version: 5,
+        }],
+      },
+      {
+        rows: [{ created_at: "2026-08-09T12:45:54.260Z" }],
+      },
+      {
+        rows: [{
+          assigned_helper_id: "helper-1",
+          departed_at: "2026-08-09T08:52:49.332Z",
+          ended_at: "2026-08-09T12:45:54.260Z",
+          id: "trip-1",
+          status: "ended",
+          version: 6,
+        }],
+      },
+      { rows: [] },
+      {
+        rows: [{
+          compensation_mode: "hourly",
+          hourly_rate_twd: 200,
+          id: "helper-1",
+          is_active: true,
+        }],
+      },
+      { rows: [{ product_total_jpy: 12_000 }] },
+      {
+        rows: [{
+          id: "settlement-1",
+          product_total_jpy: 12_000,
+          status: "pending_helper_precheck",
+          trip_id: "trip-1",
+        }],
+      },
+      { rows: [] },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const result = await service.ensureEndedTripSettlement(database, {
+    actorUserId: "admin-1",
+    expectedVersion: 5,
+    reason: "補建強制結束後遺漏的結帳資料",
+    tripId: "trip-1",
+  });
+
+  assert.equal(result.trip.ended_at, "2026-08-09T12:45:54.260Z");
+  assert.equal(result.settlement.id, "settlement-1");
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("insert into helper_app.settlement_line_items")),
+    true,
+  );
+  const rebuildAudit = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.trip_audit_events") &&
+    query.params[4] === "admin_settlement_rebuilt",
+  );
+  assert.ok(rebuildAudit);
 });
 
 test("admin settlement review calculates source-derived totals and split state", async () => {

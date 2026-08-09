@@ -163,3 +163,17 @@ test("admin repair requires a reason and records before after state", () => {
   assert.equal(result.event.before_state.status, "arrived");
   assert.equal(result.event.after_state.status, "scheduled");
 });
+
+test("admin repair fills a missing end time when forcing a trip to ended", () => {
+  const result = repairTrip({
+    expectedVersion: 4,
+    now: "2026-08-09T13:00:00.000Z",
+    patch: { ended_at: "", status: "ended" },
+    reason: "Recover an interrupted end flow",
+    trip: trip({ status: "active", version: 4 }),
+  });
+
+  assert.equal(result.trip.status, "ended");
+  assert.equal(result.trip.ended_at, "2026-08-09T13:00:00.000Z");
+  assert.equal(result.event.after_state.ended_at, "2026-08-09T13:00:00.000Z");
+});

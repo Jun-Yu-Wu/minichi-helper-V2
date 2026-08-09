@@ -3,6 +3,7 @@ const crypto = require("node:crypto");
 const {
   buildTransition,
   repairTrip: buildRepairTransition,
+  snapshotTrip: snapshotTripForAudit,
 } = require("../domain/trip-state");
 const {
   calculateSettlement,
@@ -109,9 +110,11 @@ async function listAdminDashboard(
               t.timezone, t.assigned_helper_id, t.status, t.departed_at,
               t.arrived_at, t.admin_activated_at, t.ended_at, t.canceled_at,
               t.version, t.created_at, t.updated_at,
-              hp.display_name as helper_display_name
+              hp.display_name as helper_display_name,
+              s.id as settlement_id
        from helper_app.trips t
        left join helper_app.helper_profiles hp on hp.id = t.assigned_helper_id
+       left join helper_app.settlements s on s.trip_id = t.id
        ${tripWhere}
        order by t.business_date desc, t.scheduled_time nulls last, t.created_at desc`,
       tripParams,
@@ -2944,13 +2947,6 @@ async function respondPurchaseBatch(database, input) {
     if (batch.status !== "open") {
       throw new HelperAppServiceError("invalid_status", "This purchase batch is already closed.");
     }
-    if (normalized.action !== "complete") {
-      throw new HelperAppServiceError(
-        "invalid_input",
-        "A purchase batch can only be reported by the quantity purchased this time; cancel individual customer tasks instead.",
-      );
-    }
-
     const taskResult = await client.query(
       `select *
        from helper_app.purchase_tasks
@@ -2969,6 +2965,101 @@ async function respondPurchaseBatch(database, input) {
     const activeTasks = tasks.filter(
       (task) => !["canceled", "unavailable", "not_found"].includes(task.status),
     );
+    if (normalized.action === "cancel" || normalized.completedQuantity === 0) {
+      if (!normalized.helperNote) {
+        throw new HelperAppServiceError("invalid_input", "A reason is required.");
+      }
+      const updatedTasks = [];
+      for (const task of activeTasks) {
+        const quantity = Math.max(1, Number(task.quantity || 1));
+        const completedQuantity = Math.max(
+          0,
+          Math.min(Number(task.completed_quantity || 0), quantity),
+        );
+        const unavailableQuantity = Math.max(0, Number(task.unavailable_quantity || 0));
+        const remainingQuantity = Math.max(
+          0,
+          quantity - completedQuantity - unavailableQuantity,
+        );
+
+        if (completedQuantity > 0) {
+          if (task.status === "completed" && remainingQuantity === 0) {
+            updatedTasks.push(task);
+            continue;
+          }
+          const result = await client.query(
+            `update helper_app.purchase_tasks
+             set status = 'completed',
+                 completed_quantity = $2,
+                 unavailable_quantity = $3,
+                 helper_note = $4,
+                 idempotency_key = $5,
+                 canceled_at = null,
+                 completed_at = coalesce(completed_at, now()),
+                 updated_at = now()
+             where id = $1
+             returning *`,
+            [
+              task.id,
+              completedQuantity,
+              quantity - completedQuantity,
+              remainingQuantity > 0
+                ? formatPartialPurchaseNote(
+                    normalized.helperNote,
+                    remainingQuantity,
+                    "canceled",
+                  )
+                : normalized.helperNote,
+              normalized.idempotencyKey,
+            ],
+          );
+          const updatedTask = result.rows[0];
+          updatedTasks.push(updatedTask);
+          await syncStagingOrderPreview(client, updatedTask);
+          continue;
+        }
+
+        const result = await client.query(
+          `update helper_app.purchase_tasks
+           set status = 'canceled',
+               completed_quantity = 0,
+               unavailable_quantity = $2,
+               helper_note = $3,
+               idempotency_key = $4,
+               canceled_at = now(),
+               completed_at = null,
+               updated_at = now()
+           where id = $1
+           returning *`,
+          [task.id, quantity, normalized.helperNote, normalized.idempotencyKey],
+        );
+        const updatedTask = result.rows[0];
+        updatedTasks.push(updatedTask);
+        await removeStagingOrderPreviewForPurchaseTask(client, task.id);
+      }
+
+      const refreshedBatch = await refreshPurchaseBatch(client, batch.id);
+      await insertAuditEvent(client, {
+        action: "helper_purchase_batch_canceled",
+        actor_helper_id: helper.id,
+        actor_role: "helper",
+        actor_user_id: normalized.authUserId,
+        after_state: {
+          purchaseBatchId: batch.id,
+          taskResolutions: updatedTasks.map((task) => ({
+            completedQuantity: task.completed_quantity || 0,
+            purchaseTaskId: task.id,
+            status: task.status,
+          })),
+        },
+        before_state: { status: batch.status },
+        reason: normalized.helperNote,
+        trip_id: batch.trip_id,
+      });
+      const representative = updatedTasks.find((task) => task.status === "open") || updatedTasks[0] || tasks[0];
+      return purchaseBatchResponse(representative, refreshedBatch);
+    }
+
     const reportPhotoTask = normalized.purchaseTaskId
       ? activeTasks.find((task) => task.id === normalized.purchaseTaskId)
       : activeTasks[0];
@@ -3050,8 +3141,21 @@ async function respondPurchaseBatch(database, input) {
       trip_id: batch.trip_id,
     });
     const representative = updatedTasks.find((task) => task.status === "open") || updatedTasks[0];
-    return { ...representative, purchase_batch: refreshedBatch };
+    return purchaseBatchResponse(representative, refreshedBatch);
   });
+}
+
+function purchaseBatchResponse(task, batch) {
+  if (!task) return { purchase_batch: batch };
+  return {
+    ...task,
+    batch_id: batch.id,
+    batch_reported_quantity: batch.reported_quantity,
+    batch_remaining_quantity: batch.remaining_quantity,
+    batch_requested_quantity: batch.requested_quantity,
+    batch_status: batch.status,
+    purchase_batch: batch,
+  };
 }
 
 function formatPartialPurchaseNote(note, remainingQuantity, remainingResolution) {
@@ -4134,7 +4238,66 @@ async function repairTrip(database, { actorUserId, expectedVersion, patch, reaso
       actor_user_id: actorUserId,
       trip_id: tripId,
     });
+    if (updated.status === "ended") {
+      await createSettlementForAssignedTrip(client, updated);
+    }
     return updated;
+  });
+}
+
+async function ensureEndedTripSettlement(
+  database,
+  { actorUserId, expectedVersion, reason, tripId },
+) {
+  return withTransaction(database, async (client) => {
+    const trip = await lockTrip(client, tripId);
+    if (Number(trip.version) !== Number(expectedVersion)) {
+      throw new HelperAppServiceError("stale_version", "Trip has changed. Refresh before rebuilding settlement.");
+    }
+    if (trip.status !== "ended") {
+      throw new HelperAppServiceError("trip_not_ended", "Only ended trips can rebuild a settlement.");
+    }
+
+    let updated = trip;
+    if (!trip.ended_at) {
+      const auditResult = await client.query(
+        `select created_at
+         from helper_app.trip_audit_events
+         where trip_id = $1
+           and action = 'admin_repaired'
+           and after_state->>'status' = 'ended'
+         order by created_at desc
+         limit 1`,
+        [tripId],
+      );
+      const inferredEndedAt = auditResult.rows[0]?.created_at || new Date().toISOString();
+      updated = await persistTripTransition(client, {
+        ...trip,
+        ended_at: inferredEndedAt,
+        version: Number(trip.version) + 1,
+      });
+      await insertAuditEvent(client, {
+        action: "admin_repaired",
+        actor_role: "admin",
+        actor_user_id: actorUserId,
+        after_state: snapshotTripForAudit(updated),
+        before_state: snapshotTripForAudit(trip),
+        reason: reason || "補建結帳時補上遺漏的結束時間。",
+        trip_id: tripId,
+      });
+    }
+
+    const settlement = await createSettlementForAssignedTrip(client, updated);
+    await insertAuditEvent(client, {
+      action: "admin_settlement_rebuilt",
+      actor_role: "admin",
+      actor_user_id: actorUserId,
+      after_state: { settlementId: settlement.id, tripId },
+      before_state: { settlementId: null, tripId },
+      reason: reason || "補建遺漏的行程結帳資料。",
+      trip_id: tripId,
+    });
+    return { settlement, trip: updated };
   });
 }
 
@@ -4289,6 +4452,24 @@ async function insertAuditEvent(client, event) {
       event.reason || null,
     ],
   );
+}
+
+async function createSettlementForAssignedTrip(client, trip) {
+  const helperResult = await client.query(
+    `select *
+     from helper_app.helper_profiles
+     where id = $1
+     for update`,
+    [trip.assigned_helper_id],
+  );
+  const helper = helperResult.rows[0];
+  if (!helper) {
+    throw new HelperAppServiceError(
+      "invalid_trip",
+      "Ended trip must have an assigned helper before settlement can be created.",
+    );
+  }
+  return createSettlementForEndedTrip(client, { helper, trip });
 }
 
 async function createSettlementForEndedTrip(client, { helper, trip }) {
@@ -5527,7 +5708,7 @@ async function refreshPurchaseBatch(client, batchId) {
     `with stats as (
        select coalesce(sum(pt.quantity) filter (where pt.status not in ('canceled', 'unavailable', 'not_found')), 0)::int as requested_quantity,
               coalesce(sum(pt.completed_quantity) filter (where pt.status not in ('canceled', 'unavailable', 'not_found')), 0)::int as reported_quantity,
-              coalesce(sum(greatest(pt.quantity - coalesce(pt.completed_quantity, 0), 0)) filter (where pt.status not in ('canceled', 'unavailable', 'not_found')), 0)::int as remaining_quantity,
+              coalesce(sum(greatest(pt.quantity - coalesce(pt.completed_quantity, 0) - coalesce(pt.unavailable_quantity, 0), 0)) filter (where pt.status not in ('canceled', 'unavailable', 'not_found')), 0)::int as remaining_quantity,
               count(*) filter (where pt.status in ('open', 'review_pending', 'approved_pending_helper_confirmation'))::int as pending_task_count
        from helper_app.purchase_tasks pt
        where pt.purchase_batch_id = $1
@@ -6321,6 +6502,7 @@ module.exports = {
   deactivateHelperProfile,
   editReviewedStagingOrder,
   editReviewedStagingOrderPhotos,
+  ensureEndedTripSettlement,
   updateHelperProfile,
   getPurchaseTaskDetail,
   getHelperWorkspace,

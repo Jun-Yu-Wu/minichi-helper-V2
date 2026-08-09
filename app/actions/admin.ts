@@ -542,6 +542,22 @@ export async function repairTripAction(
   }
 }
 
+export async function rebuildEndedTripSettlementAction(formData: FormData) {
+  try {
+    const admin = await requireAdmin();
+    await service.ensureEndedTripSettlement(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      expectedVersion: formVersion(formData),
+      reason: formText(formData, "reason"),
+      tripId: formText(formData, "tripId"),
+    });
+    revalidatePath("/admin");
+  } catch (error) {
+    console.error("Rebuild ended trip settlement action failed", error);
+    throw error;
+  }
+}
+
 export async function saveSitePhotoAction(formData: FormData) {
   try {
     const admin = await requireAdmin();

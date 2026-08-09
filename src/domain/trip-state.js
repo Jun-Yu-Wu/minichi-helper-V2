@@ -114,9 +114,13 @@ function repairTrip({ trip, expectedVersion, patch, reason, now }) {
   }
   const before = snapshotTrip(trip);
   const timestamp = nowIso(now);
+  const normalizedPatch = normalizeRepairPatch(patch);
+  if (normalizedPatch.status === "ended" && !normalizedPatch.ended_at) {
+    normalizedPatch.ended_at = timestamp;
+  }
   const next = {
     ...trip,
-    ...normalizeRepairPatch(patch),
+    ...normalizedPatch,
     updated_at: timestamp,
     version: Number(trip.version) + 1,
   };

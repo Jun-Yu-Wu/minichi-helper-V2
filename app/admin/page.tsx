@@ -25,6 +25,7 @@ import {
   editReviewedStagingOrderPhotosAction,
   mergeApprovedStagingJobAction,
   prepareStagingReviewAction,
+  rebuildEndedTripSettlementAction,
   rejectStagingMergeJobAction,
   reviewFaceCheckPurchaseAction,
   setReviewedStagingOrderSelectionAction,
@@ -1773,10 +1774,24 @@ function TripManagement({
                               label="啟用"
                             />
                           ) : null}
-                          {trip.status === "ended" ? (
+                          {trip.status === "ended" && trip.settlement_id ? (
                             <Button asChild size="sm">
-                              <Link href="/admin?view=checkout">前往結帳</Link>
+                              <Link href={`/admin?view=checkout&checkoutSettlementId=${encodeURIComponent(trip.settlement_id)}`}>前往結帳</Link>
                             </Button>
+                          ) : null}
+                          {trip.status === "ended" && !trip.settlement_id ? (
+                            <ActionButtonForm
+                              action={rebuildEndedTripSettlementAction}
+                              fields={[
+                                { name: "tripId", value: trip.id },
+                                { name: "expectedVersion", value: trip.version },
+                                {
+                                  name: "reason",
+                                  value: "補建管理員強制結束後遺漏的行程結帳資料",
+                                },
+                              ]}
+                              label="補建結帳"
+                            />
                           ) : null}
                           {!["ended", "canceled"].includes(trip.status) ? (
                             <ActionButtonForm

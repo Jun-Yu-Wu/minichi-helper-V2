@@ -648,7 +648,7 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
     ? Math.min(requestedQuantity, previouslyCompletedQuantity + selectedQuantityNumber)
     : selectedQuantityNumber;
   const effectivePurchaseAction = aggregateBatch
-    ? "complete"
+    ? selectedQuantityNumber === 0 ? "cancel" : "complete"
     : (completed && cancelingCompleted) || (completedQuantityNumber === 0 && previouslyCompletedQuantity === 0) ? "cancel" : "complete";
   const needsCancelReason = effectivePurchaseAction === "cancel";
   const needsFaceCheckUpload = !aggregateBatch && task.requires_face_check && task.status === "open" && effectivePurchaseAction === "complete";
@@ -941,13 +941,19 @@ function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdate
                     (_, index) => index,
                   ).map((quantity) => (
                     <option key={quantity} value={quantity}>
-                      {quantity === 0 ? "0（取消）" : quantity}
+                      {quantity === 0
+                        ? aggregateBatch ? "0（取消尚未買到的數量）" : "0（取消）"
+                        : quantity}
                     </option>
                   ))}
                 </select>
               <span className="text-xs text-muted-foreground">
-                {!aggregateBatch && completedQuantityNumber === 0 && previouslyCompletedQuantity === 0
-                  ? "選 0 會取消這筆採買；請填寫取消理由。"
+                {completedQuantityNumber === 0
+                  ? aggregateBatch
+                    ? "選 0 會取消這個批次尚未買到的數量；請填寫取消理由。"
+                    : previouslyCompletedQuantity === 0
+                      ? "選 0 會取消這筆採買；請填寫取消理由。"
+                      : null
                   : null}
               </span>
             </label>
@@ -1188,6 +1194,9 @@ function purchaseResponseHelpText(task: any, cancelingCompleted: boolean) {
   if (task.status === "completed") return "採買已完成。";
   if (task.status === "review_pending") return "等待管理員審核挑臉照片。";
   if (task.status === "approved_pending_helper_confirmation") return "確認後才會正式完成這筆採買。";
+  if (task.purchase_batch_id || task.batch_id) {
+    return "填本次實際買到數量；買不到就選 0，系統會取消批次尚未買到的數量。";
+  }
   return "填實際買到數量；買不到就選 0。";
 }
 
