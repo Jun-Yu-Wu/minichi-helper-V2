@@ -32,6 +32,7 @@ import {
 } from "./SitePhotoUploadStore";
 
 const MAX_UPLOAD_BYTES = 8 * 1024 * 1024;
+const MAX_PHOTOS_PER_BATCH = 10;
 const MAX_IMAGE_EDGE = 2400;
 const JPEG_QUALITY = 0.84;
 
@@ -51,8 +52,12 @@ export function SitePhotoUploader({
   const [batches, setBatches] = useState<LocalBatch[]>(() => savedSession?.batches || []);
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
   const [isPreparing, setIsPreparing] = useState(false);
+  const [selectionMessage, setSelectionMessage] = useState<string | null>(null);
   const photosRef = useRef<SelectedPhoto[]>([]);
   const batchesRef = useRef<LocalBatch[]>([]);
+  const hasActiveBatch = batches.some(
+    (batch) => batch.status === "uploading" || batch.status === "submitting",
+  );
 
   useEffect(() => {
     photosRef.current = photos;
@@ -61,12 +66,27 @@ export function SitePhotoUploader({
   }, [batches, note, photos, tripId, updateSession]);
 
   async function addFiles(files: FileList | null) {
-    if (!files?.length) return;
+    if (!files?.length || isPreparing || hasActiveBatch) return;
+    const imageFiles = Array.from(files).filter(isImageFile);
+    const remainingSlots = MAX_PHOTOS_PER_BATCH - photosRef.current.length;
+    if (!imageFiles.length) return;
+    if (remainingSlots <= 0) {
+      setSelectionMessage(`每批最多上傳 ${MAX_PHOTOS_PER_BATCH} 張照片，請先送出目前批次。`);
+      return;
+    }
+    const acceptedFiles = imageFiles.slice(0, remainingSlots);
+    const ignoredCount = imageFiles.length - acceptedFiles.length;
+    setSelectionMessage(
+      ignoredCount > 0
+        ? `每批最多上傳 ${MAX_PHOTOS_PER_BATCH} 張照片，本次只加入前 ${acceptedFiles.length} 張；送出後可再上傳下一批。`
+        : null,
+    );
     setIsPreparing(true);
     try {
-      const imageFiles = Array.from(files).filter(isImageFile);
       const preparedPhotos = await Promise.all(
-        imageFiles.map((file, index) => preparePhoto(file, photosRef.current.length + index)),
+        acceptedFiles.map((file, index) =>
+          preparePhoto(file, photosRef.current.length + index),
+        ),
       );
       setPhotos((current) => [
         ...current,
@@ -81,6 +101,7 @@ export function SitePhotoUploader({
   }
 
   function removePhoto(clientPhotoId: string) {
+    setSelectionMessage(null);
     setPhotos((current) => {
       const removed = current.find((photo) => photo.clientPhotoId === clientPhotoId);
       if (removed) URL.revokeObjectURL(removed.objectUrl);
@@ -102,6 +123,14 @@ export function SitePhotoUploader({
   }
 
   async function submitBatch() {
+    if (hasActiveBatch) {
+      setSelectionMessage("上一批照片仍在處理中，完成後才能開始下一批上傳。");
+      return;
+    }
+    if (photos.length > MAX_PHOTOS_PER_BATCH) {
+      setSelectionMessage(`每批最多上傳 ${MAX_PHOTOS_PER_BATCH} 張照片，請移除多出的照片。`);
+      return;
+    }
     if (!photos.length || photos.some((photo) => photo.error)) return;
     const batch: LocalBatch = {
       id: createClientId("submission"),
@@ -116,6 +145,7 @@ export function SitePhotoUploader({
     setBatches((current) => [batch, ...current]);
     setPhotos([]);
     setNote("");
+    setSelectionMessage(null);
     await processUploads(batch);
   }
 
@@ -125,6 +155,8 @@ export function SitePhotoUploader({
       errorStage: undefined,
       status: "uploading",
     });
+    // Temporary production guard: each batch is capped at ten photos above,
+    // so this keeps the presign fan-out bounded at ten requests per batch.
     const uploadedPhotos = await Promise.all(
       batch.photos.map(async (photo) => {
         if (photo.storageKey) {
@@ -339,15 +371,32 @@ export function SitePhotoUploader({
   return (
     <div className="grid gap-4">
       <h4 className="font-semibold">上傳現場照片</h4>
+      <p className="text-sm text-muted-foreground">
+        每批最多上傳 {MAX_PHOTOS_PER_BATCH} 張照片；送出完成後可再上傳下一批。
+      </p>
+
+      {selectionMessage ? (
+        <InsightBanner body={selectionMessage} title="照片批次限制" tone="amber" />
+      ) : null}
+
+      {hasActiveBatch ? (
+        <InsightBanner
+          body="上一批照片正在上傳或建立批次，完成後才能開始下一批，避免同時產生過多 presign 請求。"
+          title="上一批照片處理中"
+          tone="blue"
+        />
+      ) : null}
 
       <div className="grid grid-cols-2 gap-3">
         <PhotoPicker
           capture="environment"
+          disabled={isPreparing || hasActiveBatch}
           icon={<Camera className="size-5" />}
           label="開啟相機"
           onFiles={addFiles}
         />
         <PhotoPicker
+          disabled={isPreparing || hasActiveBatch}
           icon={<ImageUp className="size-5" />}
           label="從相簿選取"
           multiple
@@ -364,6 +413,9 @@ export function SitePhotoUploader({
 
       {photos.length ? (
         <div className="grid gap-3">
+          <p className="text-sm font-medium text-muted-foreground">
+            本批已選 {photos.length}/{MAX_PHOTOS_PER_BATCH} 張
+          </p>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
             {photos.map((photo, index) => (
               <div key={photo.clientPhotoId} className={`rounded-lg border p-2 ${photo.uploadStatus === "uploaded" ? "border-emerald-400 bg-emerald-50/40" : "bg-background"}`}>
@@ -419,6 +471,7 @@ export function SitePhotoUploader({
         </label>
         <Button
           disabled={
+            hasActiveBatch ||
             isPreparing ||
             !photos.length ||
             photos.some((photo) => Boolean(photo.error))
@@ -569,25 +622,31 @@ function LocalBatchCard({
 
 function PhotoPicker({
   capture,
+  disabled = false,
   icon,
   label,
   multiple = false,
   onFiles,
 }: {
   capture?: "environment";
+  disabled?: boolean;
   icon: React.ReactNode;
   label: string;
   multiple?: boolean;
   onFiles: (files: FileList | null) => Promise<void>;
 }) {
   return (
-    <label className="flex min-h-24 cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed bg-muted/30 p-3 text-center transition hover:bg-accent/50">
+    <label
+      aria-disabled={disabled}
+      className={`flex min-h-24 flex-col items-center justify-center gap-2 rounded-lg border border-dashed bg-muted/30 p-3 text-center transition ${disabled ? "cursor-not-allowed opacity-60" : "cursor-pointer hover:bg-accent/50"}`}
+    >
       {icon}
       <span className="text-sm font-semibold">{label}</span>
       <PhotoFileInput
         accept="image/*"
         capture={capture}
         className="sr-only"
+        disabled={disabled}
         multiple={multiple}
         onFiles={onFiles}
       />
