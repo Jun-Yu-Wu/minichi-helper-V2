@@ -623,10 +623,45 @@ type PurchaseProductSuggestion = {
 
 type PurchaseProductType = "standard" | "gacha" | "blind_box";
 
+type QuickPublishHistory = {
+  createdAt?: string | null;
+  id: string;
+  note?: string | null;
+  originalPriceJpy?: number | null;
+  productName: string;
+  productType: PurchaseProductType;
+  quantity?: number | null;
+  requiresFaceCheck: boolean;
+  salePriceTwd?: number | null;
+  status: string;
+};
+
 function purchaseProductTypeLabel(productType: PurchaseProductType | string | null | undefined) {
   if (productType === "gacha") return "扭蛋";
   if (productType === "blind_box") return "盲抽";
   return "一般商品";
+}
+
+function quickPublishHistoryStatusLabel(status: string) {
+  if (status === "completed") return "已完成";
+  if (status === "canceled") return "已取消";
+  if (status === "unavailable") return "缺貨";
+  if (status === "not_found") return "找不到";
+  if (status === "review_pending") return "挑臉審核中";
+  if (status === "approved_pending_helper_confirmation") return "待小幫手確認";
+  return "待採買";
+}
+
+function quickPublishHistoryDateLabel(value?: string | null) {
+  if (!value) return "時間未知";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "時間未知";
+  return new Intl.DateTimeFormat("zh-TW", {
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    month: "numeric",
+  }).format(date);
 }
 
 export function CreatePurchaseTaskForm({
@@ -1054,16 +1089,83 @@ export function QuickPublishPurchaseForm({
 }) {
   const [state, action, pending] = useActionState(quickPublishPurchaseTaskAction, initialState);
   const [expanded, setExpanded] = useState(false);
-  const [productType, setProductType] = useState<PurchaseProductType>("standard");
   const latestReply = photo.latest_reply || {};
   const defaultProductName = photo.product_name || task.product_name || "";
+  const [productName, setProductName] = useState(defaultProductName);
+  const [productType, setProductType] = useState<PurchaseProductType>("standard");
+  const [quantity, setQuantity] = useState("1");
+  const [originalPriceJpy, setOriginalPriceJpy] = useState(
+    latestReply.price_jpy == null ? "" : String(latestReply.price_jpy),
+  );
+  const [salePriceTwd, setSalePriceTwd] = useState("");
+  const [requiresFaceCheck, setRequiresFaceCheck] = useState(false);
+  const [note, setNote] = useState("");
+  const [history, setHistory] = useState<QuickPublishHistory[]>([]);
+  const [historyExpanded, setHistoryExpanded] = useState(false);
+  const [historyLoaded, setHistoryLoaded] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+  const [appliedHistoryId, setAppliedHistoryId] = useState("");
   const canPublish = ["replied", "converted_to_purchase"].includes(photo.reply_status);
   const purchaseTaskCount = Math.max(Number(photo.purchase_task_count || 0), photo.reply_status === "converted_to_purchase" ? 1 : 0);
   const hasPublished = purchaseTaskCount > 0;
 
   useEffect(() => {
-    if (state.ok) onPublished?.();
+    if (!expanded || !hasPublished || historyLoaded) return;
+    const controller = new AbortController();
+    setHistoryLoading(true);
+    setHistoryError("");
+    void fetch(
+      `/api/admin/live/quote-tasks/${encodeURIComponent(task.id)}/purchase-history?tripId=${encodeURIComponent(task.trip_id)}&quoteTaskPhotoId=${encodeURIComponent(photo.id)}`,
+      { cache: "no-store", signal: controller.signal },
+    )
+      .then(async (response) => {
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || "無法載入快速發布紀錄。");
+        if (!controller.signal.aborted) {
+          setHistory(Array.isArray(body.history) ? body.history : []);
+          setHistoryLoaded(true);
+        }
+      })
+      .catch((error) => {
+        if (!(error instanceof DOMException && error.name === "AbortError") && !controller.signal.aborted) {
+          setHistoryError(error instanceof Error ? error.message : "無法載入快速發布紀錄。");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setHistoryLoading(false);
+      });
+    return () => controller.abort();
+  }, [expanded, hasPublished, historyLoaded, photo.id, task.id, task.trip_id]);
+
+  useEffect(() => {
+    if (state.ok) {
+      setHistory([]);
+      setHistoryLoaded(false);
+      setHistoryExpanded(false);
+      setAppliedHistoryId("");
+      onPublished?.();
+    }
   }, [onPublished, state.ok]);
+
+  function applyHistoryItem(item: QuickPublishHistory) {
+    setProductName(item.productName || defaultProductName);
+    setProductType(item.productType || "standard");
+    setQuantity(item.quantity == null ? "1" : String(item.quantity));
+    setOriginalPriceJpy(item.originalPriceJpy == null ? "" : String(item.originalPriceJpy));
+    setSalePriceTwd(item.salePriceTwd == null ? "" : String(item.salePriceTwd));
+    setRequiresFaceCheck(Boolean(item.requiresFaceCheck));
+    setNote(item.note || "");
+    setAppliedHistoryId(item.id);
+    setHistoryExpanded(false);
+  }
+
+  function retryHistory() {
+    setHistoryLoaded(false);
+    setHistoryError("");
+  }
+
+  const visibleHistory = historyExpanded ? history : history.slice(0, 1);
 
   if (!canPublish) return null;
   if (!expanded) {
@@ -1097,9 +1199,69 @@ export function QuickPublishPurchaseForm({
           收合
         </Button>
       </div>
+      {hasPublished ? (
+        <div className="grid gap-2 rounded-lg border border-dashed bg-muted/20 p-3">
+          <div className="flex flex-wrap items-start justify-between gap-2">
+            <div>
+              <p className="text-sm font-semibold">本任務之前發布</p>
+              <p className="mt-0.5 text-xs text-muted-foreground">
+                點擊歷史資料可帶入商品欄位；客人暱稱需要重新填寫，照片會沿用目前區塊二回覆。
+              </p>
+            </div>
+            {history.length > 1 ? (
+              <Button
+                size="sm"
+                type="button"
+                variant="ghost"
+                onClick={() => setHistoryExpanded((current) => !current)}
+              >
+                {historyExpanded ? "收合歷次" : `查看歷次 (${history.length})`}
+              </Button>
+            ) : null}
+          </div>
+          {historyLoading ? (
+            <p className="rounded-md bg-background px-3 py-2 text-xs text-muted-foreground">載入歷史發布資料...</p>
+          ) : historyError ? (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-destructive/30 bg-background px-3 py-2 text-xs text-destructive">
+              <span>{historyError}</span>
+              <Button size="sm" type="button" variant="outline" onClick={retryHistory}>重試</Button>
+            </div>
+          ) : visibleHistory.length ? (
+            <div className="grid gap-2">
+              {visibleHistory.map((item) => (
+                <button
+                  className={`grid gap-1 rounded-md border bg-background px-3 py-2 text-left transition hover:border-primary hover:bg-primary/5 ${appliedHistoryId === item.id ? "border-primary ring-1 ring-primary/20" : ""}`}
+                  key={item.id}
+                  type="button"
+                  onClick={() => applyHistoryItem(item)}
+                >
+                  <span className="flex flex-wrap items-center gap-2 text-sm font-semibold">
+                    <span className="truncate">{item.productName}</span>
+                    <span className="text-xs font-normal text-muted-foreground">{purchaseProductTypeLabel(item.productType)}</span>
+                  </span>
+                  <span className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                    <span>JPY {item.originalPriceJpy ?? "-"}</span>
+                    <span>TWD {item.salePriceTwd ?? "-"}</span>
+                    <span>數量 {item.quantity ?? "-"}</span>
+                    <span>{item.requiresFaceCheck ? "需挑臉" : "免挑臉"}</span>
+                    <span>{quickPublishHistoryStatusLabel(item.status)}</span>
+                    <span>{quickPublishHistoryDateLabel(item.createdAt)}</span>
+                  </span>
+                  <span className="text-xs font-medium text-primary">點擊帶入這筆資料</span>
+                </button>
+              ))}
+            </div>
+          ) : (
+            <p className="rounded-md bg-background px-3 py-2 text-xs text-muted-foreground">目前沒有可帶入的歷史資料。</p>
+          )}
+          {appliedHistoryId ? (
+            <p className="text-xs font-medium text-primary">已帶入歷史商品資料；客人暱稱與目前來源照片未被帶入。</p>
+          ) : null}
+        </div>
+      ) : null}
       <div className="grid gap-2 sm:grid-cols-2">
         <CustomerNicknameInput disabled={!canPublish || pending} />
-        <input name="productName" placeholder="商品名稱" defaultValue={defaultProductName} required disabled={!canPublish || pending} />
+        <input name="productName" placeholder="商品名稱" value={productName} required disabled={!canPublish || pending} onChange={(event) => setProductName(event.currentTarget.value)} />
         <label className="grid gap-1 text-sm">
           <span className="font-medium">商品類型</span>
           <select
@@ -1113,22 +1275,23 @@ export function QuickPublishPurchaseForm({
             <option value="blind_box">盲抽</option>
           </select>
         </label>
-        <input name="quantity" inputMode="numeric" min="1" placeholder="數量" defaultValue="1" required disabled={!canPublish || pending} />
+        <input name="quantity" inputMode="numeric" min="1" placeholder="數量" value={quantity} required disabled={!canPublish || pending} onChange={(event) => setQuantity(event.currentTarget.value)} />
         <input
           name="originalPriceJpy"
           inputMode="numeric"
           min="0"
           placeholder="原價 JPY"
-          defaultValue={latestReply.price_jpy ?? ""}
+          value={originalPriceJpy}
           disabled={!canPublish || pending}
+          onChange={(event) => setOriginalPriceJpy(event.currentTarget.value)}
         />
-        <input name="salePriceTwd" inputMode="numeric" min="0" placeholder="售價 TWD" required disabled={!canPublish || pending} />
+        <input name="salePriceTwd" inputMode="numeric" min="0" placeholder="售價 TWD" required value={salePriceTwd} disabled={!canPublish || pending} onChange={(event) => setSalePriceTwd(event.currentTarget.value)} />
       </div>
       <label className="flex items-center gap-2 text-sm">
-        <input name="requiresFaceCheck" type="checkbox" disabled={!canPublish || pending} />
+        <input name="requiresFaceCheck" type="checkbox" checked={requiresFaceCheck} disabled={!canPublish || pending} onChange={(event) => setRequiresFaceCheck(event.currentTarget.checked)} />
         需要挑臉審核
       </label>
-      <textarea name="note" placeholder="採買備註，可留空" disabled={!canPublish || pending} />
+      <textarea name="note" placeholder="採買備註，可留空" value={note} disabled={!canPublish || pending} onChange={(event) => setNote(event.currentTarget.value)} />
       <ActionMessage state={state} />
       <Button disabled={!canPublish || pending} size="sm" type="submit" variant="outline">
         {pending ? "發布中..." : "確認發布採買"}

@@ -2039,6 +2039,7 @@ test("admin can publish multiple independent purchase tasks from one quote reply
   const sharedInput = {
     actorUserId: "admin-user-1",
     originalPriceJpy: "2000",
+    productType: "gacha",
     productName: "拉拉熊",
     quantity: "1",
     quoteTaskPhotoId: "quote-photo-1",
@@ -2065,6 +2066,56 @@ test("admin can publish multiple independent purchase tasks from one quote reply
     queries.filter((query) => String(query.sql).includes("update helper_app.quote_task_photos")).length,
     2,
   );
+  const purchaseInsert = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.purchase_tasks"),
+  );
+  assert.equal(purchaseInsert.params[2], "gacha");
+});
+
+test("quick-publish history is scoped to one quote photo and maps reusable fields", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ sql, params });
+      return {
+        rows: [{
+          created_at: "2026-08-11T04:00:00.000Z",
+          id: "purchase-task-1",
+          note: "紅色款",
+          original_price_jpy: 2000,
+          product_name: "拉拉熊扭蛋",
+          product_type: "gacha",
+          quantity: 2,
+          requires_face_check: true,
+          sale_price_twd: 900,
+          status: "open",
+        }],
+      };
+    },
+  };
+
+  const history = await service.listQuickPublishPurchaseHistory(database, {
+    limit: 10,
+    quoteTaskPhotoId: "quote-photo-1",
+    tripId: "trip-1",
+  });
+
+  assert.deepEqual(history, [{
+    createdAt: "2026-08-11T04:00:00.000Z",
+    id: "purchase-task-1",
+    note: "紅色款",
+    originalPriceJpy: 2000,
+    productName: "拉拉熊扭蛋",
+    productType: "gacha",
+    quantity: 2,
+    requiresFaceCheck: true,
+    salePriceTwd: 900,
+    status: "open",
+  }]);
+  assert.match(queries[0].sql, /source_quote_task_photo_id/);
+  assert.match(queries[0].sql, /qtp\.id = \$2/);
+  assert.match(queries[0].sql, /order by pt\.created_at desc/);
+  assert.deepEqual(queries[0].params, ["trip-1", "quote-photo-1", 10]);
 });
 
 test("helper completes a purchase task and creates completed-only staging preview", async () => {

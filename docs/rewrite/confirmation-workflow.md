@@ -1,12 +1,38 @@
 # Helper Rewrite Confirmation Workflow
 
-Last updated: 2026-07-24
+Last updated: 2026-08-11
 
 This document lists the product and implementation decisions that must be confirmed
 before or during the MINICHI helper rewrite. The source behavior is
 `latest-helper-operation-spec.md`.
 
 ## Confirmed Decisions
+
+### Round 27 confirmed on 2026-08-11: Quick-publish history reuse from one quote photo
+
+The block-two quote/detail live-return quick-publish form reuses prior quick
+publishes from the same `quote_task_photo`:
+
+- The history scope is the current quote/detail photo only. It does not mix in
+  unrelated products from the rest of the connection.
+- History is ordered newest first. One prior publish is shown directly; multiple
+  prior publishes can be expanded as a history list.
+- Selecting a history item fills product name, product type, original JPY price,
+  sale TWD price, quantity, note, and face-check requirement. Quantity remains
+  editable.
+- The form must not copy the previous customer's nickname, purchase result,
+  task status, reported/bought quantity, or prior provenance identifiers.
+- The current block-two source photo and current helper detail-reply photos remain
+  the photos carried into the new purchase task. A prior purchase task's photo
+  set must not replace the current quote/detail source.
+- Every submission still creates an independent `purchase_task` with provenance
+  to the current quote task, quote task photo, and current reply. Reusing history
+  must not reopen or mutate an earlier task.
+- Quick-publish product type must be carried from the form through the Server
+  Action and service layer so remembered standard, gacha, and blind-box values
+  remain consistent.
+- This is still helper workflow staging data only; it does not change the
+  staging -> admin review -> explicit merge boundary or write `main.orders`.
 
 ### Round 26 confirmed on 2026-07-24: Purchase batch aggregation and product reuse
 

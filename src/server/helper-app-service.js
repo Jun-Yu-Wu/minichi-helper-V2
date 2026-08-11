@@ -1764,6 +1764,46 @@ async function listPurchaseProductSuggestions(database, { tripId, query = "", li
   }));
 }
 
+/**
+ * @param {object} database
+ * @param {{tripId: string, quoteTaskPhotoId: string, limit?: number}} options
+ */
+async function listQuickPublishPurchaseHistory(
+  database,
+  { tripId, quoteTaskPhotoId, limit = 20 } = {},
+) {
+  const normalizedTripId = requiredText(tripId, "tripId");
+  const normalizedQuoteTaskPhotoId = requiredText(quoteTaskPhotoId, "quoteTaskPhotoId");
+  const boundedLimit = Math.max(1, Math.min(Number(limit) || 20, 50));
+  const result = await database.query(
+    `select pt.id, pt.product_type, pt.product_name, pt.quantity,
+            pt.original_price_jpy, pt.sale_price_twd, pt.note,
+            pt.requires_face_check, pt.status, pt.created_at
+     from helper_app.purchase_tasks pt
+     join helper_app.quote_task_photos qtp
+       on qtp.id = pt.source_quote_task_photo_id
+     join helper_app.quote_tasks qt on qt.id = qtp.quote_task_id
+     where pt.trip_id = $1
+       and qt.trip_id = $1
+       and qtp.id = $2
+     order by pt.created_at desc, pt.id desc
+     limit $3`,
+    [normalizedTripId, normalizedQuoteTaskPhotoId, boundedLimit],
+  );
+  return result.rows.map((task) => ({
+    id: task.id,
+    createdAt: task.created_at,
+    note: task.note,
+    originalPriceJpy: task.original_price_jpy,
+    productName: task.product_name,
+    productType: task.product_type || "standard",
+    quantity: task.quantity,
+    requiresFaceCheck: Boolean(task.requires_face_check),
+    salePriceTwd: task.sale_price_twd,
+    status: task.status,
+  }));
+}
+
 async function attachSignedPhotoUrls(batches, r2Store) {
   return Promise.all(
     batches.map(async (batch) => ({
@@ -6512,6 +6552,7 @@ module.exports = {
   listPurchaseTasks,
   listHelperPurchaseBatches,
   listPurchaseProductSuggestions,
+  listQuickPublishPurchaseHistory,
   listAuthorizedHelperRebuyTasks,
   listAuthorizedHelperQuoteTaskSummaries,
   listAdminQuoteTaskSummaries,

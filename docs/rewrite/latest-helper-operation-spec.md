@@ -1,6 +1,6 @@
 # Latest Helper Operation Spec
 
-Last updated: 2026-07-24
+Last updated: 2026-08-11
 
 This document is the authoritative product behavior source for the MINICHI helper
 rewrite. It supersedes older helper-operation descriptions when behavior differs.
@@ -798,6 +798,28 @@ Product autofill:
   status, or quote/detail provenance into the new customer purchase task.
 - The purchase publishing page provides a recent-product quick entrance that
   uses the same validated prefilled form.
+
+Quick-publish history reuse from a quote/detail photo:
+
+- When the current quote/detail photo has prior quick-published purchase tasks,
+  the quick-publish form shows those records as reusable history scoped to that
+  exact `quote_task_photo`. It does not show unrelated connection products in
+  this history area.
+- History is newest first. One record is shown directly; multiple records can
+  be expanded for selection.
+- Selecting a history record fills product name, product type, original JPY
+  price, sale TWD price, quantity, note, and face-check requirement. Quantity
+  remains editable.
+- The selection must not copy the previous customer's nickname, purchase result,
+  task status, reported/bought quantity, or old quote/detail provenance.
+- The new task continues to carry the current quote/detail source photo and
+  current helper detail-reply photos. A prior purchase task's photo set does not
+  replace the current source evidence.
+- Each confirmed publish creates a new independent purchase task linked to the
+  current quote task, photo, and reply. It must not reopen or mutate the prior
+  purchase task.
+- The quick-publish form's product type must reach the server-side publish
+  service and remain consistent with the remembered value.
 
 ## Block 3: Purchase Tasks
 

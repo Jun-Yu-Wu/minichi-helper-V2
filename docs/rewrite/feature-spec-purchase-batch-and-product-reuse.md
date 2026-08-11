@@ -1,8 +1,10 @@
 # New Feature Spec: Purchase Batch Aggregation and Product Reuse
 
-Status: Confirmed product direction; gacha/blind-box metadata slice implemented
+Status: Confirmed product direction; quick-publish history reuse confirmed
 
-Confirmed: 2026-07-24
+Confirmed: 2026-07-24; quick-publish history reuse: 2026-08-11
+
+Quick-publish history reuse confirmed: 2026-08-11
 
 Scope: New MINICHI helper system, administrator purchase publishing and helper
 purchase task display. This feature does not change the staging-to-admin-review-
@@ -129,6 +131,26 @@ form as the product-name suggestion.
 The quick entrance is a convenience shortcut, not a separate publish workflow.
 It must use the same validation, authorization, photo handling, audit, and
 provenance rules as normal publishing.
+
+### 3.5 Quick-publish history from the same quote photo
+
+The block-two quick-publish form exposes prior quick publishes from the same
+`quote_task_photo` as reusable history. The scope is exact-photo only, not every
+product published in the connection. History is newest first; one item is shown
+directly and multiple items can be expanded.
+
+Selecting a history item fills product name, product type, original JPY price,
+sale TWD price, quantity, note, and face-check requirement. Quantity remains
+editable. The previous customer nickname, purchase result, task status,
+reported/bought quantity, and old provenance are never copied.
+
+The current quote/detail source photo and current helper detail-reply photos are
+always the photos carried into the new quick-published task. Previous purchase
+photos do not replace current source evidence. Each submission creates an
+independent purchase task linked to the current quote task, photo, and reply.
+The quick-publish product type must be passed through the form, Server Action,
+and service layer. No main-order or staging/merge boundary changes are part of
+this behavior.
 
 ### 3.5 Gacha and blind-box product metadata
 
@@ -341,6 +363,9 @@ part of the helper aggregate response.
   series reference-photo set; purchase report photos never appear in them.
 - Quantity remains editable and is immediately usable after selection.
 - Recent-product quick entrance opens the same validated prefilled form.
+- A quote/detail photo with prior quick publishes exposes newest-first reusable
+  history; selecting it fills only the confirmed editable product fields and
+  keeps the current source photos/provenance.
 - Reused photos remain durable private media and are linked to the new task
   without persisting signed URLs.
 - Admin can inspect batches and customer-level order rows.

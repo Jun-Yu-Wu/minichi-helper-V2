@@ -231,6 +231,7 @@ export async function quickPublishPurchaseTaskAction(
       lineCommunityName: formText(formData, "lineCommunityName"),
       note: formText(formData, "note"),
       originalPriceJpy: formText(formData, "originalPriceJpy"),
+      productType: formText(formData, "productType"),
       productName: formText(formData, "productName"),
       quantity: formText(formData, "quantity"),
       quoteTaskPhotoId: formText(formData, "quoteTaskPhotoId"),
