@@ -55,6 +55,7 @@ export async function POST(request: Request) {
       completedQuantity: body.completedQuantity,
       faceCheckNote: body.faceCheckNote,
       faceCheckPhoto: body.faceCheckPhoto || null,
+      gachaResults: body.gachaResults || [],
       helperNote: body.helperNote,
       idempotencyKey: body.idempotencyKey,
       purchaseTaskId: body.purchaseTaskId,

@@ -171,11 +171,29 @@ cards. Selecting a suggestion copies the series reference photo links and
 metadata, but never copies a previous customer's purchase result or report
 photo.
 
-The helper response UI remains the current quantity, price, and photo flow.
-The helper system carries product type and series-reference role through the
-purchase batch, completed staging preview, reviewed staging order, and source
-provenance only. Per-item gacha styles, result-photo-to-style association,
-transfer, and exchange remain administrator-system responsibilities.
+The dedicated gacha/blind-box helper flow keeps the product type and
+series-reference role through the purchase batch, completed staging preview,
+reviewed staging order, and source provenance, but adds task-level per-item
+reporting:
+
+- The helper first enters actual purchased quantity. The system then creates
+  one result row per purchased item; unpurchased remainder follows the normal
+  cancellation / unavailable flow.
+- Every result row requires result text or one result photo. A later row may
+  reuse the first row's photo. A photo-only result is represented as `看圖` in
+  the administrator result text.
+- A blind-box row may use the explicit `待開箱` state. It may enter staging and
+  be merged, but remains unavailable for administrator transfer until unboxed.
+- The helper submits the complete task as one persistence operation. The admin
+  live return feed shows the task only after that submission succeeds; rows are
+  not formally saved one at a time.
+- Administrator staging review owns per-row corrections. The helper source
+  reply and original media remain auditable and are not silently overwritten.
+
+The batch remains a helper-facing aggregation only. It is never a final order,
+and each customer task still maps to its own staging/main order. Existing
+gacha/blind-box tasks retain the legacy workflow; only newly published tasks
+with the new workflow version use this per-item response model.
 
 ## 4. Helper: Purchase Batch Behavior
 
@@ -227,7 +245,16 @@ The suffix increments only when a new batch is created after the prior batch is
 closed. It must not increment merely because an administrator adds another
 customer before the current batch is resolved.
 
-### 4.3 Partial quantity rule
+### 4.3 Gacha and blind-box batch freeze
+
+Gacha and blind-box batches have an intake state separate from purchase
+completion. A helper may freeze an unfinished batch from its long-press action.
+After freezing, newly published same-key tasks route to the next numbered
+batch. Only an administrator may reopen the latest frozen batch, and reopening
+sets that batch back to `accepting`. If a newer numbered batch already exists,
+an older frozen batch remains closed and cannot be reopened.
+
+### 4.4 Partial quantity rule
 
 A partial helper report keeps the batch open. For example, if C and D require a
 total of 4 units and the helper reports 3 units, the batch remains appendable:
@@ -391,15 +418,19 @@ part of the helper aggregate response.
   after retries.
 - The staging/main boundary and explicit merge requirement remain unchanged.
 
-## 9. Implementation Order
+## 9. Implementation Status and Follow-up
 
-1. Define the product identity and batch read model without changing the final
-   order/merge model.
-2. Add the admin current-connection product suggestion and reuse flow.
-3. Add open-batch append behavior and the base/add-on sequence rule.
-4. Add helper aggregate cards with total, reported, and remaining quantities.
-5. Add admin batch/customer detail inspection.
-6. Add concurrency, idempotency, staging-preview, and role-visibility tests.
-7. Complete authenticated mobile and desktop walkthroughs for both roles.
+Implemented in the first `gacha_v2` slice:
 
-No source code has been changed as part of this planning record.
+1. Dedicated administrator gacha/blind-box publish entry, separated memory and
+   gacha price mapping.
+2. Same-trip/name/type/JPY batch grouping, anonymous helper task rows, freeze
+   and latest-batch admin reopen behavior.
+3. Actual-quantity-first per-item helper reporting, one-photo/reuse-first-photo
+   behavior, task-level idempotent submit, and blind-box pending unboxing.
+4. Per-item staging review and explicit merge into administrator gacha template,
+   order item, item-photo, receivable, and event records.
+
+Remaining acceptance work is authenticated mobile/desktop walkthrough, applying
+`0019_helper_app_gacha_v2_task_results.sql` to the intended helper Supabase
+project, and validating real R2 and cross-application customer/template data.

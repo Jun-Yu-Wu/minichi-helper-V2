@@ -2,9 +2,9 @@
 
 import { RefreshCw } from "lucide-react";
 import Link from "next/link";
-import { useCallback, useEffect, useState, useTransition } from "react";
+import { useCallback, useEffect, useState, useTransition, type FormEvent } from "react";
 
-import { reviewFaceCheckPurchaseAction } from "../actions/admin";
+import { editPurchaseTaskAction, reopenPurchaseBatchAction, reviewFaceCheckPurchaseAction } from "../actions/admin";
 import { InsightBanner, StatusBadge } from "../components/OperationsUi";
 import { RetryableError } from "../components/RetryableState";
 import { Button } from "../components/ui/button";
@@ -21,6 +21,7 @@ type PurchaseTaskSummary = {
   purchase_batch_sequence?: number | null;
   purchase_batch_status?: string | null;
   purchase_batch_group_key?: string | null;
+  purchase_batch_intake_status?: string | null;
   completed_quantity?: number | null;
   helper_display_name?: string | null;
   helper_note?: string | null;
@@ -29,11 +30,14 @@ type PurchaseTaskSummary = {
   original_price_jpy?: number | null;
   photo_count?: number | null;
   product_name?: string | null;
+  product_type?: string | null;
   quantity: number;
   requires_face_check?: boolean;
   sale_price_twd?: number | null;
   status: string;
   trip_id: string;
+  version?: number | null;
+  workflow_version?: string | null;
 };
 
 export function AdminLivePurchaseWorkspace({
@@ -54,6 +58,7 @@ export function AdminLivePurchaseWorkspace({
   const [loadError, setLoadError] = useState("");
   const [detailRefreshNonce, setDetailRefreshNonce] = useState(0);
   const [reviewPending, startReviewTransition] = useTransition();
+  const [batchPending, startBatchTransition] = useTransition();
 
   const selectedTrip = trips.find((trip) => trip.id === selectedTripId);
   const loadTasks = useCallback(async (signal: AbortSignal) => {
@@ -178,6 +183,29 @@ export function AdminLivePurchaseWorkspace({
     });
   }
 
+  function refreshActiveTask() {
+    setDetailRefreshNonce((value) => value + 1);
+    void taskResource.refresh();
+  }
+
+  function reopenBatch() {
+    const purchaseBatchId = activeTask?.purchase_batch?.id || activeTask?.purchase_batch_id;
+    if (!purchaseBatchId) return;
+    if (!window.confirm("要重新開放這個扭蛋批次收單嗎？後續新任務會再進入這個批次。")) return;
+    const formData = new FormData();
+    formData.set("purchaseBatchId", purchaseBatchId);
+    startBatchTransition(async () => {
+      try {
+        const result = await reopenPurchaseBatchAction(formData);
+        if (result?.error) throw new Error(result.error);
+        setMessage("扭蛋批次已重新開放收單。小幫手重新整理後即可看到。 ");
+        refreshActiveTask();
+      } catch (error) {
+        setLoadError(error instanceof Error ? error.message : "重新開放批次失敗。");
+      }
+    });
+  }
+
   return (
     <section className="grid gap-4">
       <div className="grid gap-3">
@@ -291,7 +319,10 @@ export function AdminLivePurchaseWorkspace({
               reviewPending={reviewPending}
               task={activeTask}
               onLoadAllPhotos={loadAllTaskPhotos}
+              onReopenBatch={reopenBatch}
               onReview={reviewFaceCheck}
+              onTaskEdited={refreshActiveTask}
+              reopenPending={batchPending}
             />
           ) : null}
         </section>
@@ -405,19 +436,29 @@ function PurchaseTaskDetail({
   allPhotosLoaded,
   allPhotosLoading,
   onLoadAllPhotos,
+  onReopenBatch,
   onReview,
+  onTaskEdited,
+  reopenPending,
   reviewPending,
   task,
 }: {
   allPhotosLoaded: boolean;
   allPhotosLoading: boolean;
   onLoadAllPhotos: () => void;
+  onReopenBatch: () => void;
   onReview: (action: "approve" | "reject") => void;
+  onTaskEdited: () => void;
+  reopenPending: boolean;
   reviewPending: boolean;
   task: any;
 }) {
   const primaryPhotos = adminPrimaryPurchasePhotos(task.photos || []);
   const hiddenPhotos = adminHiddenPurchasePhotos(task.photos || []);
+  const isGachaV2 = task.workflow_version === "gacha_v2" && ["gacha", "blind_box"].includes(task.product_type);
+  const canEdit = task.status === "open"
+    && Number(task.completed_quantity || 0) === 0
+    && Number(task.unavailable_quantity || 0) === 0;
   return (
     <section className="grid gap-4">
       <div className="rounded-2xl border bg-card p-4 shadow-sm">
@@ -449,6 +490,20 @@ function PurchaseTaskDetail({
         <AdminPurchaseFact label="售價" value={`TWD ${task.sale_price_twd}`} />
       </div>
 
+      {canEdit ? <PurchaseTaskEditForm key={`${task.id}:${task.version || 1}`} onSaved={onTaskEdited} task={task} /> : null}
+
+      {isGachaV2 && task.purchase_batch?.intake_status === "frozen" && task.purchase_batch.status === "open" ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-amber-300 bg-amber-50 p-4 text-sm text-amber-950">
+          <div>
+            <p className="font-semibold">這個扭蛋批次已凍結收單</p>
+            <p className="mt-1">只有管理員可以重新開放；重新開放後，後續同商品任務會回到這個批次。</p>
+          </div>
+          <Button disabled={reopenPending} onClick={onReopenBatch} size="sm" type="button">
+            {reopenPending ? "處理中..." : "重新開放收單"}
+          </Button>
+        </div>
+      ) : null}
+
       {task.note ? <InsightBanner body={task.note} title="管理員指示" tone="neutral" /> : null}
       {task.helper_note ? <InsightBanner body={task.helper_note} title="小幫手回報" tone="neutral" /> : null}
       {task.status === "review_pending" ? (
@@ -476,6 +531,8 @@ function PurchaseTaskDetail({
           </Button>
         </div>
       ) : null}
+
+      {isGachaV2 ? <GachaLiveResultList results={task.gacha_results || []} /> : null}
 
       {primaryPhotos.length ? (
         <div className="grid gap-2 rounded-2xl border bg-card p-3 shadow-sm">
@@ -506,6 +563,90 @@ function PurchaseTaskDetail({
         photos={hiddenPhotos}
         onLoad={onLoadAllPhotos}
       />
+    </section>
+  );
+}
+
+function PurchaseTaskEditForm({ onSaved, task }: { onSaved: () => void; task: any }) {
+  const [editing, setEditing] = useState(false);
+  const [error, setError] = useState("");
+  const [pending, startTransition] = useTransition();
+
+  if (!editing) {
+    return (
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-dashed bg-card p-4 text-sm">
+        <div>
+          <p className="font-semibold">任務尚未收到小幫手回報</p>
+          <p className="mt-1 text-muted-foreground">此時仍可修改名稱、類型、數量、價格與指示；開始回報後請到 staging 逐筆修正。</p>
+        </div>
+        <Button onClick={() => setEditing(true)} size="sm" type="button" variant="outline">編輯發布內容</Button>
+      </div>
+    );
+  }
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    const formData = new FormData(event.currentTarget);
+    startTransition(async () => {
+      const result = await editPurchaseTaskAction(formData);
+      if (result?.error) {
+        setError(result.error);
+        return;
+      }
+      setEditing(false);
+      onSaved();
+    });
+  }
+
+  return (
+    <form className="grid gap-3 rounded-2xl border border-primary/30 bg-card p-4 shadow-sm" onSubmit={submit}>
+      <input name="purchaseTaskId" type="hidden" value={task.id} />
+      <input name="expectedVersion" type="hidden" value={task.version || 1} />
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <p className="font-semibold">編輯尚未回報任務</p>
+          <p className="mt-1 text-xs text-muted-foreground">儲存後會重新計算它所屬的同品項批次。</p>
+        </div>
+        <Button onClick={() => setEditing(false)} size="sm" type="button" variant="ghost">取消</Button>
+      </div>
+      <div className="grid gap-3 md:grid-cols-2">
+        <label className="grid gap-1 text-sm"><span className="font-medium">商品名稱</span><input defaultValue={task.product_name || ""} name="productName" required /></label>
+        <label className="grid gap-1 text-sm"><span className="font-medium">商品類型</span><select defaultValue={task.product_type || "standard"} name="productType"><option value="standard">一般商品</option><option value="gacha">扭蛋</option><option value="blind_box">盲抽</option></select></label>
+        <label className="grid gap-1 text-sm"><span className="font-medium">數量</span><input defaultValue={task.quantity} inputMode="numeric" min="1" name="quantity" required type="number" /></label>
+        <label className="grid gap-1 text-sm"><span className="font-medium">日幣原價</span><input defaultValue={task.original_price_jpy ?? ""} inputMode="numeric" min="0" name="originalPriceJpy" type="number" /></label>
+        <label className="grid gap-1 text-sm"><span className="font-medium">台幣價格</span><input defaultValue={task.sale_price_twd ?? ""} inputMode="numeric" min="0" name="salePriceTwd" required type="number" /></label>
+        <label className="grid gap-1 text-sm md:col-span-2"><span className="font-medium">管理員指示</span><textarea defaultValue={task.note || ""} name="note" rows={2} /></label>
+      </div>
+      {error ? <p className="text-sm text-red-700" role="alert">{error}</p> : null}
+      <Button disabled={pending} type="submit">{pending ? "儲存中..." : "儲存任務"}</Button>
+    </form>
+  );
+}
+
+function GachaLiveResultList({ results }: { results: any[] }) {
+  return (
+    <section className="grid gap-3 rounded-2xl border border-primary/20 bg-card p-4 shadow-sm">
+      <div>
+        <p className="font-semibold">新版扭蛋／盲抽逐顆回報</p>
+        <p className="mt-1 text-sm text-muted-foreground">這筆任務在小幫手完整送出後才會出現在這裡；管理員看到的是每一顆的正式結果。</p>
+      </div>
+      {results.length ? (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {results.map((result: any) => (
+            <div className="grid gap-2 rounded-xl border bg-background p-3" key={result.id || result.sequence_no}>
+              <div className="flex items-center justify-between gap-2 text-sm">
+                <span className="font-semibold">第 {result.sequence_no} 顆</span>
+                <StatusBadge tone={result.unboxing_status === "pending" ? "amber" : "green"}>
+                  {result.unboxing_status === "pending" ? "待開箱" : "已回報"}
+                </StatusBadge>
+              </div>
+              <p className="text-sm">{result.result_name || "看圖"}</p>
+              {result.photo?.signed_url ? <PhotoViewerTrigger alt={`第 ${result.sequence_no} 顆結果`} className="aspect-square max-w-40 rounded-lg border" photo={result.photo} /> : null}
+            </div>
+          ))}
+        </div>
+      ) : <p className="text-sm text-muted-foreground">這筆任務尚未送出逐顆回報。</p>}
     </section>
   );
 }
@@ -596,6 +737,8 @@ function purchaseProgress(task: PurchaseTaskSummary) {
 }
 
 function purchaseTypeLabel(task: PurchaseTaskSummary) {
+  if (task.workflow_version === "gacha_v2" && task.product_type === "gacha") return "扭蛋採買";
+  if (task.workflow_version === "gacha_v2" && task.product_type === "blind_box") return "盲抽採買";
   if (task.status === "review_pending") return "挑臉採買 · 等待審核";
   if (task.status === "approved_pending_helper_confirmation") return "挑臉採買 · 待確認";
   return task.requires_face_check ? "挑臉採買" : "一般採買";

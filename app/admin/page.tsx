@@ -24,9 +24,11 @@ import {
   editReviewedStagingOrderAction,
   editReviewedStagingOrderPhotosAction,
   mergeApprovedStagingJobAction,
+  pauseTripConnectionAction,
   prepareStagingReviewAction,
   rebuildEndedTripSettlementAction,
   rejectStagingMergeJobAction,
+  resumeTripConnectionAction,
   reviewFaceCheckPurchaseAction,
   setReviewedStagingOrderSelectionAction,
 } from "../actions/admin";
@@ -59,6 +61,7 @@ import { AdminLivePhotosWorkspace } from "./AdminLivePhotosWorkspace";
 import { AdminLivePurchaseWorkspace } from "./AdminLivePurchaseWorkspace";
 import { AdminLiveQuoteWorkspace } from "./AdminLiveQuoteWorkspace";
 import { AdminPurchasePhotos } from "./AdminPurchasePhotos";
+import { AdminConnectionTimer } from "./AdminConnectionTimer";
 import { SettlementActionForm } from "./SettlementActionForm";
 import { SettlementExchangeRateForm } from "./SettlementExchangeRateForm";
 import { StagingOrderSelectionForm } from "./StagingOrderSelectionForm";
@@ -1152,6 +1155,8 @@ function AdminLiveReturn({
             ))}
           </nav>
 
+          <TripConnectionControls trip={selectedTrip} />
+
           {selectedSection === "photos" ? (
             <AdminLivePhotosWorkspace initialTripId={selectedTrip.id} />
           ) : null}
@@ -1702,6 +1707,41 @@ function HelperProfileCard({ helper }: { helper: any }) {
   );
 }
 
+function TripConnectionControls({ trip }: { trip: any }) {
+  const paused = Boolean(trip.connection_paused_at);
+  return (
+    <Surface className="grid gap-3 sm:max-w-md">
+      <AdminConnectionTimer
+        pausedAt={trip.connection_paused_at}
+        pausedSeconds={trip.connection_paused_seconds}
+        startedAt={trip.departed_at}
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <StatusBadge tone={paused ? "amber" : "green"}>
+          {paused ? "休息中，暫停計時" : "連線計時中"}
+        </StatusBadge>
+        <ActionButtonForm
+          action={paused ? resumeTripConnectionAction : pauseTripConnectionAction}
+          fields={[
+            { name: "tripId", value: trip.id },
+            { name: "expectedVersion", value: trip.version },
+            {
+              name: "reason",
+              value: paused ? "管理員恢復小幫手連線計時" : "管理員暫停小幫手休息，暫停連線計時",
+            },
+          ]}
+          label={paused ? "恢復計時" : "暫停計時"}
+          pendingLabel={paused ? "恢復中..." : "暫停中..."}
+          variant={paused ? "default" : "outline"}
+        />
+      </div>
+      <p className="text-xs leading-5 text-muted-foreground">
+        暫停不會結束行程；恢復後會從目前累計時間繼續，行程結束時仍會自動結算未完成的暫停區間。
+      </p>
+    </Surface>
+  );
+}
+
 function TripManagement({
   openGroups,
   trips,
@@ -1741,8 +1781,8 @@ function TripManagement({
                         <div>
                           <div className="flex flex-wrap items-center gap-2">
                             <h4 className="font-semibold">{trip.trip_name}</h4>
-                            <StatusBadge tone={trip.status === "active" ? "green" : trip.status === "arrived" ? "amber" : trip.status === "canceled" ? "red" : "neutral"}>
-                              {statusLabel(trip.status)}
+                            <StatusBadge tone={trip.status === "active" ? (trip.connection_paused_at ? "amber" : "green") : trip.status === "arrived" ? "amber" : trip.status === "canceled" ? "red" : "neutral"}>
+                              {trip.status === "active" && trip.connection_paused_at ? "連線中／計時暫停" : statusLabel(trip.status)}
                             </StatusBadge>
                           </div>
                           <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
@@ -1760,7 +1800,7 @@ function TripManagement({
                             </span>
                           </div>
                           <p className="mt-3 text-sm font-medium text-foreground">
-                            {adminTripNextAction(trip.status)}
+                            {adminTripNextAction(trip)}
                           </p>
                         </div>
                         <div className="flex flex-wrap items-start gap-2">
@@ -1810,6 +1850,7 @@ function TripManagement({
                           ) : null}
                         </div>
                       </div>
+                      {trip.status === "active" ? <TripConnectionControls trip={trip} /> : null}
                       {trip.status !== "ended" ? <TripOperationTimeline status={trip.status} /> : null}
                       {trip.status !== "ended" ? (
                         <details className="mt-3 rounded-lg border bg-muted/30 p-3">
@@ -1936,9 +1977,11 @@ function EmptyPanel({ body, title }: { body: string; title: string }) {
   return <EmptyState body={body} title={title} />;
 }
 
-function adminTripNextAction(status: string) {
+function adminTripNextAction(trip: any) {
+  const status = trip.status;
   if (status === "arrived") return "小幫手已抵達，確認現場可連線後請啟用。";
   if (status === "departed") return "小幫手前往中，等待抵達回報。";
+  if (status === "active" && trip.connection_paused_at) return "小幫手休息中；連線仍開啟，但目前不計入時間。";
   if (status === "active") return "連線中；任務發布與現場回傳請到對應工作區處理。";
   if (status === "scheduled" || status === "draft") return "尚未出發；確認日期、小幫手與地點即可等待出發。";
   if (status === "ended") return "行程已結束；後續處理結帳、審核與合併。";

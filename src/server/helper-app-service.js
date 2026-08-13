@@ -1,6 +1,7 @@
 const crypto = require("node:crypto");
 
 const {
+  buildConnectionPauseTransition,
   buildTransition,
   repairTrip: buildRepairTransition,
   snapshotTrip: snapshotTripForAudit,
@@ -34,6 +35,7 @@ const ADMIN_DASHBOARD_SECTIONS = [
 
 const PURCHASE_PRODUCT_TYPES = new Set(["standard", "gacha", "blind_box"]);
 const GACHA_PRODUCT_TYPES = new Set(["gacha", "blind_box"]);
+const GACHA_V2_WORKFLOW_VERSION = "gacha_v2";
 
 function normalizePurchaseProductType(value) {
   const productType = String(value || "standard").trim().toLowerCase();
@@ -108,7 +110,8 @@ async function listAdminDashboard(
     included.has("trips") ? database.query(
       `select t.id, t.trip_name, t.business_date, t.scheduled_time, t.location,
               t.timezone, t.assigned_helper_id, t.status, t.departed_at,
-              t.arrived_at, t.admin_activated_at, t.ended_at, t.canceled_at,
+              t.arrived_at, t.admin_activated_at, t.connection_paused_at,
+              t.connection_paused_seconds, t.ended_at, t.canceled_at,
               t.version, t.created_at, t.updated_at,
               hp.display_name as helper_display_name,
               s.id as settlement_id
@@ -408,7 +411,8 @@ async function loadAssignedHelperTrips(
   return database.query(
     `select id, trip_name, business_date, scheduled_time, location, timezone,
             assigned_helper_id, status, departed_at, arrived_at,
-            admin_activated_at, ended_at, canceled_at, version, created_at,
+            admin_activated_at, connection_paused_at, connection_paused_seconds,
+            ended_at, canceled_at, version, created_at,
             updated_at
      from helper_app.trips
      where ${tripConditions.join(" and ")}
@@ -637,9 +641,11 @@ async function listPurchaseTasks(
               pb.group_key as purchase_batch_group_key,
               pb.sequence as purchase_batch_sequence,
               pb.status as purchase_batch_status,
+              pb.intake_status as purchase_batch_intake_status,
               pt.source_quote_task_id,
               pt.source_quote_task_photo_id, pt.source_quote_reply_id,
-              pt.product_type, pt.line_community_name, pt.product_name, pt.quantity,
+              pt.product_type, pt.workflow_version, pt.source_gacha_template_id,
+              pt.version, pt.line_community_name, pt.product_name, pt.quantity,
               pt.original_price_jpy, pt.sale_price_twd, pt.note,
               pt.requires_face_check, pt.status, pt.completed_quantity,
               pt.unavailable_quantity, pt.helper_note, pt.face_check_note,
@@ -680,9 +686,11 @@ async function listPurchaseTasks(
             pb.group_key as purchase_batch_group_key,
             pb.sequence as purchase_batch_sequence,
             pb.status as purchase_batch_status,
+            pb.intake_status as purchase_batch_intake_status,
             pt.source_quote_task_id,
             pt.source_quote_task_photo_id, pt.source_quote_reply_id,
-            pt.product_type, pt.line_community_name, pt.product_name, pt.quantity,
+            pt.product_type, pt.workflow_version, pt.source_gacha_template_id,
+            pt.version, pt.line_community_name, pt.product_name, pt.quantity,
             pt.original_price_jpy, pt.sale_price_twd, pt.note,
             pt.requires_face_check, pt.status, pt.completed_quantity,
             pt.unavailable_quantity, pt.helper_note, pt.face_check_note,
@@ -774,9 +782,11 @@ async function getPurchaseTaskDetail(
             pb.group_key as purchase_batch_group_key,
             pb.sequence as purchase_batch_sequence,
             pb.status as purchase_batch_status,
+            pb.intake_status as purchase_batch_intake_status,
             pt.source_quote_task_id,
             pt.source_quote_task_photo_id, pt.source_quote_reply_id,
-            pt.product_type, pt.line_community_name, pt.product_name, pt.quantity,
+            pt.product_type, pt.workflow_version, pt.source_gacha_template_id,
+            pt.version, pt.line_community_name, pt.product_name, pt.quantity,
             pt.original_price_jpy, pt.sale_price_twd, pt.note,
             pt.requires_face_check, pt.status, pt.completed_quantity,
             pt.unavailable_quantity, pt.helper_note, pt.face_check_note,
@@ -784,7 +794,8 @@ async function getPurchaseTaskDetail(
             t.trip_name, t.business_date, t.timezone, t.status as trip_status,
             hp.display_name as helper_display_name,
             batch_summary.summary as purchase_batch,
-            coalesce(photos.items, '[]'::jsonb) as photos
+            coalesce(photos.items, '[]'::jsonb) as photos,
+            coalesce(gacha_results.items, '[]'::jsonb) as gacha_results
      from helper_app.purchase_tasks pt
      join helper_app.trips t on t.id = pt.trip_id
      join helper_app.helper_profiles hp on hp.id = pt.helper_id
@@ -796,6 +807,7 @@ async function getPurchaseTaskDetail(
                 'product_type', batch.product_type,
                 'sequence', batch.sequence,
                 'status', batch.status,
+                'intake_status', batch.intake_status,
                 'requires_face_check', batch.requires_face_check,
                 'requested_quantity', coalesce(sum(batch_task.quantity) filter (where batch_task.status not in ('canceled', 'unavailable', 'not_found')), 0)::int,
                 'reported_quantity', coalesce(sum(batch_task.completed_quantity) filter (where batch_task.status not in ('canceled', 'unavailable', 'not_found')), 0)::int
@@ -835,6 +847,22 @@ async function getPurchaseTaskDetail(
            )
          )
      ) photos on true
+     left join lateral (
+       select jsonb_agg(
+                jsonb_build_object(
+                  'id', ptr.id,
+                  'sequence_no', ptr.sequence_no,
+                  'result_name', ptr.result_name,
+                  'unboxing_status', ptr.unboxing_status,
+                  'result_photo_storage_key', ptr.result_photo_storage_key,
+                  'version', ptr.version,
+                  'created_at', ptr.created_at,
+                  'updated_at', ptr.updated_at
+                ) order by ptr.sequence_no asc
+              ) as items
+       from helper_app.purchase_task_results ptr
+       where ptr.purchase_task_id = pt.id
+     ) gacha_results on true
      where ${conditions.join(" and ")}
      limit 1`,
     params,
@@ -1022,6 +1050,9 @@ async function listStagingMergeJobs(
   const photoExpression = includeOrderPhotos
     ? "coalesce(photos.items, '[]'::jsonb)"
     : "'[]'::jsonb";
+  const itemExpression = includeReviewedOrders
+    ? "coalesce(reviewed_items.items, '[]'::jsonb)"
+    : "'[]'::jsonb";
   const photoJoin = includeOrderPhotos
     ? `
               left join lateral (
@@ -1037,6 +1068,22 @@ async function listStagingMergeJobs(
                 where rsop.reviewed_order_id = rso.id
               ) photos on true`
     : "";
+  const itemJoin = includeReviewedOrders
+    ? `
+              left join lateral (
+                select jsonb_agg(jsonb_build_object(
+                  'id', rsoi.id,
+                  'staging_order_preview_item_id', rsoi.staging_order_preview_item_id,
+                  'sequence_no', rsoi.sequence_no,
+                  'result_name', rsoi.result_name,
+                  'unboxing_status', rsoi.unboxing_status,
+                  'result_photo_storage_key', rsoi.result_photo_storage_key,
+                  'version', rsoi.version
+                ) order by rsoi.sequence_no asc) as items
+                from helper_app.reviewed_staging_order_items rsoi
+                where rsoi.reviewed_order_id = rso.id
+              ) reviewed_items on true`
+    : "";
   const reviewedOrderColumns = includeReviewedOrders
     ? `
             coalesce((
@@ -1045,6 +1092,8 @@ async function listStagingMergeJobs(
                 'staging_order_preview_id', rso.staging_order_preview_id,
                 'purchase_task_id', rso.purchase_task_id,
                 'product_type', rso.product_type,
+                'workflow_version', rso.workflow_version,
+                'source_gacha_template_id', rso.source_gacha_template_id,
                 'line_community_name', rso.line_community_name,
                 'product_name', rso.product_name,
                 'appearance_notes', rso.appearance_notes,
@@ -1056,10 +1105,12 @@ async function listStagingMergeJobs(
                 'customer_exists', rso.customer_exists,
                 'customer_confirmed', rso.customer_confirmed,
                 'version', rso.version,
-                'photos', ${photoExpression}
+                'photos', ${photoExpression},
+                'items', ${itemExpression}
               ) order by rso.created_at asc)
               from helper_app.reviewed_staging_orders rso
               ${photoJoin}
+              ${itemJoin}
               where ${reviewedOrderWhere.join(" and ")}
             ), '[]'::jsonb)`
     : `'[]'::jsonb`;
@@ -1554,6 +1605,7 @@ function normalizePurchaseBatchKey({
   productName,
   originalPriceJpy,
   productType = "standard",
+  workflowVersion = "legacy",
   referencePhotoSignature,
   requiresFaceCheck,
 }) {
@@ -1561,18 +1613,26 @@ function normalizePurchaseBatchKey({
     .trim()
     .toLocaleLowerCase()
     .replace(/\s+/g, " ");
+  if (workflowVersion === GACHA_V2_WORKFLOW_VERSION && isGachaProductType(productType)) {
+    // A dedicated gacha batch is intentionally independent of its reference
+    // image. The grouping contract is exactly trip + name + type + JPY price;
+    // the primary series image is provenance, not a batching dimension.
+    return [
+      normalizedName,
+      originalPriceJpy == null ? "none" : String(originalPriceJpy),
+      productType,
+      GACHA_V2_WORKFLOW_VERSION,
+    ].join("|");
+  }
   const baseKey = [
     normalizedName,
     originalPriceJpy == null ? "none" : String(originalPriceJpy),
     requiresFaceCheck ? "face-check" : "standard",
   ];
   // Keep the legacy key shape for standard products so existing open batches
-  // continue to receive compatible tasks. Gacha and blind-box tasks must not
-  // share a helper batch with an ordinary product or a different series of the
-  // same name/price.
-  if (productType !== "standard") {
-    baseKey.push(productType, referencePhotoSignature || "none");
-  }
+  // continue to receive compatible tasks. Legacy gacha records retain their
+  // old series-photo boundary and are not migrated into the new workflow.
+  if (productType !== "standard") baseKey.push(productType, referencePhotoSignature || "none");
   return baseKey.join("|");
 }
 
@@ -1594,6 +1654,7 @@ function groupPurchaseTasksForHelper(tasks) {
       batch_id: task.purchase_batch_id || null,
       batch_sequence: Number(task.purchase_batch_sequence || 0),
       batch_status: task.purchase_batch_status || null,
+      batch_intake_status: task.purchase_batch_intake_status || null,
       group_key: task.purchase_batch_group_key || null,
       representative_task_id: task.id,
       tasks: [task],
@@ -1602,7 +1663,10 @@ function groupPurchaseTasksForHelper(tasks) {
 
   return [...groups.values()]
     .map((group) => {
-      const tasks = group.tasks;
+      const tasks = [...group.tasks].sort((left, right) => {
+        const createdDifference = new Date(left.created_at || 0).getTime() - new Date(right.created_at || 0).getTime();
+        return createdDifference || String(left.id || "").localeCompare(String(right.id || ""));
+      });
       const representative = tasks.find((task) =>
         !["completed", "canceled", "unavailable", "not_found"].includes(task.status),
       ) || tasks[0];
@@ -1635,12 +1699,22 @@ function groupPurchaseTasksForHelper(tasks) {
         batch_title: purchaseBatchTitle(representative.product_name, group.batch_sequence),
         batch_sequence: group.batch_sequence,
         batch_status: status,
+        batch_intake_status: group.batch_intake_status,
+        workflow_version: representative.workflow_version || "legacy",
         batch_customer_count: tasks.length,
         batch_requested_quantity: requestedQuantity,
         batch_reported_quantity: reportedQuantity,
         batch_remaining_quantity: remainingQuantity,
         representative_task_id: representative.id,
         batch_task_ids: tasks.map((task) => task.id),
+        batch_tasks: tasks.map((task, index) => ({
+          completed_quantity: Number(task.completed_quantity || 0),
+          id: task.id,
+          quantity: Number(task.quantity || 0),
+          status: task.status,
+          task_number: index + 1,
+          unavailable_quantity: Number(task.unavailable_quantity || 0),
+        })),
       };
     })
     .sort((left, right) => {
@@ -1660,6 +1734,92 @@ async function listHelperPurchaseBatches(database, { authUserId, helperId, tripI
     tripIds,
   });
   return groupPurchaseTasksForHelper(tasks);
+}
+
+async function freezePurchaseBatch(database, { authUserId, purchaseBatchId }) {
+  const normalizedBatchId = requiredText(purchaseBatchId, "purchaseBatchId");
+  return withTransaction(database, async (client) => {
+    const { helper, batch } = await lockPurchaseBatchForHelper(client, {
+      authUserId: requiredText(authUserId, "authUserId"),
+      purchaseBatchId: normalizedBatchId,
+    });
+    assertTripCanUseLiveWorkspace(
+      { status: batch.authorized_trip_status },
+      "Purchase batches can be frozen only while the trip is active.",
+    );
+    if (batch.product_type === "standard") {
+      throw new HelperAppServiceError("invalid_input", "只有扭蛋／盲抽批次可以凍結收單。");
+    }
+    if (batch.status !== "open" || batch.intake_status !== "accepting") {
+      throw new HelperAppServiceError("invalid_status", "這個扭蛋批次目前不能凍結。");
+    }
+    const taskResult = await client.query(
+      "select 1 from helper_app.purchase_tasks where purchase_batch_id = $1 and workflow_version = $2 limit 1",
+      [batch.id, GACHA_V2_WORKFLOW_VERSION],
+    );
+    if (!taskResult.rows[0]) {
+      throw new HelperAppServiceError("invalid_status", "這個批次不是新版扭蛋採買批次。");
+    }
+    const result = await client.query(
+      "update helper_app.purchase_batches set intake_status = 'frozen', version = version + 1, updated_at = now() where id = $1 returning *",
+      [batch.id],
+    );
+    const frozenBatch = result.rows[0];
+    await insertAuditEvent(client, {
+      action: "helper_purchase_batch_frozen",
+      actor_helper_id: helper.id,
+      actor_role: "helper",
+      actor_user_id: authUserId,
+      after_state: { purchaseBatchId: batch.id, intakeStatus: "frozen" },
+      before_state: { purchaseBatchId: batch.id, intakeStatus: batch.intake_status },
+      trip_id: batch.trip_id,
+    });
+    return frozenBatch;
+  });
+}
+
+async function reopenPurchaseBatch(database, { actorUserId, purchaseBatchId }) {
+  const normalizedBatchId = requiredText(purchaseBatchId, "purchaseBatchId");
+  return withTransaction(database, async (client) => {
+    const batchResult = await client.query(
+      "select pb.*, t.status as trip_status from helper_app.purchase_batches pb join helper_app.trips t on t.id = pb.trip_id where pb.id = $1 for update of pb, t",
+      [normalizedBatchId],
+    );
+    const batch = batchResult.rows[0];
+    if (!batch) throw new HelperAppServiceError("purchase_batch_not_found", "Purchase batch was not found.");
+    if (!isGachaProductType(batch.product_type) || batch.intake_status !== "frozen") {
+      throw new HelperAppServiceError("invalid_status", "這個批次目前不是可重新開放的扭蛋批次。");
+    }
+    if (batch.status !== "open") {
+      throw new HelperAppServiceError("invalid_status", "已完成的批次不能重新開放。");
+    }
+    if (batch.trip_status !== "active") {
+      throw new HelperAppServiceError("trip_not_active", "只有進行中的行程可以重新開放扭蛋批次。");
+    }
+    const latestResult = await client.query(
+      "select id from helper_app.purchase_batches where trip_id = $1 and group_key = $2 order by sequence desc, created_at desc, id desc limit 1",
+      [batch.trip_id, batch.group_key],
+    );
+    if (latestResult.rows[0]?.id !== batch.id) {
+      throw new HelperAppServiceError(
+        "invalid_status",
+        "這個批次後面已經有新的批次，請重新開放最新批次。",
+      );
+    }
+    const result = await client.query(
+      "update helper_app.purchase_batches set intake_status = 'accepting', version = version + 1, updated_at = now() where id = $1 returning *",
+      [batch.id],
+    );
+    await insertAuditEvent(client, {
+      action: "admin_purchase_batch_reopened",
+      actor_role: "admin",
+      actor_user_id: actorUserId || null,
+      after_state: { purchaseBatchId: batch.id, intakeStatus: "accepting" },
+      before_state: { purchaseBatchId: batch.id, intakeStatus: batch.intake_status },
+      trip_id: batch.trip_id,
+    });
+    return result.rows[0];
+  });
 }
 
 async function listPurchaseProductSuggestions(database, { tripId, query = "", limit = 8 } = {}) {
@@ -1750,8 +1910,9 @@ async function listPurchaseProductSuggestions(database, { tripId, query = "", li
        lt.id desc`,
     [normalizedTripId, normalizedQuery, boundedLimit],
   );
-  return result.rows.map((task) => ({
+  const currentTripSuggestions = result.rows.map((task) => ({
     sourceTaskId: task.id,
+    sourceKind: "current_trip",
     productType: task.product_type || "standard",
     productName: task.product_name,
     quantity: task.quantity,
@@ -1762,6 +1923,54 @@ async function listPurchaseProductSuggestions(database, { tripId, query = "", li
     createdAt: task.created_at,
     photos: Array.isArray(task.photos) ? task.photos : [],
   }));
+  let historyRows = [];
+  try {
+    const historyResult = await database.query(
+      `select gpt.template_id, gpt.product_type, gpt.product_name,
+              gpt.original_price_jpy, gpt.default_sale_price_twd,
+              gpt.series_photo_storage_key, gpt.series_photo_original_name,
+              gpt.updated_at,
+              op.order_photo_id, op.original_name, op.content_type, op.storage_key
+       from main.gacha_product_templates gpt
+       left join main.order_photos op
+         on op.order_photo_id = gpt.series_photo_order_photo_id
+       where gpt.is_active = true
+         and ($1 = '' or lower(gpt.product_name) like '%' || lower($1) || '%')
+       order by gpt.last_used_at desc nulls last, gpt.updated_at desc
+       limit $2`,
+      [normalizedQuery, boundedLimit],
+    );
+    historyRows = historyResult.rows;
+  } catch (error) {
+    // Keep the admin form usable during the short window before the admin
+    // gacha migration is applied. Once the table exists, real errors should
+    // still surface instead of silently hiding history.
+    if (!["42P01", "42703"].includes(String(error?.code || ""))) throw error;
+  }
+  return [
+    ...currentTripSuggestions,
+    ...historyRows.map((template) => ({
+      sourceKind: "admin_gacha_template",
+      sourceTaskId: `template:${template.template_id}`,
+      sourceTemplateId: template.template_id,
+      productType: template.product_type,
+      productName: template.product_name,
+      quantity: 1,
+      originalPriceJpy: template.original_price_jpy,
+      salePriceTwd: template.default_sale_price_twd,
+      note: null,
+      requiresFaceCheck: false,
+      createdAt: template.updated_at,
+      photos: template.series_photo_storage_key
+        ? [{
+            storage_key: template.series_photo_storage_key,
+            photo_role: "series_reference",
+            original_filename: template.series_photo_original_name || template.original_name,
+            content_type: template.content_type,
+          }]
+        : [],
+    })),
+  ];
 }
 
 /**
@@ -1853,6 +2062,18 @@ async function attachSignedPurchaseTaskUrls(tasks, r2Store) {
           signed_url: await r2Store.signedGetUrl(photo.storage_key),
         })),
       ),
+      gacha_results: await Promise.all(
+        (task.gacha_results || []).map(async (result) => ({
+          ...result,
+          photo: result.result_photo_storage_key
+            ? {
+                storage_key: result.result_photo_storage_key,
+                photo_role: "purchase_report",
+                signed_url: await r2Store.signedGetUrl(result.result_photo_storage_key),
+              }
+            : null,
+        })),
+      ),
     })),
   );
 }
@@ -1882,6 +2103,17 @@ async function attachSignedStagingMergeJobUrls(jobs, r2Store) {
             (order.photos || []).map(async (photo) => ({
               ...photo,
               signed_url: await r2Store.signedGetUrl(photo.storage_key),
+            })),
+          ),
+          items: await Promise.all(
+            (order.items || []).map(async (item) => ({
+              ...item,
+              result_photo: item.result_photo_storage_key
+                ? {
+                    storage_key: item.result_photo_storage_key,
+                    signed_url: await r2Store.signedGetUrl(item.result_photo_storage_key),
+                  }
+                : null,
             })),
           ),
         })),
@@ -2258,12 +2490,41 @@ async function createQuoteTask(
 
 async function createPurchaseTask(database, input) {
   const normalized = normalizePurchaseTaskInput(input);
-  const referencePhotos = normalizePurchaseReferencePhotos(input.referencePhotos || input.uploadedPhotos);
+  let referencePhotos = normalizePurchaseReferencePhotos(input.referencePhotos || input.uploadedPhotos);
   if (!referencePhotos.length) {
     throw new HelperAppServiceError("invalid_input", "At least one purchase reference photo is required.");
   }
   return withTransaction(database, async (client) => {
     const trip = await getActiveAssignedTripForTaskCreation(client, normalized.tripId);
+    if (normalized.reuseSourceTemplateId) {
+      if (!isGachaProductType(normalized.productType)) {
+        throw new HelperAppServiceError("invalid_input", "只有扭蛋／盲抽可以沿用管理員商品卡。");
+      }
+      const templateResult = await client.query(
+        "select template_id, product_type, product_name, original_price_jpy, series_photo_storage_key " +
+        "from main.gacha_product_templates where template_id = $1 and is_active = true for share",
+        [normalized.reuseSourceTemplateId],
+      );
+      const template = templateResult.rows[0];
+      if (!template) {
+        throw new HelperAppServiceError("invalid_input", "找不到可沿用的管理員扭蛋商品卡。");
+      }
+      if (
+        template.product_type !== normalized.productType
+        || Number(template.original_price_jpy) !== Number(normalized.originalPriceJpy)
+        || String(template.product_name || "").trim().toLocaleLowerCase()
+          !== String(normalized.productName || "").trim().toLocaleLowerCase()
+      ) {
+        throw new HelperAppServiceError("invalid_input", "沿用的扭蛋商品卡資料已變更，請重新選取。");
+      }
+      if (!referencePhotos.some((photo) => photo.storageKey === template.series_photo_storage_key)) {
+        throw new HelperAppServiceError("invalid_input", "沿用商品卡時必須保留系列參考圖。");
+      }
+      // Admin cards are a trusted source. Convert the client-facing reuse
+      // marker to a normal helper media upsert so the legacy source-task
+      // validator cannot accidentally reject an admin card.
+      referencePhotos = referencePhotos.map((photo) => ({ ...photo, reused: false }));
+    }
     const task = await insertPurchaseTask(client, {
       ...normalized,
       helperId: trip.assigned_helper_id,
@@ -2282,8 +2543,173 @@ async function createPurchaseTask(database, input) {
   });
 }
 
+async function editPurchaseTask(database, input) {
+  const purchaseTaskId = requiredText(input.purchaseTaskId, "purchaseTaskId");
+  const expectedVersion = Number(input.expectedVersion);
+  const quantity = Number(requiredText(input.quantity, "quantity"));
+  const originalPriceText = optionalText(input.originalPriceJpy);
+  const originalPriceJpy = originalPriceText == null ? null : Number(originalPriceText);
+  const salePriceTwd = Number(requiredText(input.salePriceTwd, "salePriceTwd"));
+  const productType = normalizePurchaseProductType(input.productType);
+  const productName = requiredText(input.productName, "productName");
+  const note = optionalText(input.note);
+  if (!Number.isInteger(expectedVersion) || expectedVersion <= 0) {
+    throw new HelperAppServiceError("invalid_input", "任務版本不正確，請重新載入。");
+  }
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new HelperAppServiceError("invalid_input", "Quantity must be a positive integer.");
+  }
+  if (!Number.isInteger(salePriceTwd) || salePriceTwd < 0) {
+    throw new HelperAppServiceError("invalid_input", "Sale price TWD must be a non-negative integer.");
+  }
+  if (originalPriceJpy != null && (!Number.isInteger(originalPriceJpy) || originalPriceJpy < 0)) {
+    throw new HelperAppServiceError("invalid_input", "Original JPY price must be a non-negative integer.");
+  }
+  if (isGachaProductType(productType) && Boolean(input.requiresFaceCheck)) {
+    throw new HelperAppServiceError("invalid_input", "扭蛋／盲抽不支援挑臉流程。");
+  }
+
+  return withTransaction(database, async (client) => {
+    const task = await lockPurchaseTask(client, purchaseTaskId);
+    if (Number(task.version || 1) !== expectedVersion) {
+      throw new HelperAppServiceError("version_conflict", "採買任務已更新，請重新載入後再編輯。");
+    }
+    if (task.status !== "open" || Number(task.completed_quantity || 0) > 0 || Number(task.unavailable_quantity || 0) > 0) {
+      throw new HelperAppServiceError("invalid_status", "小幫手已開始回報後，任務內容請到 staging 逐筆修正。");
+    }
+    if (task.requires_face_check && isGachaProductType(productType)) {
+      throw new HelperAppServiceError("invalid_input", "挑臉任務不能改成扭蛋／盲抽。");
+    }
+    if (task.purchase_batch_id) {
+      const batchResult = await client.query(
+        "select * from helper_app.purchase_batches where id = $1 for update",
+        [task.purchase_batch_id],
+      );
+      const currentBatch = batchResult.rows[0];
+      if (currentBatch?.intake_status === "frozen") {
+        throw new HelperAppServiceError("invalid_status", "小幫手已凍結這個批次，請先重新確認批次狀態後再修改任務。");
+      }
+    }
+    if (isGachaProductType(productType)) {
+      const seriesPhotoResult = await client.query(
+        "select 1 from helper_app.purchase_task_photos where purchase_task_id = $1 and photo_role = 'series_reference' limit 1",
+        [task.id],
+      );
+      if (!seriesPhotoResult.rows[0]) {
+        throw new HelperAppServiceError("invalid_input", "扭蛋／盲抽任務必須保留系列參考圖。");
+      }
+    }
+
+    const preservingLegacyGacha = task.workflow_version === "legacy" && isGachaProductType(task.product_type);
+    const workflowVersion = preservingLegacyGacha
+      ? "legacy"
+      : isGachaProductType(productType)
+        ? GACHA_V2_WORKFLOW_VERSION
+        : "legacy";
+    const referenceChanged = String(task.product_name || "").trim().toLocaleLowerCase() !== productName.trim().toLocaleLowerCase()
+      || Number(task.original_price_jpy ?? -1) !== Number(originalPriceJpy ?? -1)
+      || task.product_type !== productType;
+    const sourceGachaTemplateId = referenceChanged ? null : (task.source_gacha_template_id || null);
+    let referencePhotoSignature = null;
+    if (workflowVersion === "legacy" && isGachaProductType(productType)) {
+      const referencePhotoResult = await client.query(
+        "select storage_key, sort_order from helper_app.purchase_task_photos where purchase_task_id = $1 and photo_role <> 'face_check_report' order by sort_order asc",
+        [task.id],
+      );
+      referencePhotoSignature = purchaseReferencePhotoSignature(productType, referencePhotoResult.rows);
+    }
+    const purchaseBatch = await getOrCreatePurchaseBatch(client, {
+      helperId: task.helper_id,
+      originalPriceJpy,
+      productType,
+      productName,
+      referencePhotoSignature,
+      requiresFaceCheck: task.requires_face_check,
+      tripId: task.trip_id,
+      workflowVersion,
+    });
+    const result = await client.query(
+      `update helper_app.purchase_tasks
+       set product_type = $2,
+           workflow_version = $3,
+           source_gacha_template_id = $4,
+           product_name = $5,
+           quantity = $6,
+           original_price_jpy = $7,
+           sale_price_twd = $8,
+           note = $9,
+           purchase_batch_id = $10,
+           version = version + 1,
+           updated_at = now()
+       where id = $1 and version = $11 and status = 'open'
+       returning *`,
+      [
+        task.id,
+        productType,
+        workflowVersion,
+        sourceGachaTemplateId,
+        productName,
+        quantity,
+        originalPriceJpy,
+        salePriceTwd,
+        note,
+        purchaseBatch?.id || null,
+        expectedVersion,
+      ],
+    );
+    const updated = result.rows[0];
+    if (!updated) throw new HelperAppServiceError("version_conflict", "採買任務已更新，請重新載入後再編輯。");
+    if (!isGachaProductType(productType) && isGachaProductType(task.product_type)) {
+      await client.query(
+        "update helper_app.purchase_task_photos set photo_role = 'manual_reference' where purchase_task_id = $1 and photo_role = 'series_reference'",
+        [task.id],
+      );
+    } else if (isGachaProductType(productType) && !isGachaProductType(task.product_type)) {
+      await client.query(
+        "update helper_app.purchase_task_photos set photo_role = 'series_reference' where purchase_task_id = $1 and photo_role = 'manual_reference'",
+        [task.id],
+      );
+    }
+    if (task.purchase_batch_id && task.purchase_batch_id !== (purchaseBatch?.id || null)) {
+      await refreshPurchaseBatch(client, task.purchase_batch_id);
+    }
+    await insertAuditEvent(client, {
+      action: "admin_purchase_task_edited",
+      actor_role: "admin",
+      actor_user_id: input.actorUserId || null,
+      after_state: {
+        productType,
+        productName,
+        quantity,
+        originalPriceJpy,
+        salePriceTwd,
+        purchaseTaskId: task.id,
+        purchaseBatchId: purchaseBatch?.id || null,
+        workflowVersion,
+      },
+      before_state: {
+        productType: task.product_type,
+        productName: task.product_name,
+        quantity: task.quantity,
+        originalPriceJpy: task.original_price_jpy,
+        salePriceTwd: task.sale_price_twd,
+        purchaseBatchId: task.purchase_batch_id,
+        workflowVersion: task.workflow_version || "legacy",
+      },
+      trip_id: task.trip_id,
+    });
+    return updated;
+  });
+}
+
 async function quickPublishPurchaseTask(database, input) {
-  const normalized = normalizePurchaseTaskInput(input, { allowMissingOriginalPriceJpy: true });
+  // Keep the quote quick-publish route as the legacy path. New dedicated
+  // gacha/blind-box tasks are created through createPurchaseTask, while old
+  // quote-linked gacha tasks remain compatible with their original flow.
+  const normalized = normalizePurchaseTaskInput(input, {
+    allowMissingOriginalPriceJpy: true,
+    workflowVersionOverride: "legacy",
+  });
   const quoteTaskPhotoId = requiredText(input.quoteTaskPhotoId, "quoteTaskPhotoId");
   return withTransaction(database, async (client) => {
     const quoteResult = await client.query(
@@ -2726,6 +3152,161 @@ async function checkoutRebuyTasks(database, input) {
   });
 }
 
+async function respondGachaPurchaseTask(client, { helper, normalized, task }) {
+  if (task.status === "completed" && task.idempotency_key === normalized.idempotencyKey) {
+    return task;
+  }
+  if (["canceled", "unavailable", "not_found", "review_pending"].includes(task.status)) {
+    throw new HelperAppServiceError("invalid_status", "這筆扭蛋採買目前不能重新回報。");
+  }
+  const reviewedResult = await client.query(
+    "select 1 from helper_app.reviewed_staging_orders where purchase_task_id = $1 limit 1",
+    [task.id],
+  );
+  if (reviewedResult.rows[0]) {
+    throw new HelperAppServiceError("invalid_status", "這筆扭蛋已進入管理員 staging 審核，不能再由小幫手修改。");
+  }
+
+  const requestedQuantity = Math.max(1, Number(task.quantity || 1));
+  const completedQuantity = Math.max(
+    0,
+    Math.min(Number(normalized.completedQuantity ?? requestedQuantity), requestedQuantity),
+  );
+  const cancelAction = ["cancel", "unavailable", "not_found"].includes(normalized.action);
+  if (cancelAction || completedQuantity === 0) {
+    if (!normalized.helperNote) {
+      throw new HelperAppServiceError("invalid_input", "尚未買到扭蛋時需要填寫取消／缺貨理由。");
+    }
+    await removeStagingOrderPreviewForPurchaseTask(client, task.id);
+    await client.query("delete from helper_app.purchase_task_results where purchase_task_id = $1", [task.id]);
+    const status = cancelAction && normalized.action !== "cancel" ? normalized.action : "canceled";
+    const result = await client.query(
+      "update helper_app.purchase_tasks " +
+      "set status = $2, completed_quantity = 0, unavailable_quantity = $3, helper_note = $4, " +
+      "idempotency_key = $5, canceled_at = now(), completed_at = null, version = version + 1, updated_at = now() " +
+      "where id = $1 returning *",
+      [
+        task.id,
+        status,
+        requestedQuantity,
+        normalized.helperNote,
+        normalized.idempotencyKey,
+      ],
+    );
+    const batch = task.purchase_batch_id ? await refreshPurchaseBatch(client, task.purchase_batch_id) : null;
+    await insertAuditEvent(client, {
+      action: "helper_gacha_purchase_canceled",
+      actor_helper_id: helper.id,
+      actor_role: "helper",
+      actor_user_id: normalized.authUserId,
+      after_state: { purchaseTaskId: task.id, status, completedQuantity: 0 },
+      before_state: { status: task.status },
+      trip_id: task.trip_id,
+    });
+    return { ...result.rows[0], purchase_batch: batch, gacha_results: [] };
+  }
+
+  if (normalized.gachaResults.length !== completedQuantity) {
+    throw new HelperAppServiceError(
+      "invalid_input",
+      "請完成 " + completedQuantity + " 顆扭蛋的逐顆回報。",
+    );
+  }
+  const sequenceNumbers = normalized.gachaResults.map((result) => result.sequenceNo);
+  if (
+    sequenceNumbers.some((value, index) => value !== index + 1)
+    || new Set(sequenceNumbers).size !== sequenceNumbers.length
+  ) {
+    throw new HelperAppServiceError("invalid_input", "扭蛋逐顆回報順序不完整，請重新整理後再送出。");
+  }
+  if (
+    task.product_type === "gacha"
+    && normalized.gachaResults.some((result) => result.unboxingStatus === "pending")
+  ) {
+    throw new HelperAppServiceError("invalid_input", "扭蛋結果不能使用待開箱狀態。");
+  }
+
+  await removeStagingOrderPreviewForPurchaseTask(client, task.id);
+  const uniquePhotos = new Map();
+  for (const result of normalized.gachaResults) {
+    if (result.resultPhoto?.storageKey && !uniquePhotos.has(result.resultPhoto.storageKey)) {
+      uniquePhotos.set(result.resultPhoto.storageKey, result.resultPhoto);
+    }
+  }
+  if (uniquePhotos.size) {
+    await insertPurchaseReportPhotosBatch(client, {
+      helperId: helper.id,
+      photos: [...uniquePhotos.values()].map((photo, index) => ({ ...photo, sortOrder: index })),
+      purchaseTaskId: task.id,
+      tripId: task.trip_id,
+    });
+  }
+  await client.query(
+    "delete from helper_app.purchase_task_results where purchase_task_id = $1 and sequence_no > $2",
+    [task.id, completedQuantity],
+  );
+  const resultRows = await client.query(
+    "insert into helper_app.purchase_task_results " +
+    "(purchase_task_id, sequence_no, result_name, unboxing_status, result_photo_storage_key) " +
+    "select $1, input.sequence_no, input.result_name, input.unboxing_status, input.result_photo_storage_key " +
+    "from unnest($2::int[], $3::text[], $4::text[], $5::text[]) " +
+    "as input(sequence_no, result_name, unboxing_status, result_photo_storage_key) " +
+    "on conflict (purchase_task_id, sequence_no) do update " +
+    "set result_name = excluded.result_name, unboxing_status = excluded.unboxing_status, " +
+    "result_photo_storage_key = excluded.result_photo_storage_key, version = helper_app.purchase_task_results.version + 1, updated_at = now() " +
+    "returning *",
+    [
+      task.id,
+      normalized.gachaResults.map((result) => result.sequenceNo),
+      normalized.gachaResults.map((result) => result.resultName),
+      normalized.gachaResults.map((result) => result.unboxingStatus),
+      normalized.gachaResults.map((result) => result.resultPhoto?.storageKey || null),
+    ],
+  );
+  const remainingQuantity = requestedQuantity - completedQuantity;
+  const result = await client.query(
+    "update helper_app.purchase_tasks " +
+    "set status = 'completed', completed_quantity = $2, unavailable_quantity = $3, " +
+    "helper_note = coalesce($4, helper_note), idempotency_key = $5, completed_at = now(), " +
+    "canceled_at = null, version = version + 1, updated_at = now() " +
+    "where id = $1 returning *",
+    [
+      task.id,
+      completedQuantity,
+      remainingQuantity,
+      remainingQuantity > 0
+        ? formatPartialPurchaseNote(
+            normalized.helperNote,
+            remainingQuantity,
+            normalized.remainingResolution || "canceled",
+          )
+        : normalized.helperNote,
+      normalized.idempotencyKey,
+    ],
+  );
+  await syncStagingOrderPreview(client, result.rows[0]);
+  const batch = task.purchase_batch_id ? await refreshPurchaseBatch(client, task.purchase_batch_id) : null;
+  await insertAuditEvent(client, {
+    action: "helper_gacha_purchase_submitted",
+    actor_helper_id: helper.id,
+    actor_role: "helper",
+    actor_user_id: normalized.authUserId,
+    after_state: {
+      completedQuantity,
+      purchaseTaskId: task.id,
+      remainingQuantity,
+      resultCount: resultRows.rows.length,
+    },
+    before_state: { status: task.status, completedQuantity: task.completed_quantity || 0 },
+    trip_id: task.trip_id,
+  });
+  return {
+    ...result.rows[0],
+    gacha_results: resultRows.rows,
+    purchase_batch: batch,
+  };
+}
+
 async function respondPurchaseTask(database, input) {
   const normalized = normalizePurchaseResponseInput(input);
   return withTransaction(database, async (client) => {
@@ -2741,6 +3322,9 @@ async function respondPurchaseTask(database, input) {
       { status: task.authorized_trip_status },
       "Purchase tasks can be updated only while the trip is active.",
     );
+    if (task.workflow_version === GACHA_V2_WORKFLOW_VERSION && isGachaProductType(task.product_type)) {
+      return respondGachaPurchaseTask(client, { helper, normalized, task });
+    }
     const cancelingCompletedPurchase = task.status === "completed" && normalized.action === "cancel";
     if (["completed", "canceled", "unavailable", "not_found"].includes(task.status) && !cancelingCompletedPurchase) {
       if (task.idempotency_key && task.idempotency_key === normalized.idempotencyKey) {
@@ -2996,6 +3580,12 @@ async function respondPurchaseBatch(database, input) {
       [batch.id],
     );
     const tasks = taskResult.rows;
+    if (tasks.some((task) => task.workflow_version === GACHA_V2_WORKFLOW_VERSION)) {
+      throw new HelperAppServiceError(
+        "invalid_status",
+        "新版扭蛋／盲抽必須依每一筆客人任務逐顆回報，不能使用整批回報。",
+      );
+    }
     if (tasks.some((task) => task.requires_face_check)) {
       throw new HelperAppServiceError(
         "invalid_status",
@@ -3279,7 +3869,7 @@ async function authorizeQuoteReplyUpload(database, { authUserId, quoteTaskPhotoI
 
 async function authorizePurchaseFaceCheckUpload(database, { authUserId, purchaseTaskId }) {
   const result = await database.query(
-    `select pt.id, pt.trip_id, pt.helper_id, pt.status, pt.requires_face_check,
+    `select pt.id, pt.trip_id, pt.helper_id, pt.status, pt.workflow_version, pt.requires_face_check,
             t.status as trip_status, hp.is_active
      from helper_app.purchase_tasks pt
      join helper_app.trips t on t.id = pt.trip_id
@@ -3312,7 +3902,16 @@ async function authorizePurchaseReportUpload(database, { authUserId, purchaseTas
   const row = result.rows[0];
   if (!row) throw new HelperAppServiceError("forbidden", "Purchase task is not assigned to this helper.");
   if (!row.is_active) throw new HelperAppServiceError("helper_inactive", "Helper profile is inactive.");
-  if (row.requires_face_check || row.status !== "open") {
+  if (
+    row.requires_face_check
+    || (
+      row.status !== "open"
+      && !(
+        row.workflow_version === GACHA_V2_WORKFLOW_VERSION
+        && row.status === "completed"
+      )
+    )
+  ) {
     throw new HelperAppServiceError("invalid_status", "This purchase task does not accept a general report photo now.");
   }
   assertTripCanUseLiveWorkspace({ status: row.trip_status }, "Purchase report photos can be uploaded only while the trip is active.");
@@ -3634,12 +4233,14 @@ async function prepareStagingReview(database, input) {
     await client.query(
       `insert into helper_app.reviewed_staging_orders
          (merge_job_id, trip_id, helper_id, staging_order_preview_id,
-          purchase_task_id, product_type, line_community_name, product_name, quantity,
+          purchase_task_id, product_type, workflow_version, source_gacha_template_id,
+          line_community_name, product_name, quantity,
           original_price_jpy, sale_price_twd, source_quote_task_id,
           source_quote_task_photo_id, source_quote_reply_id, source_rebuy_task_id,
           customer_exists)
        select $1, sop.trip_id, sop.helper_id, sop.id, sop.purchase_task_id,
-              sop.product_type, sop.line_community_name, sop.product_name, sop.quantity,
+              sop.product_type, sop.workflow_version, sop.source_gacha_template_id,
+              sop.line_community_name, sop.product_name, sop.quantity,
               sop.original_price_jpy, sop.sale_price_twd, sop.source_quote_task_id,
               sop.source_quote_task_photo_id, sop.source_quote_reply_id,
               sop.source_rebuy_task_id,
@@ -3651,6 +4252,19 @@ async function prepareStagingReview(database, input) {
        where sop.trip_id = $2
        on conflict (staging_order_preview_id) do nothing`,
       [job.id, trip.id],
+    );
+    await client.query(
+      `insert into helper_app.reviewed_staging_order_items
+         (reviewed_order_id, staging_order_preview_item_id, sequence_no, result_name,
+          unboxing_status, result_photo_storage_key)
+       select rso.id, sopi.id, sopi.sequence_no, sopi.result_name,
+              sopi.unboxing_status, sopi.result_photo_storage_key
+       from helper_app.reviewed_staging_orders rso
+       join helper_app.staging_order_preview_items sopi
+         on sopi.staging_order_preview_id = rso.staging_order_preview_id
+       where rso.merge_job_id = $1
+       on conflict (reviewed_order_id, sequence_no) do nothing`,
+      [job.id],
     );
     await client.query(
       `insert into helper_app.reviewed_staging_order_photos
@@ -3691,6 +4305,8 @@ async function editReviewedStagingOrder(database, input) {
     const result = await client.query(
        `update helper_app.reviewed_staging_orders
        set product_type = $2,
+           workflow_version = case when $2 in ('gacha', 'blind_box') then 'gacha_v2' else 'legacy' end,
+           source_gacha_template_id = case when $2 in ('gacha', 'blind_box') then source_gacha_template_id else null end,
            line_community_name = $3,
            product_name = $4,
            appearance_notes = $5,
@@ -3722,12 +4338,58 @@ async function editReviewedStagingOrder(database, input) {
         patch.customerConfirmed,
       ],
     );
+    if (isGachaProductType(patch.productType)) {
+      const photoResult = await client.query(
+        "select storage_key, photo_role, include_in_merge from helper_app.reviewed_staging_order_photos where reviewed_order_id = $1",
+        [current.id],
+      );
+      const includedPhotoKeys = new Set(
+        photoResult.rows.filter((row) => row.include_in_merge).map((row) => row.storage_key),
+      );
+      if (!photoResult.rows.some((row) => row.photo_role === "series_reference" && row.include_in_merge)) {
+        throw new HelperAppServiceError("invalid_input", "扭蛋／盲抽必須保留一張會合併的系列參考圖。");
+      }
+      for (const item of patch.gachaItems) {
+        if (item.resultPhotoStorageKey && !includedPhotoKeys.has(item.resultPhotoStorageKey)) {
+          throw new HelperAppServiceError("invalid_input", "扭蛋結果照片必須來自這筆 staging 訂單的照片。");
+        }
+      }
+      await client.query(
+        "delete from helper_app.reviewed_staging_order_items where reviewed_order_id = $1 and sequence_no > $2",
+        [current.id, patch.quantity],
+      );
+      if (patch.gachaItems.length) {
+        await client.query(
+          "insert into helper_app.reviewed_staging_order_items " +
+          "(reviewed_order_id, staging_order_preview_item_id, sequence_no, result_name, unboxing_status, result_photo_storage_key) " +
+          "select $1, " +
+          "(select sopi.id from helper_app.staging_order_preview_items sopi " +
+          "where sopi.staging_order_preview_id = $2 and sopi.sequence_no = input.sequence_no limit 1), " +
+          "input.sequence_no, input.result_name, input.unboxing_status, input.result_photo_storage_key " +
+          "from jsonb_to_recordset($3::jsonb) as input(" +
+          "sequence_no integer, result_name text, unboxing_status text, result_photo_storage_key text) " +
+          "on conflict (reviewed_order_id, sequence_no) do update " +
+          "set result_name = excluded.result_name, unboxing_status = excluded.unboxing_status, " +
+          "result_photo_storage_key = excluded.result_photo_storage_key, version = helper_app.reviewed_staging_order_items.version + 1, updated_at = now()",
+          [
+            current.id,
+            current.staging_order_preview_id,
+            JSON.stringify(patch.gachaItems),
+          ],
+        );
+      }
+    } else {
+      await client.query(
+        "delete from helper_app.reviewed_staging_order_items where reviewed_order_id = $1",
+        [current.id],
+      );
+    }
     await revokeMergeApprovalForEdit(client, job);
     await insertAuditEvent(client, {
       action: "admin_reviewed_staging_order_edited",
       actor_role: "admin",
       actor_user_id: input.actorUserId || null,
-      after_state: { reviewedOrderId: current.id },
+      after_state: { gachaItemCount: patch.gachaItems.length, reviewedOrderId: current.id },
       before_state: { status: job.status },
       trip_id: current.trip_id,
     });
@@ -3745,17 +4407,41 @@ async function editReviewedStagingOrderPhotos(database, input) {
       throw new HelperAppServiceError("invalid_status", "Merged staging photos can no longer be edited here.");
     }
     const existing = await client.query(
-      `select id
+      `select id, storage_key, photo_role, include_in_merge
        from helper_app.reviewed_staging_order_photos
        where reviewed_order_id = $1
        for update`,
       [current.id],
     );
     const existingIds = new Set(existing.rows.map((row) => row.id));
+    const requestedById = new Map();
     for (const photo of photos) {
       const photoId = requiredText(photo.id, "photoId");
       if (!existingIds.has(photoId)) {
         throw new HelperAppServiceError("invalid_input", "Reviewed staging photo does not belong to this order.");
+      }
+      requestedById.set(photoId, {
+        id: photoId,
+        includeInMerge: Boolean(photo.includeInMerge),
+      });
+    }
+    const finalPhotos = existing.rows.map((photo) => ({
+      ...photo,
+      include_in_merge: requestedById.has(photo.id)
+        ? requestedById.get(photo.id).includeInMerge
+        : Boolean(photo.include_in_merge),
+    }));
+    if (isGachaProductType(current.product_type)) {
+      if (!finalPhotos.some((photo) => photo.photo_role === "series_reference" && photo.include_in_merge)) {
+        throw new HelperAppServiceError("invalid_input", "扭蛋／盲抽必須至少保留一張系列參考圖。");
+      }
+      const resultPhotoKeys = await client.query(
+        "select result_photo_storage_key from helper_app.reviewed_staging_order_items where reviewed_order_id = $1 and result_photo_storage_key is not null",
+        [current.id],
+      );
+      const excludedKeys = new Set(finalPhotos.filter((photo) => !photo.include_in_merge).map((photo) => photo.storage_key));
+      if (resultPhotoKeys.rows.some((row) => excludedKeys.has(row.result_photo_storage_key))) {
+        throw new HelperAppServiceError("invalid_input", "逐顆結果正在使用的照片不能取消合併，請先改逐顆結果照片。");
       }
     }
     if (photos.length) {
@@ -4009,7 +4695,15 @@ async function mergeApprovedStagingJob(database, input) {
   if (preparation.alreadyMerged) return preparation.job;
 
   const { job, snapshot } = preparation;
-  const { mainOrderIds, orderRows, photoRows, sourceLinkRows } = buildMergeRows(job, snapshot);
+  const {
+    gachaItemPhotoRows,
+    gachaItemRows,
+    gachaTemplateRows,
+    mainOrderIds,
+    orderRows,
+    photoRows,
+    sourceLinkRows,
+  } = buildMergeRows(job, snapshot);
   try {
     if (photoRows.length && r2Store) {
       await Promise.all(photoRows.map((photo) => r2Store.copyObject(
@@ -4028,6 +4722,10 @@ async function mergeApprovedStagingJob(database, input) {
       }
       await writeMergeRows(client, {
         copyAuditRows: r2Store ? photoRows : [],
+        actorUserId: input.actorUserId || null,
+        gachaItemPhotoRows,
+        gachaItemRows,
+        gachaTemplateRows,
         job,
         orderRows,
         photoRows,
@@ -4084,6 +4782,9 @@ function buildMergeRows(job, snapshot) {
       helper_id: order.helperId,
       line_community_name: order.lineCommunityName,
       merge_job_id: job.id,
+      product_type: order.productType || "standard",
+      workflow_version: order.workflowVersion || "legacy",
+      source_gacha_template_id: order.sourceGachaTemplateId || null,
       notes: order.customerConfirmed && !order.customerExists
         ? "Unknown customer explicitly confirmed during helper staging review."
         : null,
@@ -4109,6 +4810,9 @@ function buildMergeRows(job, snapshot) {
     return {
       detail: {
         productType: sourceOrder.productType || "standard",
+        workflowVersion: sourceOrder.workflowVersion || "legacy",
+        sourceGachaTemplateId: sourceOrder.sourceGachaTemplateId || null,
+        gachaItemCount: Array.isArray(sourceOrder.items) ? sourceOrder.items.length : 0,
         stagingOrderPreviewId: sourceOrder.stagingOrderPreviewId,
       },
       helper_id: order.helper_id,
@@ -4124,10 +4828,18 @@ function buildMergeRows(job, snapshot) {
     };
   });
   const photoRows = [];
+  const photoIdsByOrderAndStorageKey = new Map();
   for (const order of snapshot.orders || []) {
     const orderId = deterministicId("helper_order", job.id, order.reviewedOrderId);
     for (const photo of order.photos || []) {
       const photoId = deterministicId("helper_photo", job.id, order.reviewedOrderId, photo.id);
+      const photoRole = isGachaProductType(order.productType) && order.workflowVersion === GACHA_V2_WORKFLOW_VERSION
+        ? photo.photoRole === "series_reference"
+          ? "gacha_series_reference"
+          : photo.photoRole === "purchase_report"
+            ? "gacha_result_evidence"
+            : photo.photoRole
+        : photo.photoRole;
       photoRows.push({
         final_storage_key: deterministicMainPhotoKey({
           mergeJobId: job.id,
@@ -4138,18 +4850,117 @@ function buildMergeRows(job, snapshot) {
         label: photo.label || "",
         order_id: orderId,
         photo_id: photoId,
-        photo_role: photo.photoRole,
+        photo_role: photoRole,
         source_photo_id: photo.sourcePurchaseTaskPhotoId,
         source_task_id: order.purchaseTaskId,
         source_storage_key: photo.storageKey,
         staging_order_photo_id: photo.id,
       });
+      photoIdsByOrderAndStorageKey.set(
+        order.reviewedOrderId + "|" + photo.storageKey,
+        photoId,
+      );
     }
   }
-  return { mainOrderIds, orderRows, photoRows, sourceLinkRows };
+  const gachaTemplateRows = [];
+  const gachaItemRows = [];
+  const gachaItemPhotoRows = [];
+  const gachaTemplateKeys = new Set();
+  for (const order of snapshot.orders || []) {
+    if (order.workflowVersion !== GACHA_V2_WORKFLOW_VERSION || !isGachaProductType(order.productType)) continue;
+    const seriesPhoto = (order.photos || []).find((photo) => photo.photoRole === "series_reference");
+    if (!seriesPhoto) {
+      throw new HelperAppServiceError("gacha_series_photo_missing", "扭蛋 staging 必須保留一張系列參考圖才能合併。");
+    }
+    const items = Array.isArray(order.items) ? order.items : [];
+    if (items.length !== Number(order.quantity || 0)) {
+      throw new HelperAppServiceError("gacha_items_incomplete", "扭蛋逐顆結果數量與訂單數量不一致，不能合併。");
+    }
+    const templateKey = order.sourceGachaTemplateId
+      ? "source:" + order.sourceGachaTemplateId
+      : [
+          order.productType,
+          normalizeMainProductName(order.productName),
+          order.originalPriceJpy,
+          seriesPhoto.storageKey,
+        ].join("|");
+    const templateId = order.sourceGachaTemplateId
+      || deterministicUuid("helper_gacha_template", job.id, templateKey);
+    if (!gachaTemplateKeys.has(templateKey)) {
+      gachaTemplateRows.push({
+        default_sale_price_twd: order.salePriceTwd,
+        normalized_product_name: normalizeMainProductName(order.productName),
+        original_price_jpy: order.originalPriceJpy || 0,
+        purchase_date: snapshot.trip?.business_date,
+        product_name: order.productName,
+        product_type: order.productType,
+        series_photo_order_photo_id: photoIdsByOrderAndStorageKey.get(
+          order.reviewedOrderId + "|" + seriesPhoto.storageKey,
+        ) || null,
+        series_photo_original_name: seriesPhoto.originalFilename || null,
+        series_photo_storage_key: seriesPhoto.storageKey,
+        source_gacha_template_id: order.sourceGachaTemplateId || null,
+        template_id: templateId,
+        template_key: templateKey,
+      });
+      gachaTemplateKeys.add(templateKey);
+    }
+    for (const item of items) {
+      const itemId = deterministicUuid("helper_gacha_item", job.id, order.reviewedOrderId, item.sequenceNo);
+      gachaItemRows.push({
+        amount_twd: order.salePriceTwd,
+        gacha_item_id: itemId,
+        item_status: "active",
+        order_id: deterministicId("helper_order", job.id, order.reviewedOrderId),
+        original_price_jpy: order.originalPriceJpy || 0,
+        purchase_date: snapshot.trip?.business_date,
+        result_name: item.resultName || "看圖",
+        result_photo_storage_key: item.resultPhotoStorageKey || null,
+        sequence_no: item.sequenceNo,
+        template_id: templateId,
+        template_key: templateKey,
+        unboxing_status: item.unboxingStatus || "recorded",
+      });
+      if (item.resultPhotoStorageKey) {
+        const orderPhotoId = photoIdsByOrderAndStorageKey.get(
+          order.reviewedOrderId + "|" + item.resultPhotoStorageKey,
+        );
+        if (!orderPhotoId) {
+          throw new HelperAppServiceError("gacha_result_photo_missing", "扭蛋結果照片沒有被保留在 staging 合併資料中。");
+        }
+        gachaItemPhotoRows.push({
+          gacha_item_id: itemId,
+          order_photo_id: orderPhotoId,
+          sort_order: 0,
+        });
+      }
+    }
+  }
+  return {
+    gachaItemPhotoRows,
+    gachaItemRows,
+    gachaTemplateRows,
+    mainOrderIds,
+    orderRows,
+    photoRows,
+    sourceLinkRows,
+  };
 }
 
-async function writeMergeRows(client, { copyAuditRows, job, orderRows, photoRows, sourceLinkRows }) {
+async function writeMergeRows(
+  client,
+  {
+    actorUserId,
+    copyAuditRows,
+    gachaItemPhotoRows,
+    gachaItemRows,
+    gachaTemplateRows,
+    job,
+    orderRows,
+    photoRows,
+    sourceLinkRows,
+  },
+) {
     if (orderRows.length) {
       await client.query(
         `insert into main.orders
@@ -4242,6 +5053,182 @@ async function writeMergeRows(client, { copyAuditRows, job, orderRows, photoRows
         [JSON.stringify(photoRows)],
       );
     }
+    const gachaOrders = orderRows.filter(
+      (order) => order.workflow_version === GACHA_V2_WORKFLOW_VERSION
+        && isGachaProductType(order.product_type),
+    );
+    if (!gachaOrders.length) return;
+
+    const customerNames = [...new Set(
+      gachaOrders.map((order) => normalizeCustomerName(order.line_community_name)),
+    )];
+    const customerResult = await client.query(
+      "select id, line_community_name from main.customers " +
+      "where lower(regexp_replace(btrim(line_community_name), '[[:space:]]+', ' ', 'g')) = any($1::text[])",
+      [customerNames],
+    );
+    const customersByName = new Map(
+      customerResult.rows.map((customer) => [
+        normalizeCustomerName(customer.line_community_name),
+        customer,
+      ]),
+    );
+    const customerByOrderId = new Map();
+    for (const order of gachaOrders) {
+      const customer = customersByName.get(normalizeCustomerName(order.line_community_name));
+      if (!customer) {
+        throw new HelperAppServiceError(
+          "gacha_customer_unresolved",
+          "扭蛋／盲抽訂單的 LINE 暱稱尚未對應到管理員正式客戶，請先在 staging 修正後再合併。",
+        );
+      }
+      customerByOrderId.set(order.order_id, customer);
+      await client.query(
+        "update main.orders " +
+        "set customer_id = $2, customer_resolution_status = 'resolved', product_id = $3, " +
+        "purchase_status_code = 'purchased', fulfillment_status_code = 'standard', row_version = row_version + 1, updated_at = now() " +
+        "where order_id = $1",
+        [order.order_id, customer.id, "gacha:" + order.product_type],
+      );
+    }
+
+    const templateIdsByKey = new Map();
+    for (const template of gachaTemplateRows || []) {
+      if (template.source_gacha_template_id) {
+        const sourceResult = await client.query(
+          "select template_id, product_type, normalized_product_name, original_price_jpy " +
+          "from main.gacha_product_templates where template_id = $1 and is_active = true for update",
+          [template.source_gacha_template_id],
+        );
+        const source = sourceResult.rows[0];
+        if (
+          !source
+          || source.product_type !== template.product_type
+          || source.normalized_product_name !== template.normalized_product_name
+          || Number(source.original_price_jpy) !== Number(template.original_price_jpy)
+        ) {
+          throw new HelperAppServiceError("gacha_template_invalid", "沿用的扭蛋商品卡與 staging 資料不一致。");
+        }
+        templateIdsByKey.set(template.template_key, source.template_id);
+        continue;
+      }
+      if (!template.series_photo_order_photo_id) {
+        throw new HelperAppServiceError("gacha_series_photo_missing", "新增扭蛋商品卡缺少系列參考圖。");
+      }
+      const templateResult = await client.query(
+        "insert into main.gacha_product_templates " +
+        "(template_id, product_type, product_name, normalized_product_name, original_price_jpy, " +
+        "default_sale_price_twd, series_photo_order_photo_id, series_photo_storage_key, series_photo_original_name, " +
+        "created_by_user_id, last_used_at, updated_at) " +
+        "values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now(), now()) " +
+        "on conflict (product_type, normalized_product_name, original_price_jpy, series_photo_storage_key) " +
+        "do update set default_sale_price_twd = excluded.default_sale_price_twd, is_active = true, " +
+        "last_used_at = now(), updated_at = now() returning template_id",
+        [
+          template.template_id,
+          template.product_type,
+          template.product_name,
+          template.normalized_product_name,
+          template.original_price_jpy,
+          template.default_sale_price_twd,
+          template.series_photo_order_photo_id,
+          template.series_photo_storage_key,
+          template.series_photo_original_name,
+          actorUserId || null,
+        ],
+      );
+      templateIdsByKey.set(template.template_key, templateResult.rows[0]?.template_id || template.template_id);
+    }
+
+    const gachaItemsForInsert = (gachaItemRows || []).map((item) => {
+      const customer = customerByOrderId.get(item.order_id);
+      const templateId = templateIdsByKey.get(item.template_key) || item.template_id;
+      if (!customer || !templateId) {
+        throw new HelperAppServiceError("gacha_merge_invalid", "扭蛋逐顆資料缺少客戶或商品卡關聯。");
+      }
+      return {
+        ...item,
+        customer_id: customer.id,
+        template_id: templateId,
+        purchase_date: item.purchase_date || job.business_date,
+      };
+    });
+    if (gachaItemsForInsert.length) {
+      await client.query(
+        "insert into main.gacha_order_items " +
+        "(gacha_item_id, original_order_id, current_order_id, original_customer_id, current_customer_id, " +
+        "template_id, purchase_date, sequence_no, result_name, unboxing_status, unboxed_at, unboxed_by_user_id, " +
+        "original_price_jpy, amount_twd, item_status) " +
+        "select input.gacha_item_id, input.original_order_id, input.original_order_id, input.customer_id, input.customer_id, " +
+        "input.template_id, input.purchase_date, input.sequence_no, input.result_name, input.unboxing_status, " +
+        "case when input.unboxing_status = 'recorded' then now() else null end, " +
+        "case when input.unboxing_status = 'recorded' then $2::uuid else null end, " +
+        "input.original_price_jpy, input.amount_twd, input.item_status " +
+        "from jsonb_to_recordset($1::jsonb) as input(" +
+        "gacha_item_id uuid, original_order_id text, customer_id uuid, template_id uuid, purchase_date date, " +
+        "sequence_no integer, result_name text, unboxing_status text, original_price_jpy integer, amount_twd integer, item_status text) " +
+        "on conflict (original_order_id, sequence_no) do update " +
+        "set current_order_id = excluded.current_order_id, current_customer_id = excluded.current_customer_id, " +
+        "template_id = excluded.template_id, result_name = excluded.result_name, unboxing_status = excluded.unboxing_status, " +
+        "unboxed_at = excluded.unboxed_at, unboxed_by_user_id = excluded.unboxed_by_user_id, " +
+        "original_price_jpy = excluded.original_price_jpy, amount_twd = excluded.amount_twd, " +
+        "item_status = excluded.item_status, row_version = main.gacha_order_items.row_version + 1, updated_at = now()",
+        [JSON.stringify(gachaItemsForInsert), actorUserId || null],
+      );
+      if (gachaItemPhotoRows?.length) {
+        await client.query(
+          "insert into main.gacha_order_item_photos " +
+          "(gacha_item_id, order_photo_id, photo_role, sort_order) " +
+          "select input.gacha_item_id, input.order_photo_id, 'result_evidence', input.sort_order " +
+          "from jsonb_to_recordset($1::jsonb) as input(gacha_item_id uuid, order_photo_id text, sort_order integer) " +
+          "on conflict (gacha_item_id, order_photo_id, photo_role) do nothing",
+          [JSON.stringify(gachaItemPhotoRows)],
+        );
+      }
+    }
+    for (const order of gachaOrders) {
+      const customer = customerByOrderId.get(order.order_id);
+      const amount = Number(order.receivable_total_twd || 0);
+      if (amount <= 0) continue;
+      const receivableResult = await client.query(
+        "insert into main.order_receivables " +
+        "(order_id, customer_id, quantity_state_id, receivable_type, quantity, amount_twd, due_status, " +
+        "due_trigger_code, payment_method_rule, rule_snapshot, idempotency_key, created_by_user_id) " +
+        "values ($1, $2, null, 'product', $3, $4, 'not_due', 'order_confirmed', 'admin_defined', $5::jsonb, $6, $7) " +
+        "on conflict (idempotency_key) do nothing returning receivable_id",
+        [
+          order.order_id,
+          customer.id,
+          order.quantity,
+          amount,
+          JSON.stringify({ amount_basis: "gacha_item.amount_twd", source_type: "helper_merge", version: "v2-gacha-helper-merge" }),
+          "gacha_order:" + order.order_id + ":product_receivable:v1",
+          actorUserId || null,
+        ],
+      );
+      const receivableId = receivableResult.rows[0]?.receivable_id;
+      if (receivableId) {
+        await client.query(
+          "insert into main.receivable_events (receivable_id, event_type, actor_user_id, detail) values ($1, 'created', $2, $3::jsonb)",
+          [
+            receivableId,
+            actorUserId || null,
+            JSON.stringify({ source: "helper_app", workflow: "gacha_merge" }),
+          ],
+        );
+      }
+      await client.query(
+        "insert into main.order_events (event_id, order_id, event, actor, detail, actor_user_id, order_version) " +
+        "values ($1, $2, 'gacha_helper_merged', $3, $4::jsonb, $5, 1) on conflict (event_id) do nothing",
+        [
+          deterministicId("helper_gacha_event", job.id, order.order_id),
+          order.order_id,
+          actorUserId ? "admin:" + actorUserId : "admin",
+          JSON.stringify({ itemCount: order.quantity, workflow: "gacha_helper_merge" }),
+          actorUserId || null,
+        ],
+      );
+    }
 }
 
 async function activateTrip(database, { actorUserId, expectedVersion, tripId }) {
@@ -4250,6 +5237,34 @@ async function activateTrip(database, { actorUserId, expectedVersion, tripId }) 
     actorUserId,
     expectedVersion,
     tripId,
+  });
+}
+
+async function pauseTripConnection(
+  database,
+  { actorUserId, expectedVersion, reason, tripId, now = null },
+) {
+  return mutateAdminConnectionTime(database, {
+    action: "admin_connection_paused",
+    actorUserId,
+    expectedVersion,
+    reason,
+    tripId,
+    now,
+  });
+}
+
+async function resumeTripConnection(
+  database,
+  { actorUserId, expectedVersion, reason, tripId, now = null },
+) {
+  return mutateAdminConnectionTime(database, {
+    action: "admin_connection_resumed",
+    actorUserId,
+    expectedVersion,
+    reason,
+    tripId,
+    now,
   });
 }
 
@@ -4391,6 +5406,30 @@ async function mutateAdminTrip(database, { action, actorUserId, expectedVersion,
   });
 }
 
+async function mutateAdminConnectionTime(
+  database,
+  { action, actorUserId, expectedVersion, reason, tripId, now },
+) {
+  return withTransaction(database, async (client) => {
+    const trip = await lockTrip(client, tripId);
+    const transition = buildConnectionPauseTransition({
+      action,
+      actorRole: "admin",
+      expectedVersion,
+      now,
+      reason,
+      trip,
+    });
+    const updated = await persistTripTransition(client, transition.trip);
+    await insertAuditEvent(client, {
+      ...transition.event,
+      actor_user_id: actorUserId,
+      trip_id: tripId,
+    });
+    return updated;
+  });
+}
+
 async function findActiveHelperForUser(client, authUserId) {
   const result = await client.query(
     `select *
@@ -4455,9 +5494,11 @@ async function persistTripTransition(client, trip) {
          departed_at = $3,
          arrived_at = $4,
          admin_activated_at = $5,
-         ended_at = $6,
-         canceled_at = $7,
-         version = $8,
+         connection_paused_at = $6,
+         connection_paused_seconds = $7,
+         ended_at = $8,
+         canceled_at = $9,
+         version = $10,
          updated_at = now()
      where id = $1
      returning *`,
@@ -4467,6 +5508,8 @@ async function persistTripTransition(client, trip) {
       trip.departed_at,
       trip.arrived_at,
       trip.admin_activated_at,
+      trip.connection_paused_at,
+      Number(trip.connection_paused_seconds || 0),
       trip.ended_at,
       trip.canceled_at,
       trip.version,
@@ -4513,7 +5556,11 @@ async function createSettlementForAssignedTrip(client, trip) {
 }
 
 async function createSettlementForEndedTrip(client, { helper, trip }) {
-  const workMinutes = calculateWorkMinutes(trip.departed_at, trip.ended_at);
+  const workMinutes = calculateWorkMinutes(
+    trip.departed_at,
+    trip.ended_at,
+    Number(trip.connection_paused_seconds || 0),
+  );
   const totalResult = await client.query(
     `select coalesce(sum(quantity * coalesce(original_price_jpy, 0)), 0)::int as product_total_jpy
      from helper_app.staging_order_previews
@@ -4964,7 +6011,8 @@ async function revokeMergeApprovalForEdit(client, job) {
 async function buildReviewedSnapshot(client, mergeJobId) {
   const result = await client.query(
     `select mj.id as merge_job_id, t.id as trip_id, t.trip_name, t.business_date,
-            t.timezone, rso.*, coalesce(photos.items, '[]'::jsonb) as photos
+            t.timezone, rso.*, coalesce(photos.items, '[]'::jsonb) as photos,
+            coalesce(items.items, '[]'::jsonb) as items
      from helper_app.staging_merge_jobs mj
      join helper_app.trips t on t.id = mj.trip_id
      join helper_app.reviewed_staging_orders rso on rso.merge_job_id = mj.id
@@ -4980,6 +6028,19 @@ async function buildReviewedSnapshot(client, mergeJobId) {
        from helper_app.reviewed_staging_order_photos rsop
        where rsop.reviewed_order_id = rso.id
      ) photos on true
+     left join lateral (
+       select jsonb_agg(jsonb_build_object(
+         'id', rsoi.id,
+         'stagingOrderPreviewItemId', rsoi.staging_order_preview_item_id,
+         'sequenceNo', rsoi.sequence_no,
+         'resultName', rsoi.result_name,
+         'unboxingStatus', rsoi.unboxing_status,
+         'resultPhotoStorageKey', rsoi.result_photo_storage_key,
+         'version', rsoi.version
+       ) order by rsoi.sequence_no asc) as items
+       from helper_app.reviewed_staging_order_items rsoi
+       where rsoi.reviewed_order_id = rso.id
+     ) items on true
      where mj.id = $1
      order by rso.created_at asc`,
     [mergeJobId],
@@ -5005,6 +6066,9 @@ async function buildReviewedSnapshot(client, mergeJobId) {
         lineCommunityName: row.line_community_name,
         originalPriceJpy: row.original_price_jpy,
         productType: row.product_type || "standard",
+        workflowVersion: row.workflow_version || "legacy",
+        sourceGachaTemplateId: row.source_gacha_template_id,
+        items: row.items || [],
         photos: row.photos || [],
         productName: row.product_name,
         purchaseTaskId: row.purchase_task_id,
@@ -5315,9 +6379,13 @@ function normalizeQuoteReplyInput(input) {
   };
 }
 
-function normalizePurchaseTaskInput(input, { allowMissingOriginalPriceJpy = false } = {}) {
+function normalizePurchaseTaskInput(
+  input,
+  { allowMissingOriginalPriceJpy = false, workflowVersionOverride = null } = {},
+) {
   const quantity = Number(requiredText(input.quantity, "quantity"));
   const salePriceTwd = Number(requiredText(input.salePriceTwd, "salePriceTwd"));
+  const productType = normalizePurchaseProductType(input.productType);
   const originalPriceText = optionalText(input.originalPriceJpy);
   if (originalPriceText == null && !allowMissingOriginalPriceJpy) {
     throw new HelperAppServiceError("invalid_input", "Original JPY price is required.");
@@ -5332,21 +6400,27 @@ function normalizePurchaseTaskInput(input, { allowMissingOriginalPriceJpy = fals
   if (originalPriceJpy != null && (!Number.isInteger(originalPriceJpy) || originalPriceJpy < 0)) {
     throw new HelperAppServiceError("invalid_input", "Original JPY price must be a non-negative integer.");
   }
+  if (isGachaProductType(productType) && Boolean(input.requiresFaceCheck)) {
+    throw new HelperAppServiceError("invalid_input", "扭蛋／盲抽不支援挑臉流程。");
+  }
   return {
     actorUserId: input.actorUserId || null,
     lineCommunityName: requiredText(input.lineCommunityName, "lineCommunityName"),
     note: optionalText(input.note),
     originalPriceJpy,
-    productType: normalizePurchaseProductType(input.productType),
+    productType,
     productName: requiredText(input.productName, "productName"),
     quantity,
     requiresFaceCheck: Boolean(input.requiresFaceCheck),
     reuseSourceTaskId: optionalText(input.reuseSourceTaskId),
+    reuseSourceTemplateId: optionalText(input.reuseSourceTemplateId || input.sourceGachaTemplateId),
     salePriceTwd,
     sourceQuoteReplyId: input.sourceQuoteReplyId || null,
     sourceQuoteTaskId: input.sourceQuoteTaskId || null,
     sourceQuoteTaskPhotoId: input.sourceQuoteTaskPhotoId || null,
     tripId: requiredText(input.tripId, "tripId"),
+    workflowVersion: workflowVersionOverride
+      || (isGachaProductType(productType) ? GACHA_V2_WORKFLOW_VERSION : "legacy"),
   };
 }
 
@@ -5425,6 +6499,7 @@ function normalizePurchaseResponseInput(input) {
     completedQuantity,
     faceCheckNote: optionalText(input.faceCheckNote),
     faceCheckPhoto: normalizeOptionalPhoto(input.faceCheckPhoto),
+    gachaResults: normalizeGachaResultsInput(input.gachaResults),
     helperNote: optionalText(input.helperNote),
     idempotencyKey: requiredText(input.idempotencyKey, "idempotencyKey"),
     purchaseTaskId: requiredText(input.purchaseTaskId, "purchaseTaskId"),
@@ -5432,6 +6507,37 @@ function normalizePurchaseResponseInput(input) {
     remainingResolution,
     unavailableQuantity,
   };
+}
+
+function normalizeGachaResultsInput(results) {
+  if (!Array.isArray(results)) return [];
+  return results.map((result, index) => {
+    const sequenceNo = Number(result?.sequenceNo ?? result?.sequence_no ?? index + 1);
+    if (!Number.isInteger(sequenceNo) || sequenceNo <= 0) {
+      throw new HelperAppServiceError("invalid_input", "扭蛋結果順序必須是正整數。");
+    }
+    const resultPhoto = normalizeOptionalPhoto(
+      result?.photo || result?.resultPhoto || (result?.resultPhotoStorageKey
+        ? { storageKey: result.resultPhotoStorageKey }
+        : null),
+    );
+    const resultName = optionalText(result?.resultName || result?.result_name || result?.resultText)
+      || (resultPhoto ? "看圖" : null)
+      || (result?.unboxingStatus === "pending" ? "待開箱" : null);
+    if (!resultName) {
+      throw new HelperAppServiceError("invalid_input", `第 ${sequenceNo} 顆扭蛋需要填寫文字或照片。`);
+    }
+    const unboxingStatus = optionalText(result?.unboxingStatus || result?.unboxing_status) || "recorded";
+    if (!["pending", "recorded"].includes(unboxingStatus)) {
+      throw new HelperAppServiceError("invalid_input", "無效的開箱狀態。");
+    }
+    return {
+      resultName,
+      resultPhoto,
+      sequenceNo,
+      unboxingStatus,
+    };
+  }).sort((left, right) => left.sequenceNo - right.sequenceNo);
 }
 
 function normalizePurchaseBatchResponseInput(input) {
@@ -5526,6 +6632,37 @@ function normalizeReviewedOrderPatch(input) {
   if (originalPriceJpy != null && (!Number.isInteger(originalPriceJpy) || originalPriceJpy < 0)) {
     throw new HelperAppServiceError("invalid_input", "Original JPY price must be a non-negative integer.");
   }
+  let gachaItems = [];
+  const gachaItemsText = optionalText(input.gachaItemsJson);
+  if (isGachaProductType(input.productType)) {
+    if (!gachaItemsText) {
+      throw new HelperAppServiceError("invalid_input", "扭蛋／盲抽 staging 必須保留逐顆結果。");
+    }
+    let parsedItems;
+    try {
+      parsedItems = JSON.parse(gachaItemsText);
+    } catch {
+      throw new HelperAppServiceError("invalid_input", "扭蛋逐顆結果格式不正確。");
+    }
+    if (!Array.isArray(parsedItems) || parsedItems.length !== quantity) {
+      throw new HelperAppServiceError("invalid_input", "扭蛋逐顆結果數量必須等於訂單數量。");
+    }
+    gachaItems = parsedItems.map((item, index) => {
+      const sequenceNo = Number(item?.sequenceNo ?? item?.sequence_no ?? index + 1);
+      const resultName = optionalText(item?.resultName || item?.result_name || item?.resultText)
+        || (item?.unboxingStatus === "pending" ? "待開箱" : null);
+      const unboxingStatus = optionalText(item?.unboxingStatus || item?.unboxing_status) || "recorded";
+      if (sequenceNo !== index + 1 || !resultName || !["pending", "recorded"].includes(unboxingStatus)) {
+        throw new HelperAppServiceError("invalid_input", "扭蛋逐顆結果內容不完整。");
+      }
+      return {
+        resultName,
+        resultPhotoStorageKey: optionalText(item?.resultPhotoStorageKey || item?.result_photo_storage_key),
+        sequenceNo,
+        unboxingStatus,
+      };
+    });
+  }
   return {
     appearanceNotes: optionalText(input.appearanceNotes) || "",
     customerConfirmed: Boolean(input.customerConfirmed),
@@ -5537,6 +6674,7 @@ function normalizeReviewedOrderPatch(input) {
     productName: requiredText(input.productName, "productName"),
     quantity,
     salePriceTwd,
+    gachaItems,
   };
 }
 
@@ -5572,7 +6710,7 @@ function normalizeRebuyPhotos(photos, role) {
 
 function normalizeOptionalPhoto(photo) {
   if (!photo) return null;
-  const contentType = requiredText(photo.contentType || photo.content_type, "contentType");
+  const contentType = optionalText(photo.contentType || photo.content_type) || "image/jpeg";
   if (!contentType.startsWith("image/")) {
     throw new HelperAppServiceError("invalid_input", "Only image uploads are supported.");
   }
@@ -5669,19 +6807,23 @@ async function insertPurchaseTask(client, input) {
     referencePhotoSignature: input.referencePhotoSignature,
     requiresFaceCheck: input.requiresFaceCheck,
     tripId: input.tripId,
+    workflowVersion: input.workflowVersion,
   });
   const result = await client.query(
     `insert into helper_app.purchase_tasks
-       (trip_id, helper_id, product_type, source_quote_task_id, source_quote_task_photo_id,
+       (trip_id, helper_id, product_type, workflow_version, source_gacha_template_id,
+        source_quote_task_id, source_quote_task_photo_id,
         source_quote_reply_id, line_community_name, product_name, quantity,
         original_price_jpy, sale_price_twd, note, requires_face_check,
-        created_by_user_id, source_rebuy_task_id, purchase_batch_id)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+        created_by_user_id, source_rebuy_task_id, purchase_batch_id, version)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, 1)
      returning *`,
     [
       input.tripId,
       input.helperId,
       input.productType,
+      input.workflowVersion || "legacy",
+      input.reuseSourceTemplateId || null,
       input.sourceQuoteTaskId || null,
       input.sourceQuoteTaskPhotoId || null,
       input.sourceQuoteReplyId || null,
@@ -5726,7 +6868,7 @@ async function getOrCreatePurchaseBatch(client, input) {
             coalesce(max(sequence), -1) + 1
      from helper_app.purchase_batches
      where trip_id = $1 and group_key = $4
-     on conflict (trip_id, group_key) where status = 'open'
+     on conflict (trip_id, group_key) where status = 'open' and intake_status = 'accepting'
      do update set updated_at = now()
      returning *`,
     [
@@ -6117,12 +7259,15 @@ async function syncStagingOrderPreview(client, task) {
   if (task.status !== "completed" || !task.completed_quantity || task.completed_quantity <= 0) return null;
   const result = await client.query(
     `insert into helper_app.staging_order_previews
-       (trip_id, helper_id, purchase_task_id, product_type, line_community_name, product_name,
+       (trip_id, helper_id, purchase_task_id, product_type, workflow_version,
+        source_gacha_template_id, line_community_name, product_name,
         quantity, original_price_jpy, sale_price_twd, source_quote_task_id,
         source_quote_task_photo_id, source_quote_reply_id, source_rebuy_task_id)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
      on conflict (purchase_task_id) do update
      set product_type = excluded.product_type,
+         workflow_version = excluded.workflow_version,
+         source_gacha_template_id = excluded.source_gacha_template_id,
          line_community_name = excluded.line_community_name,
          product_name = excluded.product_name,
          quantity = excluded.quantity,
@@ -6139,6 +7284,8 @@ async function syncStagingOrderPreview(client, task) {
       task.helper_id,
       task.id,
       task.product_type || "standard",
+      task.workflow_version || "legacy",
+      task.source_gacha_template_id || null,
       task.line_community_name,
       task.product_name,
       task.completed_quantity,
@@ -6150,7 +7297,57 @@ async function syncStagingOrderPreview(client, task) {
       task.source_rebuy_task_id,
     ],
   );
+  if (task.workflow_version === GACHA_V2_WORKFLOW_VERSION && isGachaProductType(task.product_type)) {
+    await syncStagingOrderPreviewItems(client, {
+      completedQuantity: task.completed_quantity,
+      previewId: result.rows[0]?.id,
+      purchaseTaskId: task.id,
+      workflowVersion: task.workflow_version,
+    });
+  }
   return result.rows[0];
+}
+
+async function syncStagingOrderPreviewItems(
+  client,
+  { completedQuantity, previewId, purchaseTaskId, workflowVersion },
+) {
+  if (!previewId) return;
+  if (workflowVersion !== GACHA_V2_WORKFLOW_VERSION) {
+    await client.query(
+      "delete from helper_app.staging_order_preview_items where staging_order_preview_id = $1",
+      [previewId],
+    );
+    return;
+  }
+  const result = await client.query(
+    "select id, sequence_no, result_name, unboxing_status, result_photo_storage_key " +
+    "from helper_app.purchase_task_results where purchase_task_id = $1 order by sequence_no asc",
+    [purchaseTaskId],
+  );
+  await client.query(
+    "delete from helper_app.staging_order_preview_items where staging_order_preview_id = $1 and sequence_no > $2",
+    [previewId, Number(completedQuantity || 0)],
+  );
+  if (!result.rows.length) return;
+  await client.query(
+    "insert into helper_app.staging_order_preview_items " +
+    "(staging_order_preview_id, purchase_task_result_id, sequence_no, result_name, unboxing_status, result_photo_storage_key) " +
+    "select $1, input.purchase_task_result_id, input.sequence_no, input.result_name, input.unboxing_status, input.result_photo_storage_key " +
+    "from unnest($2::uuid[], $3::int[], $4::text[], $5::text[], $6::text[]) " +
+    "as input(purchase_task_result_id, sequence_no, result_name, unboxing_status, result_photo_storage_key) " +
+    "on conflict (staging_order_preview_id, sequence_no) do update " +
+    "set purchase_task_result_id = excluded.purchase_task_result_id, result_name = excluded.result_name, " +
+    "unboxing_status = excluded.unboxing_status, result_photo_storage_key = excluded.result_photo_storage_key, updated_at = now()",
+    [
+      previewId,
+      result.rows.map((row) => row.id),
+      result.rows.map((row) => row.sequence_no),
+      result.rows.map((row) => row.result_name),
+      result.rows.map((row) => row.unboxing_status),
+      result.rows.map((row) => row.result_photo_storage_key || null),
+    ],
+  );
 }
 
 async function removeStagingOrderPreviewForPurchaseTask(client, purchaseTaskId) {
@@ -6489,6 +7686,37 @@ function deterministicId(prefix, ...parts) {
   return `${prefix}_${crypto.createHash("sha256").update(parts.join(":")).digest("hex").slice(0, 24)}`;
 }
 
+function deterministicUuid(prefix, ...parts) {
+  const bytes = crypto.createHash("sha256")
+    .update([prefix, ...parts].join(":"))
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x50;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20, 32),
+  ].join("-");
+}
+
+function normalizeMainProductName(value) {
+  return String(value || "")
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function normalizeCustomerName(value) {
+  return String(value || "")
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/\s+/g, " ");
+}
+
 function deterministicMainPhotoKey({ mergeJobId, orderId, photoId, sourceStorageKey }) {
   const extension = String(sourceStorageKey || "").match(/\.[A-Za-z0-9]+$/)?.[0] || ".jpg";
   return [
@@ -6513,6 +7741,7 @@ function isHelperAppServiceError(error) {
 module.exports = {
   HelperAppServiceError,
   activateTrip,
+  pauseTripConnection,
   approveStagingMergeJob,
   authorizePhotoAnnotationSource,
   attachSignedSettlementUrls,
@@ -6540,9 +7769,11 @@ module.exports = {
   dateInTimezone,
   dateOnly,
   deactivateHelperProfile,
+  editPurchaseTask,
   editReviewedStagingOrder,
   editReviewedStagingOrderPhotos,
   ensureEndedTripSettlement,
+  freezePurchaseBatch,
   updateHelperProfile,
   getPurchaseTaskDetail,
   getHelperWorkspace,
@@ -6571,6 +7802,7 @@ module.exports = {
   markHelperArrived,
   markHelperDeparted,
   markHelperEnded,
+  resumeTripConnection,
   mergeApprovedStagingJob,
   prepareStagingReview,
   repairTrip,
@@ -6584,6 +7816,7 @@ module.exports = {
   setSettlementExchangeRate,
   reviewWarehouseProof,
   reviewFaceCheckPurchaseTask,
+  reopenPurchaseBatch,
   quickPublishPurchaseTask,
   releasePublicRebuyTask,
   reportRebuyTask,

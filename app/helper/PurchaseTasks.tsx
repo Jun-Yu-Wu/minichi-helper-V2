@@ -27,6 +27,25 @@ type FaceCheckPhoto = {
   storageKey?: string;
 };
 
+type GachaReportPhoto = {
+  byteSize: number;
+  clientPhotoId: string;
+  contentType: string;
+  error?: string;
+  file?: File;
+  objectUrl: string;
+  originalFilename: string;
+  status: "selected" | "uploading" | "uploaded" | "failed";
+  storageKey?: string;
+};
+
+type GachaDraftRow = {
+  photo: GachaReportPhoto | null;
+  reuseFirstPhoto: boolean;
+  resultName: string;
+  unboxingStatus: "pending" | "recorded";
+};
+
 type PurchaseResponseState = {
   error?: string;
   ok?: true;
@@ -91,7 +110,8 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
     setAllPhotosLoaded(false);
     setAllPhotosLoading(false);
     const summaryTask = findSummaryTask(taskId);
-    const detailTaskId = summaryTask?.representative_task_id || taskId;
+    const detailTaskId = resolveDetailTaskId(taskId, summaryTask);
+    const taskNumber = summaryTask?.batch_tasks?.find((item: any) => item.id === detailTaskId)?.task_number;
     const loadsReturnedPhotos = shouldLoadReturnedPhotos(summaryTask);
     const photoMode = loadsReturnedPhotos ? "?photoMode=all" : "";
     try {
@@ -101,12 +121,33 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
       );
       const body = await response.json();
       if (!response.ok) throw new Error(body.error || "無法載入採買任務。");
-      setActiveTask(body.task || null);
+      setActiveTask(body.task ? { ...body.task, helper_task_label: taskNumber ? `任務 ${String(taskNumber).padStart(2, "0")}` : null } : null);
       setAllPhotosLoaded(loadsReturnedPhotos);
     } catch (error) {
       setDetailError(error instanceof Error ? error.message : "無法載入採買任務。");
     } finally {
       setDetailLoading(false);
+    }
+  }
+
+  async function freezeBatch(task: any) {
+    if (
+      task.workflow_version !== "gacha_v2"
+      || !task.batch_id
+      || task.batch_status !== "open"
+      || task.batch_intake_status !== "accepting"
+    ) return;
+    if (!window.confirm("凍結後，後續同商品任務會建立新的聚合批次。確定要凍結這個批次嗎？")) return;
+    try {
+      const response = await fetch(
+        "/api/helper/purchase-batches/" + encodeURIComponent(task.batch_id) + "/freeze",
+        { method: "POST" },
+      );
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "無法凍結扭蛋批次。");
+      await taskResource.refresh();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : "無法凍結扭蛋批次。");
     }
   }
 
@@ -122,7 +163,7 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
   async function loadAllTaskPhotos() {
     if (!activeTaskId || allPhotosLoaded) return;
     const summaryTask = findSummaryTask(activeTaskId);
-    const detailTaskId = summaryTask?.representative_task_id || activeTaskId;
+    const detailTaskId = resolveDetailTaskId(activeTaskId, summaryTask);
     setAllPhotosLoading(true);
     setDetailError("");
     try {
@@ -220,6 +261,7 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
             key={group.title}
             tasks={group.tasks}
             title={group.title}
+            onFreezeBatch={freezeBatch}
             onOpenTask={openTask}
           />
         ))}
@@ -230,11 +272,13 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
 
 function PurchaseTaskGroup({
   emptyText,
+  onFreezeBatch,
   onOpenTask,
   tasks,
   title,
 }: {
   emptyText: string;
+  onFreezeBatch: (task: any) => void;
   onOpenTask: (taskId: string) => void;
   tasks: any[];
   title: string;
@@ -251,7 +295,8 @@ function PurchaseTaskGroup({
             <PurchaseTaskCard
               key={task.id}
               task={task}
-              onOpenTask={() => onOpenTask(task.representative_task_id || task.id)}
+              onFreezeBatch={() => void onFreezeBatch(task)}
+              onOpenTask={onOpenTask}
             />
           ))}
         </div>
@@ -263,24 +308,61 @@ function PurchaseTaskGroup({
 }
 
 function PurchaseTaskCard({
+  onFreezeBatch,
   onOpenTask,
   task,
 }: {
+  onFreezeBatch?: () => void;
   onOpenTask: (taskId: string) => void;
   task: any;
 }) {
   const tone = purchaseTaskTone(task);
-  return (
-    <button
-      className={`flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-foreground/20 hover:bg-accent/30 ${
+  const freezeTimer = useRef<number | null>(null);
+  const suppressClick = useRef(false);
+  const canFreeze = Boolean(
+    onFreezeBatch
+    && task.workflow_version === "gacha_v2"
+    && task.batch_id
+    && task.batch_status === "open"
+    && task.batch_intake_status === "accepting",
+  );
+  function clearFreezeTimer() {
+    if (freezeTimer.current !== null) {
+      window.clearTimeout(freezeTimer.current);
+      freezeTimer.current = null;
+    }
+  }
+  const cardClassName = `flex w-full items-center justify-between gap-3 rounded-2xl border px-4 py-3 text-left shadow-sm transition hover:-translate-y-0.5 hover:border-foreground/20 hover:bg-accent/30 ${
         tone === "green"
           ? "border-emerald-200 bg-emerald-50/60"
           : tone === "red"
             ? "border-red-200 bg-red-50/60"
             : "bg-background"
-      }`}
+      }`;
+  return (
+    <div className="grid gap-1">
+      <button
+      className={cardClassName}
       type="button"
-      onClick={() => onOpenTask(task.id)}
+      title={canFreeze ? "長按可凍結這個扭蛋聚合批次" : undefined}
+      onClick={() => {
+        if (suppressClick.current) {
+          suppressClick.current = false;
+          return;
+        }
+        onOpenTask(task.id);
+      }}
+      onPointerCancel={clearFreezeTimer}
+      onPointerDown={() => {
+        if (!canFreeze) return;
+        clearFreezeTimer();
+        freezeTimer.current = window.setTimeout(() => {
+          suppressClick.current = true;
+          onFreezeBatch?.();
+        }, 650);
+      }}
+      onPointerUp={clearFreezeTimer}
+      onPointerLeave={clearFreezeTimer}
     >
       <span className="min-w-0">
         <strong className="block truncate text-base">{purchaseTaskDisplayTitle(task)}</strong>
@@ -288,7 +370,29 @@ function PurchaseTaskCard({
       <StatusBadge tone={tone}>
         {purchaseProgress(task)}
       </StatusBadge>
-    </button>
+      </button>
+      {task.workflow_version === "gacha_v2" && task.batch_tasks?.length > 1 ? (
+        <div className="grid gap-1 rounded-b-xl border border-t-0 bg-muted/20 p-2 pt-1">
+          <p className="px-2 text-[11px] font-medium text-muted-foreground">逐任務回報（不顯示 LINE 暱稱）</p>
+          <div className="grid gap-1 sm:grid-cols-2">
+            {task.batch_tasks.map((batchTask: any) => (
+              <button
+                className="flex items-center justify-between rounded-lg border bg-background px-3 py-2 text-left text-sm hover:border-primary/50"
+                key={batchTask.id}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenTask(batchTask.id);
+                }}
+                type="button"
+              >
+                <span>任務 {String(batchTask.task_number).padStart(2, "0")} · {batchTask.quantity} 顆</span>
+                <span className="text-xs text-muted-foreground">{batchTask.status === "completed" ? "已回報" : "待回報"}</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -352,6 +456,22 @@ function PurchaseTaskDetail({
                   <PurchaseTaskPhotos photos={primaryPhotos} />
                 )}
               </section>
+              {task.workflow_version === "gacha_v2" && ["gacha", "blind_box"].includes(task.product_type) ? (
+                <section className="grid gap-2 rounded-xl border border-primary/20 bg-primary/5 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <p className="text-sm font-semibold text-foreground">同商品聚合總覽</p>
+                    <StatusBadge tone={task.purchase_batch?.intake_status === "frozen" ? "amber" : "blue"}>
+                      {task.purchase_batch?.intake_status === "frozen" ? "已凍結" : "收單中"}
+                    </StatusBadge>
+                  </div>
+                  <dl className="grid grid-cols-3 gap-2 text-sm">
+                    <Meta label="本批次總數" value={`${Number(task.purchase_batch?.requested_quantity || 0)} 顆`} />
+                    <Meta label="已回報" value={`${Number(task.purchase_batch?.reported_quantity || 0)} 顆`} />
+                    <Meta label="本任務" value={`${Number(task.quantity || 0)} 顆`} />
+                  </dl>
+                  <p className="text-xs leading-5 text-muted-foreground">先看總數確認要扭幾顆；實際回報仍只處理目前這張 {task.helper_task_label || "任務卡"}。</p>
+                </section>
+              ) : null}
               <section className="grid gap-3 rounded-xl border bg-background p-4">
                 <div className="flex items-center justify-between gap-3">
                   <p className="text-sm font-semibold text-foreground">採買資訊</p>
@@ -396,7 +516,9 @@ function TaskProductHeader({ task }: { task: any }) {
         </div>
         <div className="min-w-0">
           <p className="text-xs font-semibold text-muted-foreground">商品名稱</p>
-          <h3 className="mt-1 text-2xl font-semibold leading-tight tracking-tight">{purchaseTaskDisplayTitle(task)}</h3>
+          <h3 className="mt-1 text-2xl font-semibold leading-tight tracking-tight">
+            {task.helper_task_label ? `${task.helper_task_label} · ` : ""}{purchaseTaskDisplayTitle(task)}
+          </h3>
           <p className="mt-2 text-sm text-muted-foreground">{purchaseTaskPrimaryInstruction(task)}</p>
         </div>
       </div>
@@ -549,6 +671,415 @@ function SecondaryPurchasePhotos({
 }
 
 function PurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdated: (task: any) => void }) {
+  if (task.workflow_version === "gacha_v2" && ["gacha", "blind_box"].includes(task.product_type)) {
+    return <GachaPurchaseResponseForm task={task} onTaskUpdated={onTaskUpdated} />;
+  }
+  return <StandardPurchaseResponseForm task={task} onTaskUpdated={onTaskUpdated} />;
+}
+
+function GachaPurchaseResponseForm({
+  task,
+  onTaskUpdated,
+}: {
+  task: any;
+  onTaskUpdated: (task: any) => void;
+}) {
+  const requestedQuantity = Math.max(1, Number(task.quantity || 1));
+  const isBlindBox = task.product_type === "blind_box";
+  const initialResults = Array.isArray(task.gacha_results) ? task.gacha_results : [];
+  const makeRow = useCallback((index: number): GachaDraftRow => {
+    const result = initialResults[index];
+    const existingPhoto = result?.photo?.signed_url
+      ? {
+          byteSize: 0,
+          clientPhotoId: createClientId("gacha-existing"),
+          contentType: "image/jpeg",
+          file: undefined,
+          objectUrl: result.photo.signed_url,
+          originalFilename: "扭蛋結果照片",
+          status: "uploaded" as const,
+          storageKey: result.result_photo_storage_key,
+        }
+      : null;
+    return {
+      photo: existingPhoto,
+      reuseFirstPhoto: false,
+      resultName: result?.result_name && result.result_name !== "看圖" ? result.result_name : "",
+      unboxingStatus: result?.unboxing_status === "pending" ? "pending" : "recorded",
+    };
+  }, [initialResults]);
+  const initialActualQuantity = task.status === "completed"
+    ? Math.min(requestedQuantity, Math.max(0, Number(task.completed_quantity || 0)))
+    : 0;
+  const [actualQuantity, setActualQuantity] = useState(String(initialActualQuantity));
+  const [rows, setRows] = useState<GachaDraftRow[]>(() =>
+    Array.from({ length: initialActualQuantity }, (_, index) => makeRow(index)),
+  );
+  const [editing, setEditing] = useState(task.status !== "completed");
+  const [helperNote, setHelperNote] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+  const [idempotencyKey, setIdempotencyKey] = useState(() => createClientId("gacha-response"));
+  const uploadPromises = useRef(new Map<string, Promise<GachaReportPhoto>>());
+  const rowsRef = useRef<GachaDraftRow[]>([]);
+
+  useEffect(() => {
+    rowsRef.current = rows;
+  }, [rows]);
+
+  useEffect(() => () => {
+    for (const row of rowsRef.current) {
+      if (row.photo?.file) URL.revokeObjectURL(row.photo.objectUrl);
+    }
+  }, []);
+
+  function updateQuantity(value: string) {
+    setActualQuantity(value);
+    const nextQuantity = Math.max(0, Number(value || 0));
+    setRows((current) => Array.from(
+      { length: nextQuantity },
+      (_, index) => current[index] || makeRow(index),
+    ));
+  }
+
+  function addPhoto(index: number, fileList: FileList | null) {
+    const file = fileList?.[0];
+    if (!file || !file.type.startsWith("image/")) return;
+    setRows((current) => {
+      const next = [...current];
+      const previous = next[index]?.photo;
+      if (previous?.file) URL.revokeObjectURL(previous.objectUrl);
+      next[index] = {
+        ...(next[index] || makeRow(index)),
+        photo: {
+          byteSize: file.size,
+          clientPhotoId: createClientId("gacha-result"),
+          contentType: file.type || "image/jpeg",
+          file,
+          objectUrl: URL.createObjectURL(file),
+          originalFilename: file.name || "gacha-result.jpg",
+          status: "selected",
+        },
+        reuseFirstPhoto: false,
+      };
+      return next;
+    });
+    window.setTimeout(() => {
+      const photo = rowsRef.current[index]?.photo;
+      if (photo) void uploadPhoto(index, photo).catch(() => undefined);
+    }, 0);
+  }
+
+  async function uploadPhoto(index: number, photo: GachaReportPhoto): Promise<GachaReportPhoto> {
+    if (photo.status === "uploaded" && photo.storageKey) return photo;
+    if (!photo.file) throw new Error("找不到要上傳的照片。");
+    const file = photo.file;
+    const existing = uploadPromises.current.get(photo.clientPhotoId);
+    if (existing) return existing;
+    setRows((current) => current.map((row, rowIndex) =>
+      rowIndex === index && row.photo?.clientPhotoId === photo.clientPhotoId
+        ? { ...row, photo: { ...photo, status: "uploading", error: undefined } }
+        : row,
+    ));
+    const uploadPromise = (async () => {
+      const preparedFile = await preparePhotoForUpload(file);
+      const contentType = preparedFile.type || photo.contentType;
+      const presign = await fetch("/api/uploads/presign", {
+        body: JSON.stringify({
+          byteSize: preparedFile.size,
+          clientPhotoId: photo.clientPhotoId,
+          contentType,
+          fileName: photo.originalFilename,
+          purchaseTaskId: task.id,
+          uploadPurpose: "purchase_report",
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      const presignBody = await presign.json();
+      if (!presign.ok) throw new Error(presignBody.error || "無法建立上傳網址。");
+      const upload = await fetch(presignBody.uploadUrl, {
+        body: preparedFile,
+        headers: { "content-type": contentType },
+        method: "PUT",
+      });
+      if (!upload.ok) throw new Error("照片上傳失敗。");
+      const uploaded = {
+        ...photo,
+        byteSize: preparedFile.size,
+        contentType,
+        status: "uploaded" as const,
+        storageKey: presignBody.storageKey,
+      };
+      setRows((current) => current.map((row, rowIndex) =>
+        rowIndex === index && row.photo?.clientPhotoId === photo.clientPhotoId
+          ? { ...row, photo: uploaded }
+          : row,
+      ));
+      return uploaded;
+    })();
+    uploadPromises.current.set(photo.clientPhotoId, uploadPromise);
+    try {
+      return await uploadPromise;
+    } catch (uploadError) {
+      setRows((current) => current.map((row, rowIndex) =>
+        rowIndex === index && row.photo?.clientPhotoId === photo.clientPhotoId
+          ? {
+              ...row,
+              photo: {
+                ...photo,
+                error: uploadError instanceof Error ? uploadError.message : "上傳失敗。",
+                status: "failed",
+              },
+            }
+          : row,
+      ));
+      throw uploadError;
+    } finally {
+      uploadPromises.current.delete(photo.clientPhotoId);
+    }
+  }
+
+  function setReuseFirstPhoto(index: number, checked: boolean) {
+    setRows((current) => current.map((row, rowIndex) =>
+      rowIndex === index ? { ...row, reuseFirstPhoto: checked } : row,
+    ));
+  }
+
+  function setResultName(index: number, value: string) {
+    setRows((current) => current.map((row, rowIndex) =>
+      rowIndex === index ? { ...row, resultName: value } : row,
+    ));
+  }
+
+  function setPendingUnboxing(index: number, checked: boolean) {
+    setRows((current) => current.map((row, rowIndex) =>
+      rowIndex === index
+        ? { ...row, unboxingStatus: checked ? "pending" : "recorded", resultName: checked && !row.resultName.trim() ? "待開箱" : row.resultName }
+        : row,
+    ));
+  }
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (pending) return;
+    const quantity = Math.max(0, Number(actualQuantity || 0));
+    if (quantity === 0 && !helperNote.trim()) {
+      setError("實際買到 0 顆時，請填寫取消／缺貨理由。");
+      return;
+    }
+    if (quantity > 0 && rows.length !== quantity) {
+      setError("請重新確認逐顆回報格數。");
+      return;
+    }
+    if (quantity > 0 && rows.some((row) =>
+      !row.resultName.trim() && !row.photo && !(isBlindBox && row.unboxingStatus === "pending"),
+    )) {
+      setError("每一顆至少要填寫文字、上傳照片，或標記為待開箱。");
+      return;
+    }
+    setPending(true);
+    setError("");
+    try {
+      const uploadedRows = [...rows];
+      for (let index = 0; index < uploadedRows.length; index += 1) {
+        const row = uploadedRows[index];
+        if (row.photo && !row.reuseFirstPhoto) {
+          uploadedRows[index] = { ...row, photo: await uploadPhoto(index, row.photo) };
+        }
+      }
+      const firstPhoto = uploadedRows[0]?.photo || null;
+      const gachaResults = uploadedRows.map((row, index) => {
+        const photo = row.reuseFirstPhoto ? firstPhoto : row.photo;
+        return {
+          resultName: row.resultName.trim() || (photo ? "看圖" : row.unboxingStatus === "pending" ? "待開箱" : ""),
+          resultPhoto: photo?.storageKey
+            ? {
+                byteSize: photo.byteSize,
+                contentType: photo.contentType,
+                originalFilename: photo.originalFilename,
+                storageKey: photo.storageKey,
+              }
+            : null,
+          sequenceNo: index + 1,
+          unboxingStatus: row.unboxingStatus,
+        };
+      });
+      const response = await fetch("/api/helper/purchase-task-responses", {
+        body: JSON.stringify({
+          completedQuantity: quantity,
+          gachaResults,
+          helperNote,
+          idempotencyKey,
+          purchaseAction: quantity === 0 ? "cancel" : "complete",
+          purchaseTaskId: task.id,
+          remainingResolution: quantity < requestedQuantity ? "canceled" : null,
+          unavailableQuantity: Math.max(0, requestedQuantity - quantity),
+        }),
+        headers: { "content-type": "application/json" },
+        method: "POST",
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || "操作失敗，請稍後再試。");
+      setSubmitted(true);
+      if (body.task) onTaskUpdated(body.task);
+    } catch (submitError) {
+      setError(submitError instanceof Error ? submitError.message : "操作失敗，請稍後再試。");
+    } finally {
+      setPending(false);
+    }
+  }
+
+  const quantity = Math.max(0, Number(actualQuantity || 0));
+  const showEditor = editing || task.status !== "completed";
+  if (!showEditor) {
+    return (
+      <section className="grid gap-3 rounded-xl border bg-background p-4">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <p className="text-sm font-semibold">逐顆回報</p>
+            <p className="mt-1 text-xs text-muted-foreground">已送出；管理員 staging 審核前仍可重新編輯。</p>
+          </div>
+          <StatusBadge tone="green">已送出</StatusBadge>
+        </div>
+        <GachaResultList rows={rows} />
+        <Button type="button" variant="outline" onClick={() => {
+          setEditing(true);
+          setSubmitted(false);
+          setIdempotencyKey(createClientId("gacha-resubmit"));
+        }}>
+          編輯逐顆回報
+        </Button>
+      </section>
+    );
+  }
+  return (
+    <form className="grid gap-4 rounded-xl border bg-background p-4" onSubmit={submit}>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-semibold">逐顆回報</p>
+          <p className="mt-1 text-xs leading-5 text-muted-foreground">
+            先填實際買到幾顆，再逐顆填結果。每顆最多一張照片，後續顆可沿用第一張。
+          </p>
+        </div>
+        <StatusBadge tone={task.status === "completed" ? "green" : "blue"}>
+          {task.status === "completed" ? "可重新編輯" : "待回報"}
+        </StatusBadge>
+      </div>
+      <label className="grid gap-1.5 text-sm">
+        <span className="font-medium">實際買到數量（共需 {requestedQuantity} 顆）</span>
+        <select value={actualQuantity} disabled={pending} onChange={(event) => updateQuantity(event.currentTarget.value)}>
+          {Array.from({ length: requestedQuantity + 1 }, (_, index) => (
+            <option key={index} value={index}>{index === 0 ? "0（取消／缺貨）" : index}</option>
+          ))}
+        </select>
+      </label>
+      {quantity > 0 ? (
+        <div className="grid gap-3">
+          {rows.map((row, index) => {
+            const displayedPhoto = row.reuseFirstPhoto ? rows[0]?.photo : row.photo;
+            return (
+              <article className="grid gap-3 rounded-lg border p-3" key={index}>
+                <div className="flex items-center justify-between gap-2">
+                  <p className="font-semibold">第 {index + 1} 顆</p>
+                  {isBlindBox ? (
+                    <label className="flex items-center gap-2 text-xs">
+                      <input
+                        checked={row.unboxingStatus === "pending"}
+                        type="checkbox"
+                        onChange={(event) => setPendingUnboxing(index, event.currentTarget.checked)}
+                      />
+                      待開箱
+                    </label>
+                  ) : null}
+                </div>
+                <input
+                  placeholder={row.unboxingStatus === "pending" ? "待開箱" : "結果文字；若只上傳照片可留空"}
+                  value={row.resultName}
+                  disabled={pending}
+                  onChange={(event) => setResultName(index, event.currentTarget.value)}
+                />
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <label className="flex min-h-16 cursor-pointer items-center justify-center gap-2 rounded-md border border-dashed bg-muted/30 p-2 text-center">
+                    <Camera className="size-4" aria-hidden="true" />
+                    <span className="text-sm">上傳結果照片</span>
+                    <PhotoFileInput
+                      accept="image/*"
+                      className="sr-only"
+                      disabled={pending}
+                      onFiles={(fileList) => addPhoto(index, fileList)}
+                    />
+                  </label>
+                  {index > 0 ? (
+                    <label className="flex items-center justify-center gap-2 rounded-md border bg-muted/20 px-2 text-sm">
+                      <input
+                        checked={row.reuseFirstPhoto}
+                        disabled={!rows[0]?.photo || pending}
+                        type="checkbox"
+                        onChange={(event) => setReuseFirstPhoto(index, event.currentTarget.checked)}
+                      />
+                      沿用第一張圖片
+                    </label>
+                  ) : null}
+                </div>
+                {displayedPhoto ? (
+                  <div className="relative">
+                    <img alt={"第 " + (index + 1) + " 顆結果"} className="aspect-square w-full max-w-48 rounded-md object-cover" src={displayedPhoto.objectUrl} />
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {row.reuseFirstPhoto ? "沿用第一張圖片" : displayedPhoto.status === "uploaded" ? "已上傳" : "上傳中"}
+                    </p>
+                  </div>
+                ) : null}
+                {row.photo?.error ? <p className="text-xs text-destructive">{row.photo.error}</p> : null}
+              </article>
+            );
+          })}
+        </div>
+      ) : (
+        <p className="rounded-md border border-dashed p-3 text-sm text-muted-foreground">選擇 0 顆後請填寫取消／缺貨理由。</p>
+      )}
+      <label className="grid gap-1.5 text-sm">
+        <span className="font-medium">{quantity === 0 ? "取消／缺貨理由（必填）" : "整筆回報備註（選填）"}</span>
+        <textarea
+          required={quantity === 0}
+          placeholder={quantity === 0 ? "例如：機台缺貨、現場無法購買" : "可補充現場資訊"}
+          value={helperNote}
+          disabled={pending}
+          onChange={(event) => setHelperNote(event.currentTarget.value)}
+        />
+      </label>
+      {error ? <p className="text-sm text-destructive">{error}</p> : null}
+      {submitted ? <InsightBanner title="已送出逐顆回報" tone="green" /> : null}
+      <Button disabled={pending} type="submit">
+        {pending ? "送出中..." : "送出逐顆回報"}
+      </Button>
+    </form>
+  );
+}
+
+function GachaResultList({ rows }: { rows: GachaDraftRow[] }) {
+  return (
+    <div className="grid gap-2">
+      {rows.map((row, index) => (
+        <div className="flex items-center gap-3 rounded-md border px-3 py-2" key={index}>
+          {row.photo ? (
+            <img alt="" className="size-12 rounded object-cover" src={row.photo.objectUrl} />
+          ) : (
+            <span className="flex size-12 items-center justify-center rounded bg-muted text-xs text-muted-foreground">無圖</span>
+          )}
+          <div className="min-w-0">
+            <p className="text-xs text-muted-foreground">第 {index + 1} 顆</p>
+            <p className="truncate text-sm font-medium">{row.resultName || (row.unboxingStatus === "pending" ? "待開箱" : "看圖")}</p>
+            {row.unboxingStatus === "pending" ? <p className="text-xs text-amber-700">待開箱</p> : null}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function StandardPurchaseResponseForm({ task, onTaskUpdated }: { task: any; onTaskUpdated: (task: any) => void }) {
   const aggregateBatch = Boolean((task.purchase_batch_id || task.batch_id) && !task.requires_face_check);
   const batch = task.purchase_batch || null;
   const batchStatus = aggregateBatch ? batch?.status || task.batch_status || task.status : task.status;
@@ -1136,6 +1667,12 @@ function taskStatus(task: any) {
   return task.batch_id ? task.batch_status || "open" : task.status;
 }
 
+function resolveDetailTaskId(taskId: string, summaryTask: any | undefined) {
+  if (!summaryTask) return taskId;
+  if (summaryTask.batch_tasks?.some((item: any) => item.id === taskId)) return taskId;
+  return summaryTask.representative_task_id || taskId;
+}
+
 function shouldLoadReturnedPhotos(task: any | undefined) {
   return Boolean(task) && (isCompletedTask(task) || isFaceCheckReviewTask(task));
 }
@@ -1178,6 +1715,7 @@ function purchaseStatusLabel(task: any) {
   if (task.status === "review_pending") return "挑臉審核中";
   if (task.status === "approved_pending_helper_confirmation") return "待確認完成";
   if (isCanceledTask(task)) return "已取消";
+  if (task.workflow_version === "gacha_v2" && ["gacha", "blind_box"].includes(task.product_type)) return "扭蛋／盲抽待採買";
   return "待採買";
 }
 
@@ -1186,6 +1724,7 @@ function purchaseTaskPrimaryInstruction(task: any) {
   if (task.status === "review_pending") return "挑臉照片已送審，等管理員回覆。";
   if (task.status === "approved_pending_helper_confirmation") return "管理員已通過挑臉，請確認完成採買。";
   if (isCanceledTask(task)) return "這筆已取消，不會進入暫存訂單。";
+  if (task.workflow_version === "gacha_v2" && ["gacha", "blind_box"].includes(task.product_type)) return "先填實際買到顆數，再逐顆填寫結果；每顆至少要有文字或照片。";
   return "先核對商品圖片、數量與原價，再回報實際買到數量。";
 }
 

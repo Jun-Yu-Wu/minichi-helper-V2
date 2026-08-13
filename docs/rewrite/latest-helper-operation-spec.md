@@ -189,6 +189,8 @@ settlement, rebuy, or generic idempotency/submission tables.
 - `departed_at timestamptz null`.
 - `arrived_at timestamptz null`.
 - `admin_activated_at timestamptz null`.
+- `connection_paused_at timestamptz null` for the currently open admin pause.
+- `connection_paused_seconds integer not null default 0` for completed pauses.
 - `ended_at timestamptz null`.
 - `canceled_at timestamptz null`.
 - `version integer not null default 1`.
@@ -630,7 +632,8 @@ Trip status flow:
 9. Helper confirms the end action.
 10. If block-two tasks remain unfinished, the system warns but does not block ending.
 11. If block-three purchase tasks remain unfinished, the helper must complete or cancel them before ending.
-12. Live timing stops and the system guides the helper into settlement.
+12. Admin may pause or resume connection timing while the trip is active; a pause keeps the trip active but excludes the pause interval from the timer.
+13. Live timing stops and the system guides the helper into settlement.
 
 The first accepted vertical slice must at least implement:
 
@@ -642,8 +645,10 @@ fields. Site photos, quote/detail tasks, purchase tasks, and other live work
 functions are available only after the trip becomes active.
 
 Trip records retain `departed_at`, `arrived_at`, `admin_activated_at`, and
-`ended_at`. Hourly settlement uses `departed_at -> ended_at`, including
-travel/work time. Transport fees remain separate transport claims or allowances.
+`ended_at`, plus the accumulated admin-controlled connection pause fields.
+Hourly settlement uses `departed_at -> ended_at`, including travel/work time but
+excluding completed or currently open admin pause intervals. Transport fees
+remain separate transport claims or allowances.
 
 Ended or canceled trips expose only a helper-visible history summary and
 settlement navigation. Helpers cannot mutate tasks after end/cancel.
@@ -859,6 +864,37 @@ The first version keeps partial quantity behavior. Purchased quantities can be
 completed and generate staging orders; unpurchased remaining quantities must be
 canceled, marked unavailable/not found, or routed to rebuy.
 
+### Dedicated Gacha and Blind-Box Purchases
+
+New administrator-published gacha and blind-box tasks use workflow version
+`gacha_v2`; existing gacha/blind-box tasks remain on the legacy workflow. Within
+one helper trip, the batch key is normalized product name + product type +
+original JPY price. Sale TWD is stored independently on each customer task and
+does not split the helper batch. The batch is an aggregate coordination view;
+each customer task remains independent and is shown to the helper as an
+anonymous label such as `任務 01`.
+
+The administrator publish form is a dedicated entry under the third publishing
+step. Standard publishing stays fixed to `standard`. Gacha price memory maps
+JPY 200/300/400/500/600 to TWD 70/100/120/150/170 and remains separate from
+standard and blind-box memory; the administrator can edit the resulting TWD
+price. Product-card reuse may search the current trip and administrator gacha
+templates, but copies only product name, type, JPY, TWD, and one primary series
+reference photo. Other source photos remain retained evidence.
+
+The helper first enters actual purchased quantity. The UI then creates exactly
+that many result rows. Each row accepts text or at most one result photo, with a
+later row allowed to reuse the first row's photo; the server requires at least
+one of the two. Photo-only results are represented as `看圖`. The whole task is
+submitted once, so the administrator live feed sees it only after task-level
+submission succeeds. A helper may resubmit before staging review starts; after
+that, helper results are locked and administrator staging owns corrections.
+
+Blind-box rows may be `待開箱`. They can complete, enter staging, and merge into
+the administrator gacha order model, but transfer remains blocked until an
+administrator records the unboxing result. Settlement uses actual purchased
+quantity. Gacha/blind-box rebuy is out of scope for v1.
+
 ### Non-Face-Check Purchases
 
 - Report photos are optional.
@@ -917,6 +953,14 @@ admin review work, but final merge waits until the trip is ended. Normal
 live-trip order merge can happen after admin order review is complete.
 Settlement, payment, and warehouse completion are not required for the normal
 live-trip order merge.
+
+For `gacha_v2` orders, staging review contains one reviewed item row per actual
+gacha/blind-box unit. An administrator may correct the reviewed quantity and
+item rows, but the final reviewed item count must equal the order quantity.
+Merge requires a retained primary series photo and a resolved administrator
+customer; unresolved customer names block merge. Each reviewed item becomes
+one `main.gacha_order_items` row, with its result photo linked through
+`main.gacha_order_item_photos`. The batch itself never becomes a main order.
 
 The first-version merge unit is one trip-level merge job per trip. Admins may
 soft-exclude individual staging orders before approving a trip merge job.
@@ -1027,7 +1071,8 @@ JPY-to-TWD market exchange rate for the settlement day; the system may fetch it
 from an online exchange-rate source during settlement, then stores the selected
 rate used for calculation.
 
-Hourly settlement uses `departed_at -> ended_at`, including travel/work time.
+Hourly settlement uses `departed_at -> ended_at`, including travel/work time and
+subtracting administrator-controlled connection pause seconds.
 
 Helper precheck:
 

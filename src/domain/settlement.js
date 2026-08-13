@@ -8,13 +8,17 @@ class SettlementError extends Error {
   }
 }
 
-function calculateWorkMinutes(departedAt, endedAt) {
+function calculateWorkMinutes(departedAt, endedAt, pausedSeconds = 0) {
   const start = new Date(departedAt).getTime();
   const end = new Date(endedAt).getTime();
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) {
     throw new SettlementError("invalid_work_time", "Departure and end time are required for settlement.");
   }
-  return Math.max(0, Math.ceil((end - start) / 60_000));
+  const paused = Number(pausedSeconds);
+  if (!Number.isInteger(paused) || paused < 0) {
+    throw new SettlementError("invalid_work_time", "Paused connection time must be a non-negative integer.");
+  }
+  return Math.max(0, Math.ceil(Math.max(0, end - start - paused * 1000) / 60_000));
 }
 
 function calculateSettlement({

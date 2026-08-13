@@ -14,6 +14,7 @@ async function main() {
       "helper_profiles",
       "media_objects",
       "purchase_task_photos",
+      "purchase_task_results",
       "purchase_batches",
       "purchase_tasks",
       "quote_photo_replies",
@@ -23,6 +24,7 @@ async function main() {
       "rebuy_tasks",
       "reviewed_staging_order_photos",
       "reviewed_staging_orders",
+      "reviewed_staging_order_items",
       "settlement_evidence",
       "settlement_line_items",
       "settlement_payments",
@@ -30,6 +32,7 @@ async function main() {
       "site_photo_batches",
       "site_photos",
       "staging_order_previews",
+      "staging_order_preview_items",
       "staging_merge_jobs",
       "trip_audit_events",
       "trips",
@@ -55,10 +58,21 @@ async function main() {
       `select table_name, column_name
        from information_schema.columns
        where table_schema = 'helper_app'
-         and table_name in ('purchase_batches', 'purchase_tasks', 'reviewed_staging_orders', 'settlements', 'staging_order_previews')
-         and column_name = any($1::text[])
+       and table_name in ('purchase_batches', 'purchase_tasks', 'purchase_task_results', 'reviewed_staging_orders', 'reviewed_staging_order_items', 'settlements', 'staging_order_previews', 'staging_order_preview_items', 'trips')
+       and column_name = any($1::text[])
        order by column_name`,
-      [["product_type", "purchase_batch_id", "source_rebuy_task_id", "transport_claim_note"]],
+      [[
+        "connection_paused_at",
+        "connection_paused_seconds",
+        "intake_status",
+        "product_type",
+        "purchase_batch_id",
+        "result_photo_storage_key",
+        "source_rebuy_task_id",
+        "transport_claim_note",
+        "unboxing_status",
+        "workflow_version",
+      ]],
     );
     console.log(
       JSON.stringify(

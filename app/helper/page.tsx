@@ -667,7 +667,13 @@ function TripPreActiveState({
         </div>
       </div>
       {trip.departed_at ? (
-        <ElapsedTripTimer startedAt={trip.departed_at} />
+        <ElapsedTripTimer
+          pausedAt={trip.connection_paused_at}
+          pausedSeconds={trip.connection_paused_seconds}
+          startedAt={trip.departed_at}
+          status={trip.status}
+          tripId={trip.id}
+        />
       ) : null}
       <div className="grid gap-2 rounded-lg bg-muted/45 p-3 text-sm text-muted-foreground">
         <p className="font-medium text-foreground">操作提醒</p>
@@ -827,7 +833,9 @@ function ActiveTripChrome({ trip }: { trip: any }) {
       <ReturnToTripsButton />
       <Surface className="grid gap-3">
         <div>
-          <StatusBadge tone="green">連線中</StatusBadge>
+          <StatusBadge tone={trip.connection_paused_at ? "amber" : "green"}>
+            {trip.connection_paused_at ? "連線中／計時暫停" : "連線中"}
+          </StatusBadge>
         </div>
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">{trip.trip_name}</h2>
@@ -837,6 +845,16 @@ function ActiveTripChrome({ trip }: { trip: any }) {
             {trip.location || "未填地點"}
           </p>
         </div>
+        {trip.departed_at ? (
+          <ElapsedTripTimer
+            pausedAt={trip.connection_paused_at}
+            pausedSeconds={trip.connection_paused_seconds}
+            refreshStatus
+            startedAt={trip.departed_at}
+            status={trip.status}
+            tripId={trip.id}
+          />
+        ) : null}
       </Surface>
     </>
   );

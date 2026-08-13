@@ -46,3 +46,24 @@ test("fx-rate settlement excludes an unapproved transport claim", () => {
   assert.equal(result.totalPayableTwd, 12_500);
   assert.equal(result.isSplitPayment, false);
 });
+
+test("paused connection seconds are excluded from hourly work minutes", () => {
+  const workMinutes = calculateWorkMinutes(
+    "2026-06-28T01:00:00.000Z",
+    "2026-06-28T03:30:00.000Z",
+    30 * 60,
+  );
+
+  assert.equal(workMinutes, 120);
+});
+
+test("paused time cannot be negative or fractional", () => {
+  assert.throws(
+    () => calculateWorkMinutes("2026-06-28T01:00:00.000Z", "2026-06-28T03:30:00.000Z", -1),
+    /Paused connection time/,
+  );
+  assert.throws(
+    () => calculateWorkMinutes("2026-06-28T01:00:00.000Z", "2026-06-28T03:30:00.000Z", 1.5),
+    /Paused connection time/,
+  );
+});

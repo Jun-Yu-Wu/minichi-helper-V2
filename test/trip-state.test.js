@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
+  buildConnectionPauseTransition,
   buildTransition,
   repairTrip,
 } = require("../src/domain/trip-state");
@@ -14,6 +15,8 @@ function trip(overrides = {}) {
     departed_at: null,
     arrived_at: null,
     admin_activated_at: null,
+    connection_paused_at: null,
+    connection_paused_seconds: 0,
     ended_at: null,
     canceled_at: null,
     ...overrides,
@@ -96,6 +99,53 @@ test("admin activation only works after arrival", () => {
 
   assert.equal(result.trip.status, "active");
   assert.equal(result.trip.admin_activated_at, "2026-06-23T04:00:00.000Z");
+});
+
+test("admin can pause and resume an active trip without changing its status", () => {
+  const paused = buildConnectionPauseTransition({
+    action: "admin_connection_paused",
+    actorRole: "admin",
+    expectedVersion: 4,
+    now: "2026-06-23T04:00:00.000Z",
+    trip: trip({ status: "active", version: 4 }),
+  });
+
+  assert.equal(paused.trip.status, "active");
+  assert.equal(paused.trip.connection_paused_at, "2026-06-23T04:00:00.000Z");
+  assert.equal(paused.trip.connection_paused_seconds, 0);
+  assert.equal(paused.event.action, "admin_connection_paused");
+
+  const resumed = buildConnectionPauseTransition({
+    action: "admin_connection_resumed",
+    actorRole: "admin",
+    expectedVersion: 5,
+    now: "2026-06-23T04:15:30.000Z",
+    trip: paused.trip,
+  });
+
+  assert.equal(resumed.trip.status, "active");
+  assert.equal(resumed.trip.connection_paused_at, null);
+  assert.equal(resumed.trip.connection_paused_seconds, 930);
+  assert.equal(resumed.event.action, "admin_connection_resumed");
+});
+
+test("paused connection time is closed automatically when the helper ends", () => {
+  const result = buildTransition({
+    action: "helper_ended",
+    actorRole: "helper",
+    expectedVersion: 2,
+    now: "2026-06-23T05:00:00.000Z",
+    trip: trip({
+      connection_paused_at: "2026-06-23T04:00:00.000Z",
+      connection_paused_seconds: 30,
+      status: "active",
+      version: 2,
+    }),
+  });
+
+  assert.equal(result.trip.connection_paused_at, null);
+  assert.equal(result.trip.connection_paused_seconds, 3_630);
+  assert.equal(result.event.after_state.connection_paused_seconds, 3_630);
 });
 
 test("helper end moves in-progress trips to ended", () => {

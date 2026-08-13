@@ -174,6 +174,7 @@ export async function createPurchaseTaskAction(
       referencePhotos: referencePhotosJson ? JSON.parse(referencePhotosJson) : [],
       requiresFaceCheck: formData.get("requiresFaceCheck") === "on",
       reuseSourceTaskId: formText(formData, "reuseSourceTaskId"),
+      reuseSourceTemplateId: formText(formData, "reuseSourceTemplateId"),
       salePriceTwd: formText(formData, "salePriceTwd"),
       tripId: formText(formData, "tripId"),
     });
@@ -184,6 +185,28 @@ export async function createPurchaseTaskAction(
       databaseMs: Math.round(completedAt - authenticatedAt),
       totalMs: Math.round(completedAt - startedAt),
     }));
+    return { ok: true };
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
+export async function editPurchaseTaskAction(formData: FormData): Promise<AdminActionResult> {
+  try {
+    const admin = await requireAdmin();
+    await service.editPurchaseTask(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      expectedVersion: formVersion(formData),
+      note: formText(formData, "note"),
+      originalPriceJpy: formText(formData, "originalPriceJpy"),
+      productType: formText(formData, "productType"),
+      productName: formText(formData, "productName"),
+      purchaseTaskId: formText(formData, "purchaseTaskId"),
+      quantity: formText(formData, "quantity"),
+      salePriceTwd: formText(formData, "salePriceTwd"),
+    });
+    revalidatePath("/admin");
+    revalidatePath("/helper");
     return { ok: true };
   } catch (error) {
     return actionError(error);
@@ -264,6 +287,21 @@ export async function reviewFaceCheckPurchaseAction(formData: FormData) {
     revalidatePath("/admin");
   } catch (error) {
     console.error("Face-check review action failed", error);
+  }
+}
+
+export async function reopenPurchaseBatchAction(formData: FormData): Promise<AdminActionResult> {
+  try {
+    const admin = await requireAdmin();
+    await service.reopenPurchaseBatch(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      purchaseBatchId: formText(formData, "purchaseBatchId"),
+    });
+    revalidatePath("/admin");
+    revalidatePath("/helper");
+    return { ok: true };
+  } catch (error) {
+    return actionError(error);
   }
 }
 
@@ -355,6 +393,7 @@ export async function editReviewedStagingOrderAction(formData: FormData): Promis
       customerConfirmed: formData.get("customerConfirmed") === "on",
       exclusionReason: formText(formData, "exclusionReason"),
       isExcluded: formData.get("isExcluded") === "on",
+      gachaItemsJson: formText(formData, "gachaItemsJson"),
       lineCommunityName: formText(formData, "lineCommunityName"),
       originalPriceJpy: formText(formData, "originalPriceJpy"),
       productType: formText(formData, "productType"),
@@ -498,6 +537,40 @@ export async function activateTripAction(formData: FormData) {
     revalidatePath("/admin");
   } catch (error) {
     console.error("Activate trip action failed", error);
+  }
+}
+
+export async function pauseTripConnectionAction(formData: FormData): Promise<AdminActionResult> {
+  try {
+    const admin = await requireAdmin();
+    await service.pauseTripConnection(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      expectedVersion: formVersion(formData),
+      reason: formText(formData, "reason"),
+      tripId: formText(formData, "tripId"),
+    });
+    revalidatePath("/admin");
+    revalidatePath("/helper");
+    return { ok: true };
+  } catch (error) {
+    return actionError(error);
+  }
+}
+
+export async function resumeTripConnectionAction(formData: FormData): Promise<AdminActionResult> {
+  try {
+    const admin = await requireAdmin();
+    await service.resumeTripConnection(database.getDatabasePool(), {
+      actorUserId: admin.user.id,
+      expectedVersion: formVersion(formData),
+      reason: formText(formData, "reason"),
+      tripId: formText(formData, "tripId"),
+    });
+    revalidatePath("/admin");
+    revalidatePath("/helper");
+    return { ok: true };
+  } catch (error) {
+    return actionError(error);
   }
 }
 

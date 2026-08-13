@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { CheckCircle2, Pencil, X } from "lucide-react";
 
 import { ServerActionForm } from "../components/ServerActionForm";
@@ -39,6 +39,8 @@ export function StagingReviewedOrderEditor({
   successHref: string;
 }) {
   const [editing, setEditing] = useState(false);
+  const [quantity, setQuantity] = useState(Number(order.quantity || 1));
+  const [productType, setProductType] = useState(order.product_type || "standard");
 
   if (!editing) {
     return (
@@ -99,10 +101,10 @@ export function StagingReviewedOrderEditor({
       <div className="grid gap-3 md:grid-cols-2">
         <label className="grid gap-1 text-sm"><span className="font-medium">LINE 暱稱</span><input name="lineCommunityName" defaultValue={order.line_community_name} required /></label>
         <label className="grid gap-1 text-sm"><span className="font-medium">商品</span><input name="productName" defaultValue={order.product_name} required /></label>
-        <label className="grid gap-1 text-sm"><span className="font-medium">商品類型</span><select name="productType" defaultValue={order.product_type || "standard"}><option value="standard">一般商品</option><option value="gacha">扭蛋</option><option value="blind_box">盲抽</option></select></label>
+        <label className="grid gap-1 text-sm"><span className="font-medium">商品類型</span><select name="productType" value={productType} onChange={(event) => setProductType(event.target.value)}><option value="standard">一般商品</option><option value="gacha">扭蛋</option><option value="blind_box">盲抽</option></select></label>
         <label className="grid gap-1 text-sm"><span className="font-medium">外觀備註</span><input name="appearanceNotes" defaultValue={order.appearance_notes || ""} /></label>
         <div className="grid grid-cols-3 gap-2">
-          <label className="grid gap-1 text-sm"><span className="font-medium">數量</span><input inputMode="numeric" name="quantity" defaultValue={order.quantity} required /></label>
+          <label className="grid gap-1 text-sm"><span className="font-medium">數量</span><input inputMode="numeric" name="quantity" defaultValue={order.quantity} onChange={(event) => setQuantity(Number(event.target.value) || 0)} required /></label>
           <label className="grid gap-1 text-sm"><span className="font-medium">JPY</span><input inputMode="numeric" name="originalPriceJpy" defaultValue={order.original_price_jpy ?? ""} /></label>
           <label className="grid gap-1 text-sm"><span className="font-medium">TWD</span><input inputMode="numeric" name="salePriceTwd" defaultValue={order.sale_price_twd} required /></label>
         </div>
@@ -111,8 +113,68 @@ export function StagingReviewedOrderEditor({
         <label className="inline-flex items-center gap-2"><input name="isExcluded" type="checkbox" defaultChecked={order.is_excluded} /><span>排除不合併</span></label>
         <input className="min-w-56 flex-1" name="exclusionReason" placeholder="排除原因（排除時必填）" defaultValue={order.exclusion_reason || ""} />
       </div>
+      {["gacha", "blind_box"].includes(productType) ? <GachaStagingItemEditor order={order} quantity={quantity} /> : null}
     </ServerActionForm>
   );
+}
+
+function GachaStagingItemEditor({ order, quantity }: { order: any; quantity: number }) {
+  const photoOptions = (order.photos || []).filter((photo: any) => photo.photo_role === "purchase_report");
+  const initialItems = normalizeGachaItems(order.items || [], quantity);
+  const [items, setItems] = useState(initialItems);
+
+  useEffect(() => {
+    setItems((current) => normalizeGachaItems(current, quantity));
+  }, [quantity]);
+
+  function updateItem(index: number, patch: Partial<GachaStagingItem>) {
+    setItems((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
+  }
+
+  return (
+    <section className="grid gap-3 rounded-xl border border-primary/20 bg-primary/5 p-3 md:col-span-2">
+      <div>
+        <p className="font-semibold">扭蛋／盲抽逐顆 staging 結果</p>
+        <p className="mt-1 text-sm text-muted-foreground">可逐顆修正文字、開箱狀態與結果照片；儲存時必須剛好保留目前數量的結果。</p>
+      </div>
+      <input name="gachaItemsJson" type="hidden" value={JSON.stringify(items.map((item) => ({
+        resultName: item.resultName,
+        resultPhotoStorageKey: item.resultPhotoStorageKey || null,
+        sequenceNo: item.sequenceNo,
+        unboxingStatus: item.unboxingStatus,
+      })))} />
+      {items.length ? items.map((item, index) => (
+        <div className="grid gap-2 rounded-lg border bg-background p-3 md:grid-cols-[auto_1fr_1fr]" key={item.sequenceNo}>
+          <div className="flex items-center gap-2 text-sm font-semibold"><span className="grid size-7 place-items-center rounded-full bg-primary text-primary-foreground">{item.sequenceNo}</span>第 {item.sequenceNo} 顆</div>
+          <label className="grid gap-1 text-sm"><span className="text-xs text-muted-foreground">結果文字</span><input required value={item.resultName} onChange={(event) => updateItem(index, { resultName: event.target.value })} /></label>
+          <div className="grid gap-2 sm:grid-cols-2">
+            <label className="grid gap-1 text-sm"><span className="text-xs text-muted-foreground">開箱狀態</span><select value={item.unboxingStatus} onChange={(event) => updateItem(index, { unboxingStatus: event.target.value as GachaStagingItem["unboxingStatus"] })}><option value="recorded">已開箱</option><option value="pending">待開箱</option></select></label>
+            <label className="grid gap-1 text-sm"><span className="text-xs text-muted-foreground">結果照片</span><select value={item.resultPhotoStorageKey || ""} onChange={(event) => updateItem(index, { resultPhotoStorageKey: event.target.value || null })}><option value="">不指定照片</option>{photoOptions.map((photo: any) => <option key={photo.storage_key} value={photo.storage_key}>{photo.label || photo.original_filename || `照片 ${photo.sort_order + 1}`}</option>)}</select></label>
+          </div>
+        </div>
+      )) : <p className="text-sm text-red-700">請先填寫至少一個數量，再編輯逐顆結果。</p>}
+    </section>
+  );
+}
+
+type GachaStagingItem = {
+  resultName: string;
+  resultPhotoStorageKey: string | null;
+  sequenceNo: number;
+  unboxingStatus: "pending" | "recorded";
+};
+
+function normalizeGachaItems(items: any[], quantity: number): GachaStagingItem[] {
+  const count = Math.max(0, Number(quantity) || 0);
+  return Array.from({ length: count }, (_, index) => {
+    const item = items[index] || {};
+    return {
+      resultName: String(item.resultName || item.result_name || (item.unboxingStatus === "pending" || item.unboxing_status === "pending" ? "待開箱" : "看圖")),
+      resultPhotoStorageKey: item.resultPhotoStorageKey || item.result_photo_storage_key || null,
+      sequenceNo: index + 1,
+      unboxingStatus: (item.unboxingStatus || item.unboxing_status || "recorded") === "pending" ? "pending" : "recorded",
+    };
+  });
 }
 
 function PhotoPreview({ photo, editing }: { photo: any; editing: boolean }) {

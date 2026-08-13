@@ -14,6 +14,8 @@ const SNAPSHOT_FIELDS = [
   "departed_at",
   "arrived_at",
   "admin_activated_at",
+  "connection_paused_at",
+  "connection_paused_seconds",
   "ended_at",
   "canceled_at",
   "version",
@@ -51,6 +53,21 @@ function nowIso(now) {
   return new Date(now || Date.now()).toISOString();
 }
 
+function closeConnectionPause(trip, timestamp) {
+  if (!trip.connection_paused_at) return trip;
+  const pausedAt = new Date(trip.connection_paused_at).getTime();
+  const closedAt = new Date(timestamp).getTime();
+  if (!Number.isFinite(pausedAt) || !Number.isFinite(closedAt) || closedAt < pausedAt) {
+    throw new TripStateError("invalid_pause_time", "Connection pause timestamps are invalid.");
+  }
+  return {
+    ...trip,
+    connection_paused_at: null,
+    connection_paused_seconds:
+      Number(trip.connection_paused_seconds || 0) + Math.floor((closedAt - pausedAt) / 1000),
+  };
+}
+
 function buildTransition({ trip, expectedVersion, action, actorRole, reason, now }) {
   assertExpectedVersion(trip, expectedVersion);
   const before = snapshotTrip(trip);
@@ -85,12 +102,14 @@ function buildTransition({ trip, expectedVersion, action, actorRole, reason, now
     }
     next.status = "ended";
     next.ended_at = timestamp;
+    Object.assign(next, closeConnectionPause(next, timestamp));
   } else if (action === "admin_canceled") {
     if (trip.status === "ended" || trip.status === "canceled") {
       throw new TripStateError("invalid_transition", "Ended or canceled trips cannot be canceled again.");
     }
     next.status = "canceled";
     next.canceled_at = timestamp;
+    Object.assign(next, closeConnectionPause(next, timestamp));
   } else {
     throw new TripStateError("unknown_action", `Unknown trip action: ${action}`);
   }
@@ -118,12 +137,15 @@ function repairTrip({ trip, expectedVersion, patch, reason, now }) {
   if (normalizedPatch.status === "ended" && !normalizedPatch.ended_at) {
     normalizedPatch.ended_at = timestamp;
   }
-  const next = {
+  let next = {
     ...trip,
     ...normalizedPatch,
     updated_at: timestamp,
     version: Number(trip.version) + 1,
   };
+  if (["ended", "canceled"].includes(next.status)) {
+    next = closeConnectionPause(next, next.ended_at || next.canceled_at || timestamp);
+  }
 
   return {
     event: {
@@ -144,6 +166,8 @@ function normalizeRepairPatch(patch) {
     "departed_at",
     "arrived_at",
     "admin_activated_at",
+    "connection_paused_at",
+    "connection_paused_seconds",
     "ended_at",
     "canceled_at",
   ]);
@@ -156,12 +180,67 @@ function normalizeRepairPatch(patch) {
       normalized[key] = value;
       continue;
     }
+    if (key === "connection_paused_seconds") {
+      const seconds = Number(value || 0);
+      if (!Number.isInteger(seconds) || seconds < 0) {
+        throw new TripStateError("invalid_pause_time", "Paused connection time must be a non-negative integer.");
+      }
+      normalized[key] = seconds;
+      continue;
+    }
     normalized[key] = value || null;
   }
   if (Object.keys(normalized).length === 0) {
     throw new TripStateError("empty_repair", "Repair requires at least one changed field.");
   }
   return normalized;
+}
+
+function buildConnectionPauseTransition({
+  trip,
+  expectedVersion,
+  action,
+  actorRole,
+  reason,
+  now,
+}) {
+  assertExpectedVersion(trip, expectedVersion);
+  if (trip.status !== "active") {
+    throw new TripStateError("invalid_transition", "Only active trips can pause or resume connection time.");
+  }
+
+  const before = snapshotTrip(trip);
+  const timestamp = nowIso(now);
+  let next = {
+    ...trip,
+    updated_at: timestamp,
+    version: Number(trip.version) + 1,
+  };
+
+  if (action === "admin_connection_paused") {
+    if (trip.connection_paused_at) {
+      throw new TripStateError("already_paused", "Connection time is already paused.");
+    }
+    next.connection_paused_at = timestamp;
+  } else if (action === "admin_connection_resumed") {
+    if (!trip.connection_paused_at) {
+      throw new TripStateError("not_paused", "Connection time is not paused.");
+    }
+    next = closeConnectionPause(next, timestamp);
+  } else {
+    throw new TripStateError("unknown_action", `Unknown connection-time action: ${action}`);
+  }
+
+  return {
+    event: {
+      action,
+      actor_role: actorRole,
+      after_state: snapshotTrip(next),
+      before_state: before,
+      reason: reason || null,
+    },
+    trip: next,
+  };
 }
 
 function isTripStateError(error) {
@@ -171,6 +250,7 @@ function isTripStateError(error) {
 module.exports = {
   TRIP_STATUSES,
   TripStateError,
+  buildConnectionPauseTransition,
   buildTransition,
   isTripStateError,
   repairTrip,

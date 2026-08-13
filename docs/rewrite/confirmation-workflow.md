@@ -1,12 +1,86 @@
 # Helper Rewrite Confirmation Workflow
 
-Last updated: 2026-08-11
+Last updated: 2026-08-12
 
 This document lists the product and implementation decisions that must be confirmed
 before or during the MINICHI helper rewrite. The source behavior is
 `latest-helper-operation-spec.md`.
 
 ## Confirmed Decisions
+
+### Round 29 confirmed on 2026-08-12: Dedicated gacha and blind-box purchase flow
+
+The new helper gacha/blind-box flow is a separate task workflow that connects
+to the administrator gacha order model through staging and explicit merge. The
+following decisions are confirmed:
+
+- The aggregation scope is one helper trip (`trip_id`), product name, product
+  type, and original JPY price. TWD prices remain independent per customer
+  task and do not split or combine the helper batch.
+- Each product keeps one primary series-reference photo for the reusable
+  product card. Other source photos remain preserved as source evidence and
+  are not discarded.
+- Product history first searches the current helper trip and can also search
+  existing administrator product cards. Reusing an administrator card copies
+  only product name, product type, original JPY price, TWD price, and series
+  reference photo; it never copies customer, task, result, or prior-order
+  data.
+- Gacha pricing memory is separated from standard-product memory. The gacha
+  mapping is JPY 200 -> TWD 70, 300 -> 100, 400 -> 120, 500 -> 150, and
+  600 -> 170. The administrator may edit the TWD price after autofill. The
+  mapping applies to gacha, not blind-box products.
+- A helper batch exposes the aggregate quantity, while customer tasks remain
+  independent and are displayed anonymously as labels such as `任務 01` and
+  `任務 02`. The batch is never used as a final main order or as a substitute
+  for the customer-level source tasks.
+- Only an unfinished helper batch can be frozen from the helper interface.
+  Once frozen, later same-key tasks route to a new numbered batch. Only an
+  administrator can reopen a frozen batch.
+- The helper first submits the actual purchased quantity. Only then are the
+  per-item result fields generated. The remaining unpurchased quantity follows
+  the existing cancellation / unavailable handling and does not receive fake
+  gacha result items.
+- Each purchased gacha/blind-box item has a result text field and one result
+  photo field, with at least one of text or photo required. A later item may
+  reuse the first item's photo. Photo-only results use `看圖` when represented
+  in the administrator result text.
+- A helper task becomes visible in the administrator live return feed only
+  after the task-level submission succeeds. There is no formal per-item
+  server save; the task submission is the persistence boundary and must be
+  retryable as one idempotent operation.
+- Administrator staging review can edit each gacha/blind-box item separately.
+  The helper source reply and original media remain auditable source records.
+- A blind-box item may explicitly be `待開箱`. It can complete helper
+  purchasing, enter staging, and be merged into the administrator order, but
+  it is excluded from transfer until an administrator records the unboxing
+  result. Pending items still count toward actual purchased quantity and
+  settlement.
+- Duplicate publication for the same customer remains separate helper tasks
+  and separate main orders. The first version does not support gacha/blind-box
+  rebuy.
+- Settlement uses the actual purchased capsule count; no new gacha-specific
+  settlement formula is introduced.
+- Existing gacha/blind-box tasks keep the legacy workflow. Only tasks created
+  with the new workflow version use per-item helper reporting; no historical
+  task backfill is included.
+
+The implementation boundaries for this round are also confirmed:
+
+- Reopening is allowed only for the latest frozen gacha/blind-box batch. It
+  changes that batch back to `accepting`; an older frozen batch cannot be
+  reopened after a newer numbered batch exists.
+- A helper may resubmit a submitted gacha/blind-box task while its staging row
+  has not entered administrator review. The submission remains one complete,
+  idempotent task operation; after staging review begins, the helper source
+  result is locked.
+- Administrator staging review may correct actual quantity and add/remove
+  per-item result rows. The reviewed item count must equal the reviewed order
+  quantity, and the correction is recorded in the reviewed staging audit trail
+  without rewriting the helper source reply.
+- An open, not-yet-reported task may be edited by an administrator for product
+  name, type, quantity, JPY, TWD, and note with optimistic version checking and
+  audit. After the first helper submission, those task-level fields are locked;
+  later corrections belong in staging review.
 
 ### Round 27 confirmed on 2026-08-11: Quick-publish history reuse from one quote photo
 
@@ -726,9 +800,14 @@ Trip state machine and timing:
 - Helpers may mark departure and arrival but cannot activate a trip.
 - Admin confirms an arrived trip into active and can cancel, force end, and
   repair status or time fields.
+- While a trip is active, admin can pause or resume connection timing without
+  changing the trip status. The open pause and accumulated pause seconds are
+  stored on the trip and written to trip audit events.
 - Site photo, quote/detail, purchase, and other live work functions are available
   only after the trip becomes active.
 - Hourly settlement uses `departed_at -> ended_at`, including travel/work time.
+  Administrator-controlled pause intervals are excluded from the calculated
+  work minutes; an open pause is closed automatically when the trip ends.
   Transport fees remain separate transport claims or allowances.
 - Trip records retain `departed_at`, `arrived_at`, `admin_activated_at`, and
   `ended_at`.

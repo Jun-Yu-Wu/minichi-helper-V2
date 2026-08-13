@@ -109,6 +109,62 @@ test("groups purchase tasks into immutable add-on batches and keeps partial quan
   assert.equal(open.batch_remaining_quantity, 2);
 });
 
+test("gacha v2 helper batches expose anonymous task rows and aggregate actual quantities", () => {
+  const groups = service.groupPurchaseTasksForHelper([
+    {
+      created_at: "2026-08-12T01:00:00Z",
+      id: "gacha-task-a",
+      purchase_batch_id: "gacha-batch-1",
+      purchase_batch_intake_status: "accepting",
+      purchase_batch_sequence: 0,
+      purchase_batch_status: "open",
+      product_name: "扭蛋系列A",
+      quantity: 1,
+      completed_quantity: 1,
+      status: "completed",
+      workflow_version: "gacha_v2",
+    },
+    {
+      created_at: "2026-08-12T02:00:00Z",
+      id: "gacha-task-b",
+      purchase_batch_id: "gacha-batch-1",
+      purchase_batch_intake_status: "accepting",
+      purchase_batch_sequence: 0,
+      purchase_batch_status: "open",
+      product_name: "扭蛋系列A",
+      quantity: 2,
+      completed_quantity: 1,
+      status: "open",
+      workflow_version: "gacha_v2",
+    },
+  ]);
+
+  assert.equal(groups.length, 1);
+  assert.equal(groups[0].workflow_version, "gacha_v2");
+  assert.equal(groups[0].batch_intake_status, "accepting");
+  assert.equal(groups[0].batch_requested_quantity, 3);
+  assert.equal(groups[0].batch_reported_quantity, 2);
+  assert.equal(groups[0].batch_remaining_quantity, 1);
+  assert.deepEqual(groups[0].batch_tasks, [
+    {
+      completed_quantity: 1,
+      id: "gacha-task-a",
+      quantity: 1,
+      status: "completed",
+      task_number: 1,
+      unavailable_quantity: 0,
+    },
+    {
+      completed_quantity: 1,
+      id: "gacha-task-b",
+      quantity: 2,
+      status: "open",
+      task_number: 2,
+      unavailable_quantity: 0,
+    },
+  ]);
+});
+
 test("reports a helper batch total while keeping customer tasks open for later add-ons", async () => {
   const database = fakeDatabase([
     {
@@ -1965,7 +2021,7 @@ test("admin gacha purchase tasks preserve product type and series reference phot
   );
   assert.ok(batchInsert);
   assert.equal(batchInsert.params[2], "gacha");
-  assert.match(batchInsert.params[3], /\|gacha\|[0-9a-f]{32}$/);
+  assert.match(batchInsert.params[3], /\|gacha\|gacha_v2$/);
 
   const taskInsert = queries.find((query) =>
     String(query.sql).includes("insert into helper_app.purchase_tasks"),
@@ -2997,6 +3053,89 @@ test("settlement precheck batches receipt and transport evidence writes", async 
     queries.filter((query) => String(query.sql).includes("settlement_evidence")).length,
     1,
   );
+});
+
+test("admin connection pause and resume use the trip version and audit event", async () => {
+  const pauseQueries = [];
+  const pausedTrip = {
+    connection_paused_at: "2026-08-12T05:00:00.000Z",
+    connection_paused_seconds: 0,
+    id: "trip-1",
+    status: "active",
+    version: 5,
+  };
+  const pauseDatabase = fakeDatabase(
+    [
+      {
+        rows: [{
+          connection_paused_at: null,
+          connection_paused_seconds: 0,
+          id: "trip-1",
+          status: "active",
+          version: 4,
+        }],
+      },
+      { rows: [pausedTrip] },
+      { rows: [] },
+    ],
+    pauseQueries,
+  );
+
+  const pauseResult = await service.pauseTripConnection(pauseDatabase, {
+    actorUserId: "admin-1",
+    expectedVersion: 4,
+    now: "2026-08-12T05:00:00.000Z",
+    reason: "休息",
+    tripId: "trip-1",
+  });
+
+  assert.equal(pauseResult.connection_paused_at, "2026-08-12T05:00:00.000Z");
+  const pauseAudit = pauseQueries.find((query) =>
+    String(query.sql).includes("insert into helper_app.trip_audit_events"),
+  );
+  assert.equal(pauseAudit.params[4], "admin_connection_paused");
+  assert.equal(pauseQueries.some((query) => String(query.sql).includes("connection_paused_at = $6")), true);
+
+  const resumeQueries = [];
+  const resumeDatabase = fakeDatabase(
+    [
+      {
+        rows: [{
+          connection_paused_at: "2026-08-12T05:00:00.000Z",
+          connection_paused_seconds: 0,
+          id: "trip-1",
+          status: "active",
+          version: 5,
+        }],
+      },
+      {
+        rows: [{
+          connection_paused_at: null,
+          connection_paused_seconds: 900,
+          id: "trip-1",
+          status: "active",
+          version: 6,
+        }],
+      },
+      { rows: [] },
+    ],
+    resumeQueries,
+  );
+
+  const resumeResult = await service.resumeTripConnection(resumeDatabase, {
+    actorUserId: "admin-1",
+    expectedVersion: 5,
+    now: "2026-08-12T05:15:00.000Z",
+    reason: "休息結束",
+    tripId: "trip-1",
+  });
+
+  assert.equal(resumeResult.connection_paused_at, null);
+  assert.equal(resumeResult.connection_paused_seconds, 900);
+  const resumeAudit = resumeQueries.find((query) =>
+    String(query.sql).includes("insert into helper_app.trip_audit_events"),
+  );
+  assert.equal(resumeAudit.params[4], "admin_connection_resumed");
 });
 
 test("ending an eligible trip records quote warnings and creates a staging-based settlement", async () => {

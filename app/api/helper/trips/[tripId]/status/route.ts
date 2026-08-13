@@ -39,6 +39,9 @@ export async function GET(
         status: trip.status,
         version: trip.version,
         updatedAt: trip.updated_at,
+        departedAt: trip.departed_at,
+        connectionPausedAt: trip.connection_paused_at,
+        connectionPausedSeconds: trip.connection_paused_seconds,
       },
     },
     {

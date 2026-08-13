@@ -8,7 +8,7 @@ import { EmptyState } from "../components/OperationsUi";
 import { TaskSubtypePublisher } from "./AdminForms";
 
 type TaskCategory = "purchase" | "quote";
-type TaskSubType = "detail" | "face_check" | "quote" | "quote_and_detail" | "standard";
+type TaskSubType = "detail" | "face_check" | "gacha" | "quote" | "quote_and_detail" | "standard";
 
 type ActiveTrip = {
   helper_display_name?: string | null;
@@ -186,7 +186,7 @@ function normalizeSubType(category?: string, value?: string): TaskSubType | unde
   if (category === "quote" && ["detail", "quote", "quote_and_detail"].includes(value || "")) {
     return value as TaskSubType;
   }
-  if (category === "purchase" && ["standard", "face_check"].includes(value || "")) {
+  if (category === "purchase" && ["gacha", "standard", "face_check"].includes(value || "")) {
     return value as TaskSubType;
   }
   return undefined;

@@ -226,7 +226,7 @@ export function CreateQuoteTaskForm(props: QuoteTaskFormProps) {
 }
 
 type TaskCategory = "purchase" | "quote";
-type TaskSubType = "detail" | "face_check" | "quote" | "quote_and_detail" | "standard";
+type TaskSubType = "detail" | "face_check" | "gacha" | "quote" | "quote_and_detail" | "standard";
 
 const quoteTaskTypes = [
   { id: "quote", label: "報價", body: "請小幫手回傳商品價格。" },
@@ -237,6 +237,7 @@ const quoteTaskTypes = [
 const purchaseTaskTypes = [
   { id: "standard", label: "一般採買", body: "發布一般數量的採買指示。" },
   { id: "face_check", label: "挑臉採買", body: "採買後需由管理員審核商品狀態。" },
+  { id: "gacha", label: "扭蛋／盲抽", body: "依同商品、類型與日幣原價聚合，逐顆回報結果。" },
 ] as const;
 
 export function TaskSubtypePublisher({
@@ -309,6 +310,7 @@ export function TaskSubtypePublisher({
               <CreateQuoteTaskForm taskType={subType} trip={trip} />
             ) : category === "purchase" ? (
               <CreatePurchaseTaskForm
+                mode={subType === "gacha" ? "gacha" : "standard"}
                 requiresFaceCheck={subType === "face_check"}
                 trip={trip}
               />
@@ -618,10 +620,20 @@ type PurchaseProductSuggestion = {
   quantity?: number | null;
   requiresFaceCheck?: boolean;
   salePriceTwd?: number | null;
+  sourceKind?: string;
+  sourceTemplateId?: string;
   sourceTaskId: string;
 };
 
 type PurchaseProductType = "standard" | "gacha" | "blind_box";
+
+const GACHA_PRICE_MAP: Record<string, string> = {
+  "200": "70",
+  "300": "100",
+  "400": "120",
+  "500": "150",
+  "600": "170",
+};
 
 type QuickPublishHistory = {
   createdAt?: string | null;
@@ -665,9 +677,11 @@ function quickPublishHistoryDateLabel(value?: string | null) {
 }
 
 export function CreatePurchaseTaskForm({
+  mode = "standard",
   requiresFaceCheck,
   trip,
 }: {
+  mode?: "gacha" | "standard";
   requiresFaceCheck: boolean;
   trip: { id: string; status: string; trip_name: string };
 }) {
@@ -679,7 +693,9 @@ export function CreatePurchaseTaskForm({
   const [formResetKey, setFormResetKey] = useState(0);
   const [lineCommunityName, setLineCommunityName] = useState("");
   const [productName, setProductName] = useState("");
-  const [productType, setProductType] = useState<PurchaseProductType>("standard");
+  const [productType, setProductType] = useState<PurchaseProductType>(
+    mode === "gacha" ? "gacha" : "standard",
+  );
   const [quantity, setQuantity] = useState("1");
   const [originalPriceJpy, setOriginalPriceJpy] = useState("");
   const [salePriceTwd, setSalePriceTwd] = useState("");
@@ -688,7 +704,15 @@ export function CreatePurchaseTaskForm({
   const [productSuggestions, setProductSuggestions] = useState<PurchaseProductSuggestion[]>([]);
   const [productSuggestionsLoading, setProductSuggestionsLoading] = useState(false);
   const [reuseSourceTaskId, setReuseSourceTaskId] = useState("");
+  const [reuseSourceTemplateId, setReuseSourceTemplateId] = useState("");
+  const [priceSource, setPriceSource] = useState<"auto" | "manual" | "memory">("auto");
   const canCreate = trip.status === "active";
+
+  const visibleProductSuggestions = productSuggestions.filter((suggestion) =>
+    mode === "gacha"
+      ? suggestion.productType === "gacha" || suggestion.productType === "blind_box"
+      : suggestion.productType === "standard",
+  );
 
   useEffect(() => {
     if (!productFocused || !canCreate) {
@@ -735,6 +759,7 @@ export function CreatePurchaseTaskForm({
   function addFiles(files: FileList | null) {
     if (!files) return;
     setReuseSourceTaskId("");
+    setReuseSourceTemplateId("");
     const selected = Array.from(files)
       .filter((file) => file.type.startsWith("image/"))
       .map((file) => ({
@@ -783,6 +808,8 @@ export function CreatePurchaseTaskForm({
     setSalePriceTwd(suggestion.salePriceTwd == null ? "" : String(suggestion.salePriceTwd));
     setNote(suggestion.note || "");
     setReuseSourceTaskId(suggestion.sourceTaskId || "");
+    setReuseSourceTemplateId(suggestion.sourceTemplateId || "");
+    setPriceSource("memory");
     setPhotos(reusedPhotos);
     setProductFocused(false);
     setState({});
@@ -841,6 +868,7 @@ export function CreatePurchaseTaskForm({
         ),
       );
       formData.set("reuseSourceTaskId", reuseSourceTaskId);
+      formData.set("reuseSourceTemplateId", reuseSourceTemplateId);
       const result = await createPurchaseTaskAction({}, formData);
       setState(result);
       if (result.ok) {
@@ -850,12 +878,14 @@ export function CreatePurchaseTaskForm({
         form.reset();
         setLineCommunityName("");
         setProductName("");
-        setProductType("standard");
+        setProductType(mode === "gacha" ? "gacha" : "standard");
         setQuantity("1");
         setOriginalPriceJpy("");
         setSalePriceTwd("");
         setNote("");
         setReuseSourceTaskId("");
+        setReuseSourceTemplateId("");
+        setPriceSource("auto");
         setFormResetKey((current) => current + 1);
       }
     } catch (error) {
@@ -907,7 +937,7 @@ export function CreatePurchaseTaskForm({
   return (
     <form className="mt-3 grid gap-3 border-t pt-3" onSubmit={submitPurchaseTask}>
       <input name="tripId" type="hidden" value={trip.id} />
-      {requiresFaceCheck ? <input name="requiresFaceCheck" type="hidden" value="on" /> : null}
+      {requiresFaceCheck && mode !== "gacha" ? <input name="requiresFaceCheck" type="hidden" value="on" /> : null}
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="grid gap-1 text-sm">
           <span className="font-medium">LINE 社群暱稱</span>
@@ -922,7 +952,7 @@ export function CreatePurchaseTaskForm({
           <span className="font-medium">商品名稱</span>
           <input
             aria-autocomplete="list"
-            aria-expanded={productFocused && productSuggestions.length > 0}
+            aria-expanded={productFocused && visibleProductSuggestions.length > 0}
             autoComplete="off"
             name="productName"
             placeholder="例如：限定色側背包"
@@ -934,14 +964,15 @@ export function CreatePurchaseTaskForm({
             onChange={(event) => {
               setProductName(event.currentTarget.value);
               setReuseSourceTaskId("");
+              setReuseSourceTemplateId("");
             }}
             onFocus={() => setProductFocused(true)}
           />
-          {productFocused && (productSuggestionsLoading || productSuggestions.length > 0) ? (
+          {productFocused && (productSuggestionsLoading || visibleProductSuggestions.length > 0) ? (
             <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-72 overflow-y-auto rounded-lg border bg-popover p-1 text-popover-foreground shadow-lg" role="listbox">
               {productSuggestionsLoading ? (
                 <p className="px-3 py-2 text-sm text-muted-foreground">載入最近發布商品...</p>
-              ) : productSuggestions.map((suggestion) => (
+              ) : visibleProductSuggestions.map((suggestion) => (
                 <button
                   className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-accent"
                   key={`${suggestion.sourceTaskId}:${suggestion.productName}`}
@@ -970,19 +1001,33 @@ export function CreatePurchaseTaskForm({
         </label>
         <label className="grid gap-1 text-sm">
           <span className="font-medium">商品類型</span>
-          <select
-            name="productType"
-            value={productType}
-            disabled={!canCreate || pending}
-            onChange={(event) => {
-              setProductType(event.currentTarget.value as PurchaseProductType);
-              setReuseSourceTaskId("");
-            }}
-          >
-            <option value="standard">一般商品</option>
-            <option value="gacha">扭蛋</option>
-            <option value="blind_box">盲抽</option>
-          </select>
+          {mode === "gacha" ? (
+            <select
+              name="productType"
+              value={productType === "blind_box" ? "blind_box" : "gacha"}
+              disabled={!canCreate || pending}
+              onChange={(event) => {
+                const nextType = event.currentTarget.value as PurchaseProductType;
+                setProductType(nextType);
+                setReuseSourceTaskId("");
+                setReuseSourceTemplateId("");
+                if (nextType === "blind_box") {
+                  setPriceSource("manual");
+                } else if (priceSource === "auto") {
+                  const mapped = GACHA_PRICE_MAP[originalPriceJpy];
+                  if (mapped) setSalePriceTwd(mapped);
+                }
+              }}
+            >
+              <option value="gacha">扭蛋</option>
+              <option value="blind_box">盲抽</option>
+            </select>
+          ) : (
+            <>
+              <input name="productType" type="hidden" value="standard" />
+              <span className="rounded-md border bg-muted/30 px-3 py-2 text-sm">一般商品</span>
+            </>
+          )}
         </label>
         <label className="grid gap-1 text-sm">
           <span className="font-medium">採買數量</span>
@@ -990,20 +1035,48 @@ export function CreatePurchaseTaskForm({
         </label>
         <label className="grid gap-1 text-sm">
           <span className="font-medium">商品原價（JPY）</span>
-          <input name="originalPriceJpy" inputMode="numeric" min="0" placeholder="1200" required value={originalPriceJpy} disabled={!canCreate || pending} onChange={(event) => setOriginalPriceJpy(event.currentTarget.value)} />
+          <input
+            name="originalPriceJpy"
+            inputMode="numeric"
+            min="0"
+            placeholder="1200"
+            required
+            value={originalPriceJpy}
+            disabled={!canCreate || pending}
+            onChange={(event) => {
+              const nextPrice = event.currentTarget.value;
+              setOriginalPriceJpy(nextPrice);
+              if (mode === "gacha" && productType === "gacha" && priceSource === "auto") {
+                const mapped = GACHA_PRICE_MAP[nextPrice];
+                if (mapped) setSalePriceTwd(mapped);
+              }
+            }}
+          />
         </label>
         <label className="grid gap-1 text-sm">
           <span className="font-medium">客人售價（TWD）</span>
-          <input name="salePriceTwd" inputMode="numeric" min="0" placeholder="380" required value={salePriceTwd} disabled={!canCreate || pending} onChange={(event) => setSalePriceTwd(event.currentTarget.value)} />
+          <input
+            name="salePriceTwd"
+            inputMode="numeric"
+            min="0"
+            placeholder={mode === "gacha" && productType === "gacha" ? "依日幣原價自動帶入，可修改" : "380"}
+            required
+            value={salePriceTwd}
+            disabled={!canCreate || pending}
+            onChange={(event) => {
+              setSalePriceTwd(event.currentTarget.value);
+              setPriceSource("manual");
+            }}
+          />
         </label>
       </div>
       <label className="grid gap-1 text-sm">
         <span className="font-medium">給小幫手的備註（選填）</span>
         <textarea name="note" placeholder="尺寸、顏色、版本或現場確認重點" value={note} disabled={!canCreate || pending} onChange={(event) => setNote(event.currentTarget.value)} />
       </label>
-      {reuseSourceTaskId ? (
+      {reuseSourceTaskId || reuseSourceTemplateId ? (
         <p className="rounded-md bg-primary/5 px-3 py-2 text-xs text-primary">
-          已套用本連線最近發布的商品資料；照片會直接沿用，數量與客人暱稱仍可修改。
+          已套用記憶商品資料；系列參考圖會沿用，數量與客人暱稱仍可修改，台幣價格仍可調整。
         </p>
       ) : null}
       <div className="grid gap-2">
