@@ -4912,6 +4912,7 @@ function buildMergeRows(job, snapshot) {
         gacha_item_id: itemId,
         item_status: "active",
         order_id: deterministicId("helper_order", job.id, order.reviewedOrderId),
+        original_order_id: deterministicId("helper_order", job.id, order.reviewedOrderId),
         original_price_jpy: order.originalPriceJpy || 0,
         purchase_date: snapshot.trip?.business_date,
         result_name: item.resultName || "看圖",

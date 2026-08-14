@@ -3722,6 +3722,98 @@ test("approved staging merge writes main order, source link, and selected photos
   }]);
 });
 
+test("gacha staging merge maps each item to its deterministic original main order", async () => {
+  const queries = [];
+  const approvedSnapshot = {
+    orders: [
+      {
+        appearanceNotes: "",
+        customerConfirmed: false,
+        customerExists: true,
+        helperId: "helper-1",
+        items: [
+          {
+            resultName: "扭蛋結果 A",
+            sequenceNo: 1,
+            unboxingStatus: "recorded",
+          },
+        ],
+        lineCommunityName: "傑洛米",
+        originalPriceJpy: 300,
+        photos: [
+          {
+            id: "series-photo-1",
+            label: "系列圖",
+            photoRole: "series_reference",
+            storageKey: "helper-app/trip-1/series.png",
+          },
+        ],
+        productName: "Codex 測試扭蛋新版",
+        productType: "gacha",
+        purchaseTaskId: "purchase-1",
+        quantity: 1,
+        reviewedOrderId: "reviewed-order-1",
+        salePriceTwd: 100,
+        sourceQuoteTaskId: null,
+        sourceQuoteTaskPhotoId: null,
+        sourceRebuyTaskId: null,
+        stagingOrderPreviewId: "preview-1",
+        workflowVersion: "gacha_v2",
+      },
+    ],
+    trip: {
+      business_date: "2026-07-01",
+      timezone: "Asia/Tokyo",
+      trip_name: "Gacha merge regression trip",
+    },
+  };
+  const database = fakeDatabase(
+    [
+      {
+        rows: [{
+          approved_snapshot: approvedSnapshot,
+          id: "merge-1",
+          status: "approved",
+          trip_id: "trip-1",
+          version: 4,
+        }],
+      },
+      { rows: [] },
+      { rows: [{ id: "merge-1", status: "merging", merge_idempotency_key: "merge-key-1" }] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [{ id: "customer-1", line_community_name: "傑洛米" }] },
+      { rows: [] },
+      { rows: [{ template_id: "template-1" }] },
+      { rows: [] },
+      { rows: [{ receivable_id: "receivable-1" }] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [{ id: "merge-1", main_order_ids: ["main-order-1"], status: "merged" }] },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const result = await service.mergeApprovedStagingJob(database, {
+    actorUserId: "admin-1",
+    expectedVersion: 4,
+    idempotencyKey: "merge-key-1",
+    mergeJobId: "merge-1",
+  });
+
+  assert.equal(result.status, "merged");
+  const mainOrderInsert = queries.find((query) => String(query.sql).includes("insert into main.orders"));
+  const gachaItemInsert = queries.find((query) => String(query.sql).includes("insert into main.gacha_order_items"));
+  assert.ok(mainOrderInsert);
+  assert.ok(gachaItemInsert);
+  const mainOrder = JSON.parse(mainOrderInsert.params[0])[0];
+  const gachaItem = JSON.parse(gachaItemInsert.params[0])[0];
+  assert.equal(gachaItem.original_order_id, mainOrder.order_id);
+  assert.equal(gachaItem.order_id, mainOrder.order_id);
+});
+
 function fakeDatabase(results, queries = []) {
   let index = 0;
   async function nextQuery(sql, params) {
