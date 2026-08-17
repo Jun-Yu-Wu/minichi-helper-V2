@@ -941,9 +941,10 @@ function GachaPurchaseResponseForm({
       setError("請重新確認逐顆回報格數。");
       return;
     }
-    if (quantity > 0 && rows.some((row) =>
-      !row.resultName.trim() && !row.photo && !(isBlindBox && row.unboxingStatus === "pending"),
-    )) {
+    if (quantity > 0 && rows.some((row) => {
+      const photo = row.reuseFirstPhoto ? rows[0]?.photo : row.photo;
+      return !row.resultName.trim() && !photo && !(isBlindBox && row.unboxingStatus === "pending");
+    })) {
       setError("每一顆至少要填寫文字、上傳照片，或標記為待開箱。");
       return;
     }
