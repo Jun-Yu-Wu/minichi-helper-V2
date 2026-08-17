@@ -350,6 +350,33 @@ function isQuoteTaskSubType(
   return value === "quote" || value === "detail" || value === "quote_and_detail";
 }
 
+type RebuyProductSuggestion = {
+  createdAt?: string;
+  instructions?: string | null;
+  originalPriceJpy?: number | null;
+  photos: Array<{
+    byte_size?: number | null;
+    content_type?: string | null;
+    original_filename?: string | null;
+    signed_url: string;
+    storage_key: string;
+  }>;
+  productName: string;
+  quantity?: number | null;
+  salePriceTwd?: number | null;
+  sourceKind?: string;
+  sourceTaskId: string;
+};
+
+function isUnsupportedRebuySource(task: {
+  product_type?: string | null;
+  workflow_version?: string | null;
+}) {
+  return task.product_type === "gacha"
+    || task.product_type === "blind_box"
+    || task.workflow_version === "gacha_v2";
+}
+
 export function CreateRebuyTaskForm({
   helpers,
   purchaseTasks,
@@ -358,8 +385,10 @@ export function CreateRebuyTaskForm({
   purchaseTasks: Array<{
     id: string;
     line_community_name?: string | null;
+    product_type?: string | null;
     product_name: string;
     status: string;
+    workflow_version?: string | null;
   }>;
 }) {
   const [photos, setPhotos] = useState<AdminTaskUploadPhoto[]>([]);
@@ -367,15 +396,63 @@ export function CreateRebuyTaskForm({
   const [state, setState] = useState<AdminActionResult>({});
   const [pending, setPending] = useState(false);
   const [isOpen, setIsOpen] = useState(false);
-  const sourceCandidates = purchaseTasks.filter((task) => ["canceled", "unavailable", "not_found"].includes(task.status));
+  const [productName, setProductName] = useState("");
+  const [quantity, setQuantity] = useState("1");
+  const [originalPriceJpy, setOriginalPriceJpy] = useState("");
+  const [salePriceTwd, setSalePriceTwd] = useState("");
+  const [instructions, setInstructions] = useState("");
+  const [productFocused, setProductFocused] = useState(false);
+  const [productSuggestions, setProductSuggestions] = useState<RebuyProductSuggestion[]>([]);
+  const [productSuggestionsLoading, setProductSuggestionsLoading] = useState(false);
+  const sourceCandidates = purchaseTasks.filter((task) =>
+    ["canceled", "unavailable", "not_found"].includes(task.status)
+    && !isUnsupportedRebuySource(task),
+  );
+  const unsupportedSourceCount = purchaseTasks.filter((task) =>
+    ["canceled", "unavailable", "not_found"].includes(task.status)
+    && isUnsupportedRebuySource(task),
+  ).length;
 
   useEffect(() => {
     photosRef.current = photos;
   }, [photos]);
 
+  useEffect(() => {
+    if (!isOpen || !productFocused) {
+      setProductSuggestions([]);
+      setProductSuggestionsLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setProductSuggestionsLoading(true);
+      try {
+        const response = await fetch(
+          `/api/admin/rebuy-products?q=${encodeURIComponent(productName.trim())}`,
+          { cache: "no-store", signal: controller.signal },
+        );
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error || "無法載入補買商品記憶。");
+        setProductSuggestions(Array.isArray(body.suggestions) ? body.suggestions : []);
+      } catch (error) {
+        if (!(error instanceof DOMException && error.name === "AbortError")) {
+          setProductSuggestions([]);
+        }
+      } finally {
+        if (!controller.signal.aborted) setProductSuggestionsLoading(false);
+      }
+    }, productName.trim() ? 90 : 0);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [isOpen, productFocused, productName]);
+
   useEffect(
     () => () => {
-      for (const photo of photosRef.current) URL.revokeObjectURL(photo.objectUrl);
+      for (const photo of photosRef.current) {
+        if (!photo.reused) URL.revokeObjectURL(photo.objectUrl);
+      }
     },
     [],
   );
@@ -404,10 +481,36 @@ export function CreateRebuyTaskForm({
     ]);
   }
 
+  function applyProductSuggestion(suggestion: RebuyProductSuggestion) {
+    for (const photo of photosRef.current) {
+      if (!photo.reused) URL.revokeObjectURL(photo.objectUrl);
+    }
+    const reusedPhotos = (suggestion.photos || []).map((photo, index) => ({
+      byteSize: Number(photo.byte_size || 0),
+      clientPhotoId: createClientId("reused-rebuy-reference"),
+      contentType: photo.content_type || "image/jpeg",
+      file: undefined,
+      objectUrl: photo.signed_url,
+      originalFilename: photo.original_filename || `rebuy-reference-${index + 1}.jpg`,
+      reused: true,
+      sortOrder: index,
+      status: "uploaded" as const,
+      storageKey: photo.storage_key,
+    }));
+    setProductName(suggestion.productName || "");
+    setQuantity(suggestion.quantity == null ? "1" : String(suggestion.quantity));
+    setOriginalPriceJpy(suggestion.originalPriceJpy == null ? "" : String(suggestion.originalPriceJpy));
+    setSalePriceTwd(suggestion.salePriceTwd == null ? "" : String(suggestion.salePriceTwd));
+    setInstructions(suggestion.instructions || "");
+    setPhotos(reusedPhotos);
+    setProductFocused(false);
+    setState({});
+  }
+
   function removePhoto(clientPhotoId: string) {
     setPhotos((current) => {
       const removed = current.find((photo) => photo.clientPhotoId === clientPhotoId);
-      if (removed) URL.revokeObjectURL(removed.objectUrl);
+      if (removed && !removed.reused) URL.revokeObjectURL(removed.objectUrl);
       return current
         .filter((photo) => photo.clientPhotoId !== clientPhotoId)
         .map((photo, index) => ({ ...photo, sortOrder: index }));
@@ -460,9 +563,16 @@ export function CreateRebuyTaskForm({
       const result = await createRebuyTaskAction({}, formData);
       setState(result);
       if (result.ok) {
-        for (const photo of uploadedPhotos) URL.revokeObjectURL(photo.objectUrl);
+        for (const photo of uploadedPhotos) {
+          if (!photo.reused) URL.revokeObjectURL(photo.objectUrl);
+        }
         setPhotos([]);
         form.reset();
+        setProductName("");
+        setQuantity("1");
+        setOriginalPriceJpy("");
+        setSalePriceTwd("");
+        setInstructions("");
       }
     } catch (error) {
       setState({ error: error instanceof Error ? error.message : "照片上傳失敗。" });
@@ -518,11 +628,58 @@ export function CreateRebuyTaskForm({
             </option>
           ))}
         </select>
+        {unsupportedSourceCount ? (
+          <span className="text-xs text-muted-foreground">
+            {unsupportedSourceCount} 筆扭蛋／盲抽未列入補買來源；請改從新版採買流程處理。
+          </span>
+        ) : null}
       </label>
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="grid gap-1">
-          <span>商品名稱</span>
-          <input name="productName" placeholder="手動建立時必填" disabled={pending} />
+        <label className="relative grid gap-1">
+          <span>商品名稱（補買記憶）</span>
+          <input
+            aria-autocomplete="list"
+            aria-expanded={productFocused && productSuggestions.length > 0}
+            autoComplete="off"
+            name="productName"
+            placeholder="手動建立時必填；可選歷史商品"
+            role="combobox"
+            value={productName}
+            disabled={pending}
+            onBlur={() => window.setTimeout(() => setProductFocused(false), 120)}
+            onChange={(event) => setProductName(event.currentTarget.value)}
+            onFocus={() => setProductFocused(true)}
+          />
+          {productFocused && (productSuggestionsLoading || productSuggestions.length > 0) ? (
+            <div className="absolute left-0 right-0 top-full z-30 mt-1 max-h-72 overflow-y-auto rounded-lg border bg-popover p-1 text-popover-foreground shadow-lg" role="listbox">
+              {productSuggestionsLoading ? (
+                <p className="px-3 py-2 text-sm text-muted-foreground">載入最近補買商品...</p>
+              ) : productSuggestions.map((suggestion) => (
+                <button
+                  className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-accent"
+                  key={`${suggestion.sourceTaskId}:${suggestion.productName}`}
+                  role="option"
+                  type="button"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    applyProductSuggestion(suggestion);
+                  }}
+                >
+                  {suggestion.photos[0]?.signed_url ? (
+                    <img alt="" className="size-12 rounded-md object-cover" src={suggestion.photos[0].signed_url} />
+                  ) : (
+                    <span className="size-12 rounded-md bg-muted" />
+                  )}
+                  <span className="min-w-0">
+                    <strong className="block truncate text-sm">{suggestion.productName}</strong>
+                    <span className="mt-0.5 block text-xs text-muted-foreground">
+                      JPY {suggestion.originalPriceJpy ?? "-"} · TWD {suggestion.salePriceTwd ?? "-"} · {suggestion.quantity ?? 1} 件 · {suggestion.photos.length} 張照片
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          ) : null}
         </label>
         <label className="grid gap-1">
           <span>客人 LINE 名稱</span>
@@ -532,21 +689,22 @@ export function CreateRebuyTaskForm({
       <div className="grid gap-3 sm:grid-cols-3">
         <label className="grid gap-1">
           <span>數量</span>
-          <input name="quantity" inputMode="numeric" min="1" placeholder="1" disabled={pending} />
+          <input name="quantity" inputMode="numeric" min="1" placeholder="1" value={quantity} disabled={pending} onChange={(event) => setQuantity(event.currentTarget.value)} />
         </label>
         <label className="grid gap-1">
           <span>JPY 單價</span>
-          <input name="originalPriceJpy" inputMode="numeric" min="0" placeholder="0" disabled={pending} />
+          <input name="originalPriceJpy" inputMode="numeric" min="0" placeholder="0" value={originalPriceJpy} disabled={pending} onChange={(event) => setOriginalPriceJpy(event.currentTarget.value)} />
         </label>
         <label className="grid gap-1">
           <span>TWD 售價</span>
-          <input name="salePriceTwd" inputMode="numeric" min="0" placeholder="0" disabled={pending} />
+          <input name="salePriceTwd" inputMode="numeric" min="0" placeholder="0" value={salePriceTwd} disabled={pending} onChange={(event) => setSalePriceTwd(event.currentTarget.value)} />
         </label>
       </div>
       <label className="grid gap-1">
         <span>補買指示</span>
-        <textarea name="instructions" placeholder="例如：架位、款式或替代條件" disabled={pending} />
+        <textarea name="instructions" placeholder="例如：架位、款式或替代條件" value={instructions} disabled={pending} onChange={(event) => setInstructions(event.currentTarget.value)} />
       </label>
+      <input name="productType" type="hidden" value="standard" />
       <div className="grid gap-2">
         <p className="text-sm font-medium">補買參考照（選填）</p>
         <label className="flex min-h-20 cursor-pointer flex-col items-center justify-center gap-2 rounded-md border border-dashed bg-muted/40 p-3 text-center">
@@ -621,8 +779,8 @@ type PurchaseProductSuggestion = {
   requiresFaceCheck?: boolean;
   salePriceTwd?: number | null;
   sourceKind?: string;
-  sourceTemplateId?: string;
-  sourceTaskId: string;
+  sourceTemplateId?: string | null;
+  sourceTaskId?: string | null;
 };
 
 type PurchaseProductType = "standard" | "gacha" | "blind_box";
@@ -807,7 +965,7 @@ export function CreatePurchaseTaskForm({
     setOriginalPriceJpy(suggestion.originalPriceJpy == null ? "" : String(suggestion.originalPriceJpy));
     setSalePriceTwd(suggestion.salePriceTwd == null ? "" : String(suggestion.salePriceTwd));
     setNote(suggestion.note || "");
-    setReuseSourceTaskId(suggestion.sourceTaskId || "");
+    setReuseSourceTaskId(suggestion.sourceTemplateId ? "" : suggestion.sourceTaskId || "");
     setReuseSourceTemplateId(suggestion.sourceTemplateId || "");
     setPriceSource("memory");
     setPhotos(reusedPhotos);
@@ -974,14 +1132,16 @@ export function CreatePurchaseTaskForm({
                 <p className="px-3 py-2 text-sm text-muted-foreground">載入最近發布商品...</p>
               ) : visibleProductSuggestions.map((suggestion) => (
                 <button
-                  className="flex w-full items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-accent"
-                  key={`${suggestion.sourceTaskId}:${suggestion.productName}`}
+                  className="flex w-full touch-pan-y items-center gap-3 rounded-md px-2 py-2 text-left hover:bg-accent"
+                  key={`${suggestion.sourceKind || "purchase"}:${suggestion.sourceTemplateId || suggestion.sourceTaskId || suggestion.productName}`}
                   role="option"
                   type="button"
                   onPointerDown={(event) => {
-                    event.preventDefault();
-                    applyProductSuggestion(suggestion);
+                    // Keep the input focused for mouse selection without
+                    // intercepting touch gestures used to scroll the list.
+                    if (event.pointerType === "mouse") event.preventDefault();
                   }}
+                  onClick={() => applyProductSuggestion(suggestion)}
                 >
                   {suggestion.photos[0]?.signed_url ? (
                     <img alt="" className="size-12 rounded-md object-cover" src={suggestion.photos[0].signed_url} />

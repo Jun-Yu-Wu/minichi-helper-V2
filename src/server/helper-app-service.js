@@ -1951,7 +1951,10 @@ async function listPurchaseProductSuggestions(database, { tripId, query = "", li
     ...currentTripSuggestions,
     ...historyRows.map((template) => ({
       sourceKind: "admin_gacha_template",
-      sourceTaskId: `template:${template.template_id}`,
+      // A reusable admin card is a template, not a helper purchase task. Keep
+      // its UUID in sourceTemplateId so photo validation never casts a
+      // client-facing marker such as "template:<uuid>" to uuid.
+      sourceTaskId: null,
       sourceTemplateId: template.template_id,
       productType: template.product_type,
       productName: template.product_name,
@@ -1971,6 +1974,98 @@ async function listPurchaseProductSuggestions(database, { tripId, query = "", li
         : [],
     })),
   ];
+}
+
+async function listRebuyProductSuggestions(database, { query = "", limit = 8 } = {}) {
+  const normalizedQuery = String(query || "").trim();
+  const boundedLimit = Math.max(1, Math.min(Number(limit) || 8, 12));
+  const result = await database.query(
+    `with candidate_tasks as (
+       select rt.*,
+              coalesce(reference_photo.reference_photo_signature, '') as reference_photo_signature
+       from helper_app.rebuy_tasks rt
+       left join lateral (
+         select md5(coalesce(string_agg(rtp.storage_key, '|' order by rtp.sort_order, rtp.storage_key), '')) as reference_photo_signature
+         from helper_app.rebuy_task_photos rtp
+         where rtp.rebuy_task_id = rt.id
+           and rtp.photo_role = 'reference'
+       ) reference_photo on true
+       where btrim(rt.product_name) <> ''
+         and ($1 = '' or lower(rt.product_name) like '%' || lower($1) || '%')
+     ), grouped_candidates as (
+       select distinct on (
+         regexp_replace(lower(btrim(product_name)), '[[:space:]]+', ' ', 'g'),
+         coalesce(original_price_jpy::text, 'none'),
+         coalesce(sale_price_twd::text, 'none'),
+         coalesce(instructions, ''),
+         reference_photo_signature
+       ) candidate_tasks.*
+       from candidate_tasks
+       order by
+         regexp_replace(lower(btrim(product_name)), '[[:space:]]+', ' ', 'g'),
+         coalesce(original_price_jpy::text, 'none'),
+         coalesce(sale_price_twd::text, 'none'),
+         coalesce(instructions, ''),
+         reference_photo_signature,
+         created_at desc,
+         id desc
+     ), limited_tasks as (
+       select *
+       from grouped_candidates
+       order by
+         case
+           when $1 <> '' and lower(btrim(product_name)) = lower($1) then 0
+           when $1 <> '' and lower(btrim(product_name)) like lower($1) || '%' then 1
+           else 2
+         end,
+         created_at desc,
+         id desc
+       limit $2
+     )
+    select lt.id, lt.product_name, lt.quantity, lt.original_price_jpy,
+           lt.sale_price_twd, lt.instructions, lt.created_at,
+           coalesce(
+             (
+               select jsonb_agg(
+                        jsonb_build_object(
+                          'storage_key', rtp.storage_key,
+                          'photo_role', rtp.photo_role,
+                          'sort_order', rtp.sort_order,
+                          'original_filename', mo.original_filename,
+                          'content_type', mo.content_type,
+                          'byte_size', mo.byte_size
+                        )
+                        order by rtp.sort_order asc, rtp.created_at asc
+                      )
+               from helper_app.rebuy_task_photos rtp
+               left join helper_app.media_objects mo on mo.storage_key = rtp.storage_key
+               where rtp.rebuy_task_id = lt.id
+                 and rtp.photo_role = 'reference'
+             ),
+             '[]'::jsonb
+           ) as photos
+     from limited_tasks lt
+     order by
+       case
+         when $1 <> '' and lower(btrim(lt.product_name)) = lower($1) then 0
+         when $1 <> '' and lower(btrim(lt.product_name)) like lower($1) || '%' then 1
+         else 2
+       end,
+       lt.created_at desc,
+       lt.id desc`,
+    [normalizedQuery, boundedLimit],
+  );
+  return result.rows.map((task) => ({
+    sourceTaskId: task.id,
+    sourceKind: "rebuy_history",
+    productName: task.product_name,
+    quantity: task.quantity,
+    originalPriceJpy: task.original_price_jpy,
+    salePriceTwd: task.sale_price_twd,
+    instructions: task.instructions,
+    createdAt: task.created_at,
+    photos: Array.isArray(task.photos) ? task.photos : [],
+  }));
 }
 
 /**
@@ -2807,6 +2902,26 @@ async function createRebuyTask(database, input) {
       if (!["canceled", "unavailable", "not_found"].includes(sourcePurchase.status)) {
         throw new HelperAppServiceError("invalid_status", "Only canceled, unavailable, or not-found purchases can become rebuy tasks.");
       }
+      if (isGachaProductType(sourcePurchase.product_type) || sourcePurchase.workflow_version === GACHA_V2_WORKFLOW_VERSION) {
+        throw new HelperAppServiceError(
+          "invalid_status",
+          "扭蛋／盲抽目前不能建立補買任務，請回到新版採買流程處理。",
+        );
+      }
+      const activeRebuyResult = await client.query(
+        `select id
+         from helper_app.rebuy_tasks
+         where source_purchase_task_id = $1
+           and status in ('open', 'claimed', 'reported')
+         limit 1`,
+        [sourcePurchase.id],
+      );
+      if (activeRebuyResult.rows[0]) {
+        throw new HelperAppServiceError(
+          "invalid_status",
+          "這筆採買已有進行中的補買任務，請先處理現有任務。",
+        );
+      }
     }
     const assignedHelperId = normalized.visibility === "private"
       ? normalized.assignedHelperId || sourcePurchase?.helper_id
@@ -3058,13 +3173,18 @@ async function checkoutRebuyTasks(database, input) {
       return { settlement: settlement.rows[0] || null, tripId: existing.rows[0].checkout_trip_id };
     }
     const tasksResult = await client.query(
-      `select *
-       from helper_app.rebuy_tasks
-       where status = 'reported'
-         and checked_out_at is null
-         and coalesce(claimed_helper_id, assigned_helper_id) = $1
-       order by reported_at asc, created_at asc
-       for update`,
+      `select rt.*,
+              source_purchase.source_quote_task_id,
+              source_purchase.source_quote_task_photo_id,
+              source_purchase.source_quote_reply_id
+       from helper_app.rebuy_tasks rt
+       left join helper_app.purchase_tasks source_purchase
+         on source_purchase.id = rt.source_purchase_task_id
+       where rt.status = 'reported'
+         and rt.checked_out_at is null
+         and coalesce(rt.claimed_helper_id, rt.assigned_helper_id) = $1
+       order by rt.reported_at asc, rt.created_at asc
+       for update of rt`,
       [helper.id],
     );
     const tasks = tasksResult.rows.filter((task) => Number(task.reported_quantity || 0) > 0);
@@ -3094,11 +3214,16 @@ async function checkoutRebuyTasks(database, input) {
         note: task.helper_report_note,
         originalPriceJpy: task.original_price_jpy,
         productName: task.product_name,
+        productType: "standard",
         quantity: task.reported_quantity,
         requiresFaceCheck: false,
         salePriceTwd: task.sale_price_twd || 0,
         sourceRebuyTaskId: task.id,
+        sourceQuoteReplyId: task.source_quote_reply_id,
+        sourceQuoteTaskId: task.source_quote_task_id,
+        sourceQuoteTaskPhotoId: task.source_quote_task_photo_id,
         tripId: checkoutTrip.id,
+        workflowVersion: "legacy",
       });
       const completed = await client.query(
         `update helper_app.purchase_tasks
@@ -4948,6 +5073,129 @@ function buildMergeRows(job, snapshot) {
   };
 }
 
+async function resolveHelperMergeCustomers(client, orderRows) {
+  const financialOrders = orderRows.filter(
+    (order) => Number(order.receivable_total_twd || 0) > 0,
+  );
+  if (!financialOrders.length) return new Map();
+
+  const customerNames = [...new Set(
+    financialOrders.map((order) => normalizeCustomerName(order.line_community_name)),
+  )];
+  const customerResult = await client.query(
+    "select id, line_community_name, " +
+    "lower(regexp_replace(btrim(line_community_name), '[[:space:]]+', ' ', 'g')) as normalized_name " +
+    "from main.customers " +
+    "where status = 'active' " +
+    "and lower(regexp_replace(btrim(line_community_name), '[[:space:]]+', ' ', 'g')) = any($1::text[])",
+    [customerNames],
+  );
+  const customersByName = new Map();
+  for (const customer of customerResult.rows) {
+    const normalizedName = normalizeCustomerName(customer.line_community_name);
+    const previous = customersByName.get(normalizedName);
+    if (previous && previous.id !== customer.id) {
+      throw new HelperAppServiceError(
+        "helper_customer_ambiguous",
+        `LINE 暱稱「${customer.line_community_name}」對應到多位正式客戶，請先在 staging 修正。`,
+      );
+    }
+    customersByName.set(normalizedName, customer);
+  }
+
+  const resolvedRows = financialOrders.map((order) => {
+    const customer = customersByName.get(normalizeCustomerName(order.line_community_name));
+    if (!customer) {
+      throw new HelperAppServiceError(
+        "helper_customer_unresolved",
+        `LINE 暱稱「${order.line_community_name}」尚未對應到管理員正式客戶，請先在 staging 修正後再合併。`,
+      );
+    }
+    return {
+      customer_id: customer.id,
+      line_community_name: customer.line_community_name,
+      order_id: order.order_id,
+    };
+  });
+
+  await client.query(
+    "update main.orders o " +
+    "set customer_id = input.customer_id, " +
+    "customer_resolution_status = 'resolved', " +
+    "line_community_name = input.line_community_name, " +
+    "row_version = o.row_version + 1, updated_at = now() " +
+    "from jsonb_to_recordset($1::jsonb) as input(" +
+    "order_id text, customer_id uuid, line_community_name text) " +
+    "where o.order_id = input.order_id",
+    [JSON.stringify(resolvedRows)],
+  );
+
+  return new Map(resolvedRows.map((row) => [
+    row.order_id,
+    customersByName.get(normalizeCustomerName(row.line_community_name)),
+  ]));
+}
+
+async function insertHelperMergeReceivables(client, {
+  actorUserId,
+  customerByOrderId,
+  orderRows,
+}) {
+  const receivableRows = orderRows
+    .filter((order) => Number(order.receivable_total_twd || 0) > 0)
+    .map((order) => {
+      const customer = customerByOrderId.get(order.order_id);
+      if (!customer) {
+        throw new HelperAppServiceError(
+          "helper_customer_unresolved",
+          `訂單「${order.order_id}」缺少正式客戶，不能建立應收流水。`,
+        );
+      }
+      const isGacha = order.workflow_version === GACHA_V2_WORKFLOW_VERSION
+        && isGachaProductType(order.product_type);
+      return {
+        amount_twd: Number(order.receivable_total_twd),
+        customer_id: customer.id,
+        idempotency_key: isGacha
+          ? `gacha_order:${order.order_id}:product_receivable:v1`
+          : `helper_merge:${order.order_id}:product_receivable:v1`,
+        order_id: order.order_id,
+        quantity: Number(order.quantity),
+        rule_snapshot: {
+          amount_basis: isGacha
+            ? "gacha_item.amount_twd"
+            : "main.orders.receivable_total_twd",
+          source_type: "helper_merge",
+          version: "v2-helper-merge-product-receivable-2026-08-17",
+        },
+      };
+    });
+  if (!receivableRows.length) return;
+
+  const result = await client.query(
+    "insert into main.order_receivables " +
+    "(order_id, customer_id, quantity_state_id, receivable_type, quantity, amount_twd, due_status, " +
+    "due_trigger_code, payment_method_rule, rule_snapshot, idempotency_key, created_by_user_id) " +
+    "select input.order_id, input.customer_id, null, 'product', input.quantity, input.amount_twd, " +
+    "'not_due', 'order_confirmed', 'admin_defined', input.rule_snapshot, input.idempotency_key, $2::uuid " +
+    "from jsonb_to_recordset($1::jsonb) as input(" +
+    "order_id text, customer_id uuid, quantity integer, amount_twd integer, " +
+    "rule_snapshot jsonb, idempotency_key text) " +
+    "on conflict (idempotency_key) do nothing " +
+    "returning receivable_id, order_id",
+    [JSON.stringify(receivableRows), actorUserId || null],
+  );
+  if (!result.rows.length) return;
+
+  await client.query(
+    "insert into main.receivable_events (receivable_id, event_type, actor_user_id, detail) " +
+    "select input.receivable_id, 'created', $2::uuid, " +
+    "jsonb_build_object('source', 'helper_app', 'workflow', 'helper_merge', 'order_id', input.order_id) " +
+    "from jsonb_to_recordset($1::jsonb) as input(receivable_id uuid, order_id text)",
+    [JSON.stringify(result.rows), actorUserId || null],
+  );
+}
+
 async function writeMergeRows(
   client,
   {
@@ -5020,6 +5268,12 @@ async function writeMergeRows(
         [JSON.stringify(sourceLinkRows)],
       );
     }
+    const customerByOrderId = await resolveHelperMergeCustomers(client, orderRows);
+    await insertHelperMergeReceivables(client, {
+      actorUserId,
+      customerByOrderId,
+      orderRows,
+    });
     if (copyAuditRows.length) {
       await client.query(
         `insert into audit.merge_object_copies
@@ -5059,37 +5313,13 @@ async function writeMergeRows(
         && isGachaProductType(order.product_type),
     );
     if (!gachaOrders.length) return;
-
-    const customerNames = [...new Set(
-      gachaOrders.map((order) => normalizeCustomerName(order.line_community_name)),
-    )];
-    const customerResult = await client.query(
-      "select id, line_community_name from main.customers " +
-      "where lower(regexp_replace(btrim(line_community_name), '[[:space:]]+', ' ', 'g')) = any($1::text[])",
-      [customerNames],
-    );
-    const customersByName = new Map(
-      customerResult.rows.map((customer) => [
-        normalizeCustomerName(customer.line_community_name),
-        customer,
-      ]),
-    );
-    const customerByOrderId = new Map();
     for (const order of gachaOrders) {
-      const customer = customersByName.get(normalizeCustomerName(order.line_community_name));
-      if (!customer) {
-        throw new HelperAppServiceError(
-          "gacha_customer_unresolved",
-          "扭蛋／盲抽訂單的 LINE 暱稱尚未對應到管理員正式客戶，請先在 staging 修正後再合併。",
-        );
-      }
-      customerByOrderId.set(order.order_id, customer);
       await client.query(
         "update main.orders " +
-        "set customer_id = $2, customer_resolution_status = 'resolved', product_id = $3, " +
+        "set product_id = $2, " +
         "purchase_status_code = 'purchased', fulfillment_status_code = 'standard', row_version = row_version + 1, updated_at = now() " +
         "where order_id = $1",
-        [order.order_id, customer.id, "gacha:" + order.product_type],
+        [order.order_id, "gacha:" + order.product_type],
       );
     }
 
@@ -5188,36 +5418,6 @@ async function writeMergeRows(
       }
     }
     for (const order of gachaOrders) {
-      const customer = customerByOrderId.get(order.order_id);
-      const amount = Number(order.receivable_total_twd || 0);
-      if (amount <= 0) continue;
-      const receivableResult = await client.query(
-        "insert into main.order_receivables " +
-        "(order_id, customer_id, quantity_state_id, receivable_type, quantity, amount_twd, due_status, " +
-        "due_trigger_code, payment_method_rule, rule_snapshot, idempotency_key, created_by_user_id) " +
-        "values ($1, $2, null, 'product', $3, $4, 'not_due', 'order_confirmed', 'admin_defined', $5::jsonb, $6, $7) " +
-        "on conflict (idempotency_key) do nothing returning receivable_id",
-        [
-          order.order_id,
-          customer.id,
-          order.quantity,
-          amount,
-          JSON.stringify({ amount_basis: "gacha_item.amount_twd", source_type: "helper_merge", version: "v2-gacha-helper-merge" }),
-          "gacha_order:" + order.order_id + ":product_receivable:v1",
-          actorUserId || null,
-        ],
-      );
-      const receivableId = receivableResult.rows[0]?.receivable_id;
-      if (receivableId) {
-        await client.query(
-          "insert into main.receivable_events (receivable_id, event_type, actor_user_id, detail) values ($1, 'created', $2, $3::jsonb)",
-          [
-            receivableId,
-            actorUserId || null,
-            JSON.stringify({ source: "helper_app", workflow: "gacha_merge" }),
-          ],
-        );
-      }
       await client.query(
         "insert into main.order_events (event_id, order_id, event, actor, detail, actor_user_id, order_version) " +
         "values ($1, $2, 'gacha_helper_merged', $3, $4::jsonb, $5, 1) on conflict (event_id) do nothing",
@@ -6404,6 +6604,7 @@ function normalizePurchaseTaskInput(
   if (isGachaProductType(productType) && Boolean(input.requiresFaceCheck)) {
     throw new HelperAppServiceError("invalid_input", "扭蛋／盲抽不支援挑臉流程。");
   }
+  const reuseSourceTemplateId = optionalText(input.reuseSourceTemplateId || input.sourceGachaTemplateId);
   return {
     actorUserId: input.actorUserId || null,
     lineCommunityName: requiredText(input.lineCommunityName, "lineCommunityName"),
@@ -6413,8 +6614,10 @@ function normalizePurchaseTaskInput(
     productName: requiredText(input.productName, "productName"),
     quantity,
     requiresFaceCheck: Boolean(input.requiresFaceCheck),
-    reuseSourceTaskId: optionalText(input.reuseSourceTaskId),
-    reuseSourceTemplateId: optionalText(input.reuseSourceTemplateId || input.sourceGachaTemplateId),
+    // Template photos are trusted and validated through the template UUID;
+    // never pass a template marker through the task-photo UUID path.
+    reuseSourceTaskId: reuseSourceTemplateId ? null : optionalText(input.reuseSourceTaskId),
+    reuseSourceTemplateId,
     salePriceTwd,
     sourceQuoteReplyId: input.sourceQuoteReplyId || null,
     sourceQuoteTaskId: input.sourceQuoteTaskId || null,
@@ -6584,6 +6787,13 @@ function normalizeRebuyTaskInput(input) {
     throw new HelperAppServiceError("invalid_input", "Sale price TWD must be a non-negative integer.");
   }
   const sourcePurchaseTaskId = optionalText(input.sourcePurchaseTaskId);
+  const productType = String(input.productType || "standard").trim().toLowerCase();
+  if (productType !== "standard") {
+    throw new HelperAppServiceError(
+      "invalid_input",
+      "補買目前只支援一般商品；扭蛋／盲抽請回到新版採買流程處理。",
+    );
+  }
   if (!sourcePurchaseTaskId && (!quantity || !optionalText(input.productName))) {
     throw new HelperAppServiceError("invalid_input", "Manual rebuy tasks require product name and quantity.");
   }
@@ -7784,6 +7994,7 @@ module.exports = {
   listPurchaseTasks,
   listHelperPurchaseBatches,
   listPurchaseProductSuggestions,
+  listRebuyProductSuggestions,
   listQuickPublishPurchaseHistory,
   listAuthorizedHelperRebuyTasks,
   listAuthorizedHelperQuoteTaskSummaries,

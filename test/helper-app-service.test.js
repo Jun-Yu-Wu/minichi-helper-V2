@@ -2038,6 +2038,68 @@ test("admin gacha purchase tasks preserve product type and series reference phot
   assert.equal(photoInsert.params[11], "series_reference");
 });
 
+test("reusing an admin gacha template does not pass a template marker as a task UUID", async () => {
+  const queries = [];
+  const templateId = "d3427bcf-87eb-4248-96e8-52511b475b42";
+  const database = fakeDatabase(
+    [
+      {
+        rows: [{
+          assigned_helper_id: "helper-1",
+          id: "trip-1",
+          status: "active",
+        }],
+      },
+      {
+        rows: [{
+          original_price_jpy: 500,
+          product_name: "扭蛋系列A",
+          product_type: "gacha",
+          series_photo_storage_key: "gacha-series-a",
+          template_id: templateId,
+        }],
+      },
+      { rows: [{ id: "gacha-batch-1", sequence: 0, status: "open" }] },
+      { rows: [{ id: "gacha-task-1", product_type: "gacha", status: "open", trip_id: "trip-1" }] },
+      { rows: [{ storage_key: "gacha-series-a" }] },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const task = await service.createPurchaseTask(database, {
+    actorUserId: "admin-user-1",
+    lineCommunityName: "客人A",
+    originalPriceJpy: "500",
+    productName: "扭蛋系列A",
+    productType: "gacha",
+    quantity: "1",
+    referencePhotos: [{
+      byteSize: 123,
+      contentType: "image/png",
+      originalFilename: "series-a.png",
+      reused: true,
+      sortOrder: 0,
+      storageKey: "gacha-series-a",
+    }],
+    reuseSourceTaskId: `template:${templateId}`,
+    reuseSourceTemplateId: templateId,
+    salePriceTwd: "150",
+    tripId: "trip-1",
+  });
+
+  assert.equal(task.id, "gacha-task-1");
+  const taskInsert = queries.find((query) => String(query.sql).includes("insert into helper_app.purchase_tasks"));
+  assert.ok(taskInsert);
+  assert.equal(taskInsert.params[4], templateId);
+  const photoInsert = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.purchase_task_photos") &&
+    String(query.sql).includes("purchase_reference_photo"),
+  );
+  assert.ok(photoInsert);
+  assert.equal(photoInsert.params[6], null);
+});
+
 test("admin can publish multiple independent purchase tasks from one quote reply", async () => {
   const queries = [];
   let publishedCount = 0;
@@ -2352,6 +2414,42 @@ test("purchase product suggestions query only recent grouped candidates and thei
   assert.match(queries[0].sql, /product_type/);
   assert.match(queries[0].sql, /limit \$3/);
   assert.deepEqual(queries[0].params, ["trip-1", "限定", 8]);
+});
+
+test("rebuy product suggestions reuse recent history and reference photos", async () => {
+  const queries = [];
+  const database = {
+    async query(sql, params) {
+      queries.push({ sql, params });
+      return {
+        rows: [{
+          created_at: "2026-08-14T08:00:00.000Z",
+          id: "rebuy-1",
+          instructions: "找同款，沒有就不要替代",
+          original_price_jpy: 1500,
+          photos: [{ photo_role: "reference", storage_key: "rebuy-photo-1" }],
+          product_name: "限定包",
+          quantity: 2,
+          sale_price_twd: 480,
+        }],
+      };
+    },
+  };
+
+  const suggestions = await service.listRebuyProductSuggestions(database, {
+    limit: 8,
+    query: "限定",
+  });
+
+  assert.equal(suggestions[0].sourceTaskId, "rebuy-1");
+  assert.equal(suggestions[0].productName, "限定包");
+  assert.equal(suggestions[0].quantity, 2);
+  assert.equal(suggestions[0].instructions, "找同款，沒有就不要替代");
+  assert.deepEqual(suggestions[0].photos, [{ photo_role: "reference", storage_key: "rebuy-photo-1" }]);
+  assert.match(queries[0].sql, /rebuy_task_photos/);
+  assert.match(queries[0].sql, /photo_role = 'reference'/);
+  assert.match(queries[0].sql, /limit \$2/);
+  assert.deepEqual(queries[0].params, ["限定", 8]);
 });
 
 test("helper purchase completion clamps over-reported quantity to requested quantity", async () => {
@@ -3487,6 +3585,146 @@ test("private rebuy report keeps claimed ownership empty", async () => {
   );
 });
 
+test("rebuy checkout writes standard legacy purchase metadata and quote provenance", async () => {
+  const queries = [];
+  const database = fakeDatabase(
+    [
+      { rows: [{ compensation_mode: "hourly", helper_fx_rate: null, hourly_rate_twd: 200, id: "helper-1", is_active: true }] },
+      { rows: [] },
+      {
+        rows: [{
+          assigned_helper_id: "helper-1",
+          checked_out_at: null,
+          claimed_helper_id: null,
+          created_at: "2026-08-14T08:00:00.000Z",
+          helper_report_note: "已買到",
+          id: "rebuy-1",
+          line_community_name: "客人A",
+          original_price_jpy: 1500,
+          product_name: "限定包",
+          reported_quantity: 1,
+          sale_price_twd: 480,
+          source_quote_reply_id: "quote-reply-1",
+          source_quote_task_id: "quote-task-1",
+          source_quote_task_photo_id: "quote-photo-1",
+          status: "reported",
+        }],
+      },
+      {
+        rows: [{
+          assigned_helper_id: "helper-1",
+          departed_at: "2026-08-14T08:00:00.000Z",
+          ended_at: "2026-08-14T08:00:00.000Z",
+          id: "rebuy-trip-1",
+          status: "ended",
+        }],
+      },
+      { rows: [{ id: "purchase-batch-1" }] },
+      {
+        rows: [{
+          id: "purchase-task-1",
+          product_type: "standard",
+          requires_face_check: false,
+          source_quote_reply_id: "quote-reply-1",
+          source_quote_task_id: "quote-task-1",
+          source_quote_task_photo_id: "quote-photo-1",
+          source_rebuy_task_id: "rebuy-1",
+          status: "open",
+          trip_id: "rebuy-trip-1",
+        }],
+      },
+      { rows: [] },
+      {
+        rows: [{
+          completed_quantity: 1,
+          helper_id: "helper-1",
+          id: "purchase-task-1",
+          product_name: "限定包",
+          product_type: "standard",
+          source_rebuy_task_id: "rebuy-1",
+          status: "completed",
+          trip_id: "rebuy-trip-1",
+        }],
+      },
+      { rows: [] },
+      { rows: [{ id: "preview-1" }] },
+      { rows: [] },
+      { rows: [{ product_total_jpy: 1500 }] },
+      { rows: [{ id: "settlement-1", trip_id: "rebuy-trip-1" }] },
+      { rows: [] },
+      { rows: [] },
+    ],
+    queries,
+  );
+
+  const result = await service.checkoutRebuyTasks(database, {
+    authUserId: "user-1",
+    idempotencyKey: "checkout-key-1",
+  });
+
+  assert.equal(result.tripId, "rebuy-trip-1");
+  const purchaseInsert = queries.find((query) =>
+    String(query.sql).includes("insert into helper_app.purchase_tasks"),
+  );
+  assert.ok(purchaseInsert);
+  assert.equal(purchaseInsert.params[2], "standard");
+  assert.equal(purchaseInsert.params[3], "legacy");
+  assert.equal(purchaseInsert.params[5], "quote-task-1");
+  assert.equal(purchaseInsert.params[6], "quote-photo-1");
+  assert.equal(purchaseInsert.params[7], "quote-reply-1");
+  assert.match(
+    queries.find((query) => String(query.sql).includes("left join helper_app.purchase_tasks"))?.sql || "",
+    /left join helper_app\.purchase_tasks/,
+  );
+});
+
+test("gacha purchase tasks cannot be routed into rebuy", async () => {
+  const database = fakeDatabase([
+    {
+      rows: [{
+        id: "purchase-gacha-1",
+        product_type: "gacha",
+        status: "canceled",
+        workflow_version: "gacha_v2",
+      }],
+    },
+  ]);
+
+  await assert.rejects(
+    () => service.createRebuyTask(database, {
+      productName: "扭蛋系列",
+      quantity: 1,
+      sourcePurchaseTaskId: "purchase-gacha-1",
+      visibility: "public",
+    }),
+    (error) => error?.code === "invalid_status" && /扭蛋／盲抽/.test(error.message),
+  );
+});
+
+test("a source purchase cannot have two active rebuy tasks", async () => {
+  const database = fakeDatabase([
+    {
+      rows: [{
+        id: "purchase-1",
+        product_type: "standard",
+        status: "unavailable",
+        workflow_version: "legacy",
+      }],
+    },
+    { rows: [{ id: "rebuy-active-1" }] },
+  ]);
+
+  await assert.rejects(
+    () => service.createRebuyTask(database, {
+      productName: "一般商品",
+      quantity: 1,
+      sourcePurchaseTaskId: "purchase-1",
+      visibility: "public",
+    }),
+    (error) => error?.code === "invalid_status" && /進行中的補買/.test(error.message),
+  );
+});
+
 test("staging review can start only after a trip ends", async () => {
   const database = fakeDatabase([
     {
@@ -3685,6 +3923,10 @@ test("approved staging merge writes main order, source link, and selected photos
       { rows: [{ id: "merge-1", status: "merging", merge_idempotency_key: "merge-key-1" }] },
       { rows: [] },
       { rows: [] },
+      { rows: [{ id: "customer-1", line_community_name: "小明" }] },
+      { rows: [] },
+      { rows: [{ receivable_id: "receivable-1", order_id: "helper_order_748d4ca109ce9a5e6d6eeaff" }] },
+      { rows: [] },
       { rows: [] },
       { rows: [] },
       {
@@ -3694,7 +3936,6 @@ test("approved staging merge writes main order, source link, and selected photos
           status: "merged",
         }],
       },
-      { rows: [] },
       { rows: [] },
     ],
     queries,
@@ -3782,12 +4023,13 @@ test("gacha staging merge maps each item to its deterministic original main orde
       { rows: [{ id: "merge-1", status: "merging", merge_idempotency_key: "merge-key-1" }] },
       { rows: [] },
       { rows: [] },
-      { rows: [] },
       { rows: [{ id: "customer-1", line_community_name: "傑洛米" }] },
       { rows: [] },
-      { rows: [{ template_id: "template-1" }] },
-      { rows: [] },
       { rows: [{ receivable_id: "receivable-1" }] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [] },
+      { rows: [{ template_id: "template-1" }] },
       { rows: [] },
       { rows: [] },
       { rows: [{ id: "merge-1", main_order_ids: ["main-order-1"], status: "merged" }] },

@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Camera, Check, ChevronLeft, ChevronRight, PackageCheck, RefreshCw, ShoppingBag, X } from "lucide-react";
+import { Camera, Check, ChevronDown, ChevronLeft, ChevronRight, PackageCheck, RefreshCw, ShoppingBag, X } from "lucide-react";
 
 import { BackButton } from "../components/BackButton";
 import { EmptyState, InsightBanner, StatusBadge, Surface } from "../components/OperationsUi";
@@ -187,6 +187,19 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
 
   if (activeTaskId) {
     const summaryTask = findSummaryTask(activeTaskId);
+    const gachaBatchTaskIds = getGachaBatchTaskIds(summaryTask);
+    const currentDetailTaskId = activeTask?.id || resolveDetailTaskId(activeTaskId, summaryTask);
+    const currentTaskIndex = gachaBatchTaskIds.indexOf(currentDetailTaskId);
+    const taskNavigation = gachaBatchTaskIds.length > 1 && currentTaskIndex >= 0
+      ? {
+          currentIndex: currentTaskIndex,
+          onNavigate: (direction: -1 | 1) => {
+            const nextTaskId = gachaBatchTaskIds[currentTaskIndex + direction];
+            if (nextTaskId) void openTask(nextTaskId);
+          },
+          total: gachaBatchTaskIds.length,
+        }
+      : undefined;
     return (
       <PurchaseTaskDetail
         error={detailError}
@@ -197,6 +210,7 @@ export function PurchaseTasks({ tripId }: { tripId: string }) {
         onBack={closeTask}
         onLoadAllPhotos={loadAllTaskPhotos}
         onRefresh={() => openTask(activeTaskId)}
+        taskNavigation={taskNavigation}
         onTaskUpdated={updateActiveTask}
       />
     );
@@ -319,6 +333,10 @@ function PurchaseTaskCard({
   const tone = purchaseTaskTone(task);
   const freezeTimer = useRef<number | null>(null);
   const suppressClick = useRef(false);
+  const [batchTasksExpanded, setBatchTasksExpanded] = useState(false);
+  const hasBatchTasks = task.workflow_version === "gacha_v2"
+    && Array.isArray(task.batch_tasks)
+    && task.batch_tasks.length > 1;
   const canFreeze = Boolean(
     onFreezeBatch
     && task.workflow_version === "gacha_v2"
@@ -371,25 +389,42 @@ function PurchaseTaskCard({
         {purchaseProgress(task)}
       </StatusBadge>
       </button>
-      {task.workflow_version === "gacha_v2" && task.batch_tasks?.length > 1 ? (
+      {hasBatchTasks ? (
         <div className="grid gap-1 rounded-b-xl border border-t-0 bg-muted/20 p-2 pt-1">
-          <p className="px-2 text-[11px] font-medium text-muted-foreground">逐任務回報（不顯示 LINE 暱稱）</p>
-          <div className="grid gap-1 sm:grid-cols-2">
-            {task.batch_tasks.map((batchTask: any) => (
-              <button
-                className="flex items-center justify-between rounded-lg border bg-background px-3 py-2 text-left text-sm hover:border-primary/50"
-                key={batchTask.id}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onOpenTask(batchTask.id);
-                }}
-                type="button"
-              >
-                <span>任務 {String(batchTask.task_number).padStart(2, "0")} · {batchTask.quantity} 顆</span>
-                <span className="text-xs text-muted-foreground">{batchTask.status === "completed" ? "已回報" : "待回報"}</span>
-              </button>
-            ))}
-          </div>
+          <button
+            aria-controls={`purchase-batch-tasks-${task.id}`}
+            aria-expanded={batchTasksExpanded}
+            className="flex items-center justify-between gap-3 rounded-lg px-2 py-1 text-left text-xs font-medium text-muted-foreground hover:bg-background/70 hover:text-foreground"
+            type="button"
+            onClick={(event) => {
+              event.stopPropagation();
+              setBatchTasksExpanded((expanded) => !expanded);
+            }}
+          >
+            <span>逐任務回報（{task.batch_tasks.length} 個，不顯示 LINE 暱稱）</span>
+            <span className="inline-flex shrink-0 items-center gap-1">
+              {batchTasksExpanded ? "收合" : "展開"}
+              <ChevronDown className={`size-4 transition-transform ${batchTasksExpanded ? "rotate-180" : ""}`} aria-hidden="true" />
+            </span>
+          </button>
+          {batchTasksExpanded ? (
+            <div className="grid gap-1 sm:grid-cols-2" id={`purchase-batch-tasks-${task.id}`}>
+              {task.batch_tasks.map((batchTask: any) => (
+                <button
+                  className="flex items-center justify-between rounded-lg border bg-background px-3 py-2 text-left text-sm hover:border-primary/50"
+                  key={batchTask.id}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onOpenTask(batchTask.id);
+                  }}
+                  type="button"
+                >
+                  <span>任務 {String(batchTask.task_number).padStart(2, "0")} · {batchTask.quantity} 顆</span>
+                  <span className="text-xs text-muted-foreground">{batchTask.status === "completed" ? "已回報" : "待回報"}</span>
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>
@@ -405,6 +440,7 @@ function PurchaseTaskDetail({
   onLoadAllPhotos,
   onRefresh,
   task,
+  taskNavigation,
   onTaskUpdated,
 }: {
   allPhotosLoaded: boolean;
@@ -416,6 +452,11 @@ function PurchaseTaskDetail({
   onRefresh: () => void;
   onTaskUpdated: (task: any) => void;
   task: any | null;
+  taskNavigation?: {
+    currentIndex: number;
+    onNavigate: (direction: -1 | 1) => void;
+    total: number;
+  };
 }) {
   const completed = task ? isCompletedTask(task) : false;
   const productPhotos = task ? productPurchasePhotos(task.photos || []) : [];
@@ -432,6 +473,33 @@ function PurchaseTaskDetail({
   return (
     <Surface className="grid gap-3">
       <BackButton label="返回任務列表" onClick={onBack} type="button" />
+      {taskNavigation ? (
+        <div className="grid grid-cols-[auto_1fr_auto] items-center gap-2">
+          <Button
+            aria-label="上一個採買任務"
+            disabled={loading || taskNavigation.currentIndex === 0}
+            size="sm"
+            type="button"
+            variant="outline"
+            onClick={() => taskNavigation.onNavigate(-1)}
+          >
+            <ChevronLeft className="size-4" />
+          </Button>
+          <strong className="text-center text-sm">
+            任務 {String(taskNavigation.currentIndex + 1).padStart(2, "0")} / {String(taskNavigation.total).padStart(2, "0")}
+          </strong>
+          <Button
+            aria-label="下一個採買任務"
+            disabled={loading || taskNavigation.currentIndex >= taskNavigation.total - 1}
+            size="sm"
+            type="button"
+            variant="outline"
+            onClick={() => taskNavigation.onNavigate(1)}
+          >
+            <ChevronRight className="size-4" />
+          </Button>
+        </div>
+      ) : null}
       {loading && !task ? (
         <div className="grid gap-3" role="status" aria-label="正在載入採買任務">
           <div className="aspect-square animate-pulse rounded-lg bg-muted" />
@@ -1671,6 +1739,13 @@ function resolveDetailTaskId(taskId: string, summaryTask: any | undefined) {
   if (!summaryTask) return taskId;
   if (summaryTask.batch_tasks?.some((item: any) => item.id === taskId)) return taskId;
   return summaryTask.representative_task_id || taskId;
+}
+
+function getGachaBatchTaskIds(summaryTask: any | undefined) {
+  if (summaryTask?.workflow_version !== "gacha_v2" || !Array.isArray(summaryTask.batch_tasks)) return [];
+  return summaryTask.batch_tasks
+    .map((item: any) => item.id)
+    .filter((id: any): id is string => typeof id === "string" && id.length > 0);
 }
 
 function shouldLoadReturnedPhotos(task: any | undefined) {
