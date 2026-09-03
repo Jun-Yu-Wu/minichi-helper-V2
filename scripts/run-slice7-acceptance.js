@@ -63,7 +63,8 @@ async function createFixture(supabase) {
   try {
     const helper = await insertHelper(client, user, "Codex Slice 7 Helper");
     const trip = await insertActiveTrip(client, helper.id, todayInTokyo(), "Codex Slice 7 Merge");
-    return { helper, trip, user };
+    const customer = await insertCustomer(client, `Codex Slice 7 Customer ${stamp}`);
+    return { customer, helper, trip, user };
   } catch (error) {
     await cleanupFixture(supabase, { user }, []);
     throw error;
@@ -80,6 +81,16 @@ async function insertHelper(client, user, displayName) {
      values ($1, $2, $3, 'hourly', 240, $2, '812', '1234567890', 'Tokyo', true)
      returning id`,
     [user.id, displayName, user.email],
+  );
+  return result.rows[0];
+}
+
+async function insertCustomer(client, lineCommunityName) {
+  const result = await client.query(
+    `insert into main.customers (line_community_name)
+     values ($1)
+     returning id, line_community_name`,
+    [lineCommunityName],
   );
   return result.rows[0];
 }
@@ -139,9 +150,31 @@ async function cleanupFixture(supabase, fixture, storageKeys = []) {
       );
       storageKeys.push(...mainPhotos.rows.map((row) => row.storage_key).filter(Boolean));
       await client.query("delete from audit.merge_object_copies where merge_job_id in (select id::text from helper_app.staging_merge_jobs where trip_id = $1)", [tripId]);
+      await client.query(
+        `delete from main.gacha_order_item_photos
+         where gacha_item_id in (
+           select gacha_item_id from main.gacha_order_items
+           where original_order_id in (
+             select order_id from main.orders
+             where merge_job_id in (select id::text from helper_app.staging_merge_jobs where trip_id = $1)
+           )
+         )`,
+        [tripId],
+      );
+      await client.query(
+        `delete from main.gacha_order_items
+         where original_order_id in (
+           select order_id from main.orders
+           where merge_job_id in (select id::text from helper_app.staging_merge_jobs where trip_id = $1)
+         )`,
+        [tripId],
+      );
       await client.query("delete from main.order_photos where order_id in (select order_id from main.orders where merge_job_id in (select id::text from helper_app.staging_merge_jobs where trip_id = $1))", [tripId]);
       await client.query("delete from main.order_source_links where merge_job_id in (select id::text from helper_app.staging_merge_jobs where trip_id = $1)", [tripId]);
       await client.query("delete from main.orders where merge_job_id in (select id::text from helper_app.staging_merge_jobs where trip_id = $1)", [tripId]);
+      if (fixture.customer?.id) {
+        await client.query("delete from main.customers where id = $1", [fixture.customer.id]);
+      }
       await client.query("delete from helper_app.staging_merge_jobs where trip_id = $1", [tripId]);
       await client.query("delete from helper_app.settlement_line_items where settlement_id in (select id from helper_app.settlements where trip_id = $1)", [tripId]);
       await client.query("delete from helper_app.settlements where trip_id = $1", [tripId]);
@@ -248,7 +281,7 @@ async function main() {
       customerConfirmed: true,
       exclusionReason: "",
       isExcluded: false,
-      lineCommunityName: order.line_community_name,
+      lineCommunityName: fixture.customer.line_community_name,
       originalPriceJpy: String(order.original_price_jpy || 0),
       productName: order.product_name,
       quantity: String(order.quantity),
@@ -264,27 +297,59 @@ async function main() {
     assert(approved.status === "approved", "Merge job was not approved.");
     assert(approved.approved_snapshot.orders[0].photos.length === 1, "Approval snapshot did not freeze only selected photos.");
 
-    const merged = await service.mergeApprovedStagingJob(pool, {
-      actorUserId: fixture.user.id,
-      expectedVersion: approved.version,
-      idempotencyKey: `slice7-merge-${approved.id}-${approved.version}`,
-      mergeJobId: approved.id,
-      r2Store: r2,
-    });
-    assert(merged.status === "merged", "Merge job was not marked merged.");
-
-    const client = new Client(databaseConfig());
-    await client.connect();
+    const mergeClient = new Client(databaseConfig());
+    await mergeClient.connect();
+    let committedTransactionCount = 0;
+    const mergeDatabase = {
+      async connect() {
+        return {
+          async query(sql, params) {
+            if (sql === "commit" && committedTransactionCount > 0) {
+              // Force deferred constraints to run, then keep the transaction
+              // open so this acceptance can roll it back without leaving
+              // append-only finance rows in the target database.
+              await mergeClient.query("set constraints all immediate");
+              return { rows: [] };
+            }
+            const result = await mergeClient.query(sql, params);
+            if (sql === "commit") committedTransactionCount += 1;
+            return result;
+          },
+          release() {},
+        };
+      },
+    };
     try {
-      const mainOrder = await client.query(
-        `select order_id, line_community_name, product_name, quantity, total_price
+      const merged = await service.mergeApprovedStagingJob(mergeDatabase, {
+        actorUserId: fixture.user.id,
+        expectedVersion: approved.version,
+        idempotencyKey: `slice7-merge-${approved.id}-${approved.version}`,
+        mergeJobId: approved.id,
+        r2Store: r2,
+      });
+      assert(merged.status === "merged", "Merge job was not marked merged.");
+
+      const mainOrder = await mergeClient.query(
+        `select order_id, customer_id, customer_resolution_status,
+                line_community_name, product_name, quantity, total_price
          from main.orders
          where merge_job_id = $1`,
         [approved.id],
       );
       assert(mainOrder.rows.length === 1, "Merge did not create exactly one main order.");
       assert(Number(mainOrder.rows[0].total_price) === 360, "Main order total price is incorrect.");
-      const mainPhotos = await client.query(
+      assert(mainOrder.rows[0].customer_id === fixture.customer.id, "Main order customer was not resolved.");
+      assert(mainOrder.rows[0].customer_resolution_status === "resolved", "Main order customer status is not resolved.");
+      const receivable = await mergeClient.query(
+        `select customer_id, amount_twd, receivable_type
+         from main.order_receivables
+         where order_id = $1`,
+        [mainOrder.rows[0].order_id],
+      );
+      assert(receivable.rows.length === 1, "Canonical product receivable was not created.");
+      assert(receivable.rows[0].customer_id === fixture.customer.id, "Receivable customer does not match the order.");
+      assert(receivable.rows[0].receivable_type === "product", "Merge created the wrong receivable type.");
+      const mainPhotos = await mergeClient.query(
         `select storage_key, staging_storage_key, label
          from main.order_photos
          where order_id = $1`,
@@ -296,7 +361,7 @@ async function main() {
       assert(finalKey.startsWith(`main-orders/${approved.id}/`), "Final photo key is not deterministic under main-orders.");
       assert(mainPhotos.rows[0].staging_storage_key === primaryPhoto.storageKey, "Main photo did not preserve staging source key.");
       assert(mainPhotos.rows[0].label === "正面", "Main photo label was not preserved.");
-      const copyAudit = await client.query(
+      const copyAudit = await mergeClient.query(
         `select count(*)::int as count
          from audit.merge_object_copies
          where merge_job_id = $1 and destination_key = $2`,
@@ -307,7 +372,8 @@ async function main() {
       const copiedObject = await fetch(signed);
       assert(copiedObject.ok, `Copied R2 object was not readable: ${copiedObject.status}`);
     } finally {
-      await client.end();
+      await mergeClient.query("rollback").catch(() => {});
+      await mergeClient.end();
     }
 
     console.log(JSON.stringify({

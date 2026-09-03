@@ -5118,18 +5118,6 @@ async function resolveHelperMergeCustomers(client, orderRows) {
     };
   });
 
-  await client.query(
-    "update main.orders o " +
-    "set customer_id = input.customer_id, " +
-    "customer_resolution_status = 'resolved', " +
-    "line_community_name = input.line_community_name, " +
-    "row_version = o.row_version + 1, updated_at = now() " +
-    "from jsonb_to_recordset($1::jsonb) as input(" +
-    "order_id text, customer_id uuid, line_community_name text) " +
-    "where o.order_id = input.order_id",
-    [JSON.stringify(resolvedRows)],
-  );
-
   return new Map(resolvedRows.map((row) => [
     row.order_id,
     customersByName.get(normalizeCustomerName(row.line_community_name)),
@@ -5210,6 +5198,23 @@ async function writeMergeRows(
     sourceLinkRows,
   },
 ) {
+    const customerByOrderId = await resolveHelperMergeCustomers(client, orderRows);
+    const resolvedOrderRows = orderRows.map((order) => {
+      const customer = customerByOrderId.get(order.order_id);
+      if (!customer) {
+        return {
+          ...order,
+          customer_id: null,
+          customer_resolution_status: "unresolved",
+        };
+      }
+      return {
+        ...order,
+        customer_id: customer.id,
+        customer_resolution_status: "resolved",
+        line_community_name: customer.line_community_name,
+      };
+    });
     if (orderRows.length) {
       await client.query(
         `insert into main.orders
@@ -5218,13 +5223,15 @@ async function writeMergeRows(
             trip_id, helper_id, order_date, line_community_name, product_name,
             appearance_notes, quantity, price_jpy, price_twd, total_price,
             search_keywords, source_trip, order_status, source_type,
-            receivable_total_twd, processing_status, notes)
+            receivable_total_twd, processing_status, notes,
+            customer_id, customer_resolution_status)
          select order_id, staging_order_id, merge_job_id, source_purchase_task_id,
                 source_quote_task_id, source_quote_photo_id, source_rebuy_task_id,
                 trip_id, helper_id, order_date, line_community_name, product_name,
                 appearance_notes, quantity, price_jpy, price_twd, total_price,
                 '', source_trip, '商品訂購成功', 'helper_merge',
-                receivable_total_twd, '商品訂購成功', notes
+                receivable_total_twd, '商品訂購成功', notes,
+                customer_id, customer_resolution_status
          from jsonb_to_recordset($1::jsonb) as input(
            order_id text, staging_order_id text, merge_job_id text,
            source_purchase_task_id text, source_quote_task_id text,
@@ -5233,10 +5240,16 @@ async function writeMergeRows(
            line_community_name text, product_name text, appearance_notes text,
            quantity integer, price_jpy integer, price_twd integer,
            total_price integer, source_trip text,
-           receivable_total_twd integer, notes text
+           receivable_total_twd integer, notes text,
+           customer_id uuid, customer_resolution_status text
          )
          on conflict (order_id) do update
-         set line_community_name = excluded.line_community_name,
+         set customer_id = coalesce(excluded.customer_id, main.orders.customer_id),
+             customer_resolution_status = case
+               when excluded.customer_id is not null then excluded.customer_resolution_status
+               else main.orders.customer_resolution_status
+             end,
+             line_community_name = excluded.line_community_name,
              product_name = excluded.product_name,
              appearance_notes = excluded.appearance_notes,
              quantity = excluded.quantity,
@@ -5245,7 +5258,7 @@ async function writeMergeRows(
              total_price = excluded.total_price,
              receivable_total_twd = excluded.receivable_total_twd,
              updated_at = now()`,
-        [JSON.stringify(orderRows)],
+        [JSON.stringify(resolvedOrderRows)],
       );
       await client.query(
         `insert into main.order_source_links
@@ -5268,7 +5281,6 @@ async function writeMergeRows(
         [JSON.stringify(sourceLinkRows)],
       );
     }
-    const customerByOrderId = await resolveHelperMergeCustomers(client, orderRows);
     await insertHelperMergeReceivables(client, {
       actorUserId,
       customerByOrderId,

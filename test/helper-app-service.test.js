@@ -3921,9 +3921,8 @@ test("approved staging merge writes main order, source link, and selected photos
       },
       { rows: [] },
       { rows: [{ id: "merge-1", status: "merging", merge_idempotency_key: "merge-key-1" }] },
-      { rows: [] },
-      { rows: [] },
       { rows: [{ id: "customer-1", line_community_name: "小明" }] },
+      { rows: [] },
       { rows: [] },
       { rows: [{ receivable_id: "receivable-1", order_id: "helper_order_748d4ca109ce9a5e6d6eeaff" }] },
       { rows: [] },
@@ -3954,7 +3953,19 @@ test("approved staging merge writes main order, source link, and selected photos
   });
 
   assert.equal(result.status, "merged");
-  assert.equal(queries.some((query) => String(query.sql).includes("insert into main.orders")), true);
+  const mainOrderInsert = queries.find((query) => String(query.sql).includes("insert into main.orders"));
+  assert.ok(mainOrderInsert);
+  const mainOrder = JSON.parse(mainOrderInsert.params[0])[0];
+  assert.equal(mainOrder.customer_id, "customer-1");
+  assert.equal(mainOrder.customer_resolution_status, "resolved");
+  assert.equal(mainOrder.line_community_name, "小明");
+  const customerLookupIndex = queries.findIndex((query) => String(query.sql).includes("from main.customers"));
+  const mainOrderInsertIndex = queries.indexOf(mainOrderInsert);
+  assert.ok(customerLookupIndex >= 0 && customerLookupIndex < mainOrderInsertIndex);
+  assert.equal(
+    queries.some((query) => String(query.sql).includes("update main.orders o") && String(query.sql).includes("customer_id = input.customer_id")),
+    false,
+  );
   assert.equal(queries.some((query) => String(query.sql).includes("insert into main.order_source_links")), true);
   assert.equal(queries.some((query) => String(query.sql).includes("insert into main.order_photos")), true);
   assert.deepEqual(copied, [{
@@ -4021,9 +4032,8 @@ test("gacha staging merge maps each item to its deterministic original main orde
       },
       { rows: [] },
       { rows: [{ id: "merge-1", status: "merging", merge_idempotency_key: "merge-key-1" }] },
-      { rows: [] },
-      { rows: [] },
       { rows: [{ id: "customer-1", line_community_name: "傑洛米" }] },
+      { rows: [] },
       { rows: [] },
       { rows: [{ receivable_id: "receivable-1" }] },
       { rows: [] },
@@ -4052,6 +4062,8 @@ test("gacha staging merge maps each item to its deterministic original main orde
   assert.ok(gachaItemInsert);
   const mainOrder = JSON.parse(mainOrderInsert.params[0])[0];
   const gachaItem = JSON.parse(gachaItemInsert.params[0])[0];
+  assert.equal(mainOrder.customer_id, "customer-1");
+  assert.equal(mainOrder.customer_resolution_status, "resolved");
   assert.equal(gachaItem.original_order_id, mainOrder.order_id);
   assert.equal(gachaItem.order_id, mainOrder.order_id);
 });
